@@ -33,6 +33,15 @@ pub(crate) fn transition_task(board_dir: &Path, task_id: u32, target: &str) -> R
     Ok(())
 }
 
+pub(crate) fn block_task_with_reason(board_dir: &Path, task_id: u32, reason: &str) -> Result<()> {
+    let task_path = find_task_path(board_dir, task_id)?;
+    update_task_frontmatter(&task_path, |mapping| {
+        set_status(mapping, TaskState::Blocked);
+        set_blocked_reason(mapping, Some(reason), Some(reason));
+    })?;
+    Ok(())
+}
+
 pub fn cmd_assign(
     board_dir: &Path,
     task_id: u32,

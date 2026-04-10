@@ -412,7 +412,7 @@ impl TeamDaemon {
         }
     }
 
-    fn preserve_work_before_shutdown(&self) {
+    fn preserve_work_before_shutdown(&mut self) {
         let names: Vec<String> = self
             .config
             .members

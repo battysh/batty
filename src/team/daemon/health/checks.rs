@@ -194,7 +194,7 @@ impl TeamDaemon {
                     &base,
                     &commit_message,
                     Duration::from_secs(5),
-                    crate::worktree::PreserveFailureMode::ForceReset,
+                    crate::worktree::PreserveFailureMode::SkipReset,
                 ) {
                     Err(error) => {
                         warn!(
@@ -202,8 +202,14 @@ impl TeamDaemon {
                             error = %error,
                             "failed to reset worktree after merge conflict recovery"
                         );
+                        self.report_preserve_failure(
+                            name,
+                            self.active_task_id(name),
+                            "merge-conflict recovery",
+                            &error.to_string(),
+                        );
                     }
-                    Ok(reason) => {
+                    Ok(reason) if reason.reset_performed() => {
                         info!(
                             member = %name,
                             reset_reason = reason.as_str(),
@@ -225,6 +231,19 @@ impl TeamDaemon {
                             );
                             self.clear_active_task(name);
                         }
+                    }
+                    Ok(reason) => {
+                        self.report_preserve_failure(
+                            name,
+                            self.active_task_id(name),
+                            "merge-conflict recovery",
+                            reason.as_str(),
+                        );
+                        self.record_orchestrator_action(format!(
+                            "health: blocked {} merge-conflict recovery because dirty worktree could not be preserved ({})",
+                            name,
+                            reason.as_str()
+                        ));
                     }
                 }
                 continue;
@@ -290,20 +309,57 @@ impl TeamDaemon {
                         branch = %current_branch,
                         "stale branch detected; resetting worktree"
                     );
-                    if let Err(error) =
-                        crate::worktree::reset_worktree_to_base(&worktree_path, &base)
-                    {
-                        warn!(
-                            member = %name,
-                            error = %error,
-                            "failed to auto-reset stale worktree; continuing"
-                        );
-                        continue;
+                    let commit_message =
+                        format!("wip: auto-save before worktree reset [{current_branch}]");
+                    match crate::worktree::reset_worktree_to_base_with_options(
+                        &worktree_path,
+                        &base,
+                        &commit_message,
+                        Duration::from_secs(5),
+                        crate::worktree::PreserveFailureMode::SkipReset,
+                    ) {
+                        Ok(reason) if reason.reset_performed() => {
+                            self.record_orchestrator_action(format!(
+                                "runtime: auto-reset {}'s worktree — branch {} already on main ({})",
+                                name,
+                                current_branch,
+                                reason.as_str()
+                            ));
+                        }
+                        Ok(reason) => {
+                            self.report_preserve_failure(
+                                name,
+                                self.active_task_id(name),
+                                "stale-branch recovery",
+                                reason.as_str(),
+                            );
+                            self.record_orchestrator_action(format!(
+                                "blocked recovery: stale-branch recovery for {} blocked ({})",
+                                name,
+                                reason.as_str()
+                            ));
+                            continue;
+                        }
+                        Err(error) => {
+                            warn!(
+                                member = %name,
+                                error = %error,
+                                "failed to auto-reset stale worktree; continuing"
+                            );
+                            self.report_preserve_failure(
+                                name,
+                                self.active_task_id(name),
+                                "stale-branch recovery",
+                                &error.to_string(),
+                            );
+                            self.record_orchestrator_action(format!(
+                                "blocked recovery: stale-branch recovery for {} failed ({})",
+                                name,
+                                error
+                            ));
+                            continue;
+                        }
                     }
-                    self.record_orchestrator_action(format!(
-                        "runtime: auto-reset {}'s worktree — branch {} already on main",
-                        name, current_branch
-                    ));
                 }
                 Ok(false) => { /* branch has unique commits; not stale */ }
                 Err(error) => {
@@ -899,6 +955,36 @@ mod tests {
                 worktree_dir.to_str().unwrap(),
             ])
             .output();
+    }
+
+    #[test]
+    fn reconcile_blocks_dirty_merged_branch_when_preserve_fails() {
+        let (_tmp, repo, worktree_dir) = setup_reconcile_scenario("eng-blocked");
+        let task_branch = "eng-blocked-42";
+        std::fs::write(worktree_dir.join("dirty.txt"), "tracked dirty work\n").unwrap();
+        git_ok(&worktree_dir, &["add", "dirty.txt"]);
+        let git_dir = PathBuf::from(git_stdout(&worktree_dir, &["rev-parse", "--git-dir"]));
+        let git_dir = if git_dir.is_absolute() {
+            git_dir
+        } else {
+            worktree_dir.join(git_dir)
+        };
+        std::fs::write(git_dir.join("index.lock"), "locked\n").unwrap();
+
+        let members = vec![
+            manager_member("manager", None),
+            engineer_member("eng-blocked", Some("manager"), true),
+        ];
+        let states = HashMap::from([("eng-blocked".to_string(), MemberState::Idle)]);
+        let mut daemon = TestDaemonBuilder::new(&repo)
+            .members(members)
+            .states(states)
+            .build();
+
+        daemon.is_git_repo = true;
+        daemon.maybe_reconcile_stale_worktrees().unwrap();
+
+        assert_eq!(git_stdout(&worktree_dir, &["rev-parse", "--abbrev-ref", "HEAD"]), task_branch);
     }
 
     #[test]

@@ -1074,6 +1074,16 @@ pub(crate) fn preserve_worktree_with_commit(
     Ok(true)
 }
 
+pub(crate) fn dirty_worktree_preservation_blocked_reason(
+    worktree_dir: &Path,
+    context: &str,
+) -> String {
+    format!(
+        "Batty could not safely auto-save dirty worktree {} before {context}. Commit or clean the lane manually.",
+        worktree_dir.display()
+    )
+}
+
 fn auto_clean_worktree(worktree_dir: &Path) -> Result<()> {
     let branch = retry_git(|| git_cmd::rev_parse_branch(worktree_dir)).unwrap_or_default();
     let message = format!("wip: auto-save before worktree reset [{branch}]");
@@ -1081,8 +1091,14 @@ fn auto_clean_worktree(worktree_dir: &Path) -> Result<()> {
         worktree_dir,
         &message,
         Duration::from_secs(5),
-        crate::worktree::PreserveFailureMode::ForceReset,
+        crate::worktree::PreserveFailureMode::SkipReset,
     )?;
+    if reason == crate::worktree::WorktreeResetReason::PreserveFailedResetSkipped {
+        bail!(
+            "{}",
+            dirty_worktree_preservation_blocked_reason(worktree_dir, "dispatch/reset recovery")
+        );
+    }
     info!(
         worktree = %worktree_dir.display(),
         reset_reason = reason.as_str(),
@@ -2786,6 +2802,45 @@ mod tests {
             git_stdout(&wt_dir, &["show", "HEAD:untracked.txt"]),
             "untracked work"
         );
+    }
+
+    #[test]
+    fn auto_clean_worktree_blocks_when_preserve_fails() {
+        let Some(_path_lock) = git_test_guard() else {
+            return;
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp);
+        let wt_dir = repo.join(".batty").join("worktrees").join("eng-blocked");
+        let team_config_dir = repo.join(".batty").join("team_config");
+
+        prepare_engineer_assignment_worktree(
+            &repo,
+            &wt_dir,
+            "eng-blocked",
+            "eng-blocked/77",
+            &team_config_dir,
+        )
+        .unwrap();
+
+        std::fs::write(wt_dir.join("tracked.txt"), "tracked dirty work\n").unwrap();
+        git_ok(&wt_dir, &["add", "tracked.txt"]);
+        let git_dir = PathBuf::from(git_stdout(&wt_dir, &["rev-parse", "--git-dir"]));
+        let git_dir = if git_dir.is_absolute() {
+            git_dir
+        } else {
+            wt_dir.join(git_dir)
+        };
+        std::fs::write(git_dir.join("index.lock"), "locked\n").unwrap();
+
+        let error = auto_clean_worktree(&wt_dir).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("could not safely auto-save dirty worktree"),
+            "expected explicit preservation blocker, got: {error}"
+        );
+        assert_eq!(current_worktree_branch(&wt_dir).unwrap(), "eng-blocked/77");
     }
 
     #[test]
