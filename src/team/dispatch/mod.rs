@@ -165,6 +165,16 @@ impl TeamDaemon {
                 "Skipping worktree setup for {engineer}: use_worktrees=false"
             );
         }
+        if use_worktrees && let Some(mismatch) = self.claimed_task_branch_mismatch(engineer)? {
+            self.alert_claimed_task_branch_mismatch(engineer, &mismatch)?;
+            bail!(
+                "engineer '{}' worktree is on '{}' but claimed task #{} expects '{}'; correct the branch manually before dispatch",
+                engineer,
+                mismatch.current_branch,
+                mismatch.task_id,
+                mismatch.expected_branch
+            );
+        }
         let task_branch = use_worktrees.then(|| engineer_task_branch_name(engineer, task, task_id));
         let work_dir = if let Some(task_branch) = task_branch.as_deref() {
             let work_dir = project_root.join(".batty").join("worktrees").join(engineer);
