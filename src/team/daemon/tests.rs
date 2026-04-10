@@ -4857,6 +4857,40 @@ fn binary_fingerprint_capture_missing_file_returns_error() {
 }
 
 #[test]
+fn daemon_frontmatter_repair_helper_repairs_hidden_task_and_emits_event() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = init_git_repo(&tmp, "daemon-frontmatter-repair");
+    let tasks_dir = repo
+        .join(".batty")
+        .join("team_config")
+        .join("board")
+        .join("tasks");
+    std::fs::create_dir_all(&tasks_dir).unwrap();
+    let task_path = tasks_dir.join("041-hidden-active.md");
+    std::fs::write(
+        &task_path,
+        "---\nid: 41\ntitle: Hidden active task\nstatus: in-progress\npriority: high\nclaimed_by: eng-1\nblocked: waiting on reviewer\nclass: standard\n---\n",
+    )
+    .unwrap();
+
+    let mut daemon = TestDaemonBuilder::new(&repo).build();
+
+    daemon.repair_malformed_board_frontmatter().unwrap();
+
+    let repaired = std::fs::read_to_string(&task_path).unwrap();
+    assert!(repaired.contains("blocked: true"));
+    assert!(repaired.contains("block_reason: waiting on reviewer"));
+    assert!(repaired.contains("blocked_on: waiting on reviewer"));
+
+    let events =
+        std::fs::read_to_string(repo.join(".batty").join("team_config").join("events.jsonl"))
+            .unwrap_or_default();
+    assert!(events.contains("\"event\":\"state_reconciliation\""));
+    assert!(events.contains("\"reason\":\"task_frontmatter_repair\""));
+    assert!(events.contains("\"task\":\"41\""));
+}
+
+#[test]
 fn load_dispatch_queue_graceful_when_no_state() {
     let tmp = tempfile::tempdir().unwrap();
     let queue = load_dispatch_queue_snapshot(tmp.path());

@@ -31,7 +31,34 @@ impl TeamDaemon {
                 board_dir.display()
             ));
         }
+        self.repair_malformed_board_frontmatter()?;
         self.validate_member_panes_on_startup();
+        Ok(())
+    }
+
+    pub(in super::super) fn repair_malformed_board_frontmatter(&mut self) -> Result<()> {
+        let board_dir = board_dir(&self.config.project_root);
+        for repair in crate::team::task_cmd::repair_board_frontmatter_compat(&board_dir)? {
+            info!(
+                task_id = ?repair.task_id,
+                status = repair.status.as_deref().unwrap_or("unknown"),
+                path = %repair.path.display(),
+                "repaired malformed task frontmatter during daemon startup preflight"
+            );
+            let task_label = repair
+                .task_id
+                .map(|task_id| format!("#{task_id}"))
+                .unwrap_or_else(|| repair.path.display().to_string());
+            let reason_suffix = repair
+                .reason
+                .as_deref()
+                .map(|reason| format!(" ({reason})"))
+                .unwrap_or_default();
+            self.record_orchestrator_action(format!(
+                "startup: repaired malformed task frontmatter for {task_label}{reason_suffix}"
+            ));
+            self.record_state_reconciliation(None, repair.task_id, "task_frontmatter_repair");
+        }
         Ok(())
     }
 
@@ -147,6 +174,34 @@ mod tests {
         assert!(ensure_board_initialized(&repo).unwrap());
         assert!(board_path.join("tasks").is_dir());
         assert!(!ensure_board_initialized(&repo).unwrap());
+    }
+
+    #[test]
+    fn startup_preflight_repairs_malformed_hidden_task_frontmatter() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "startup_board_repair");
+        let task_path = board_dir(&repo).join("tasks").join("041-hidden-active.md");
+        std::fs::create_dir_all(task_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &task_path,
+            "---\nid: 41\ntitle: Hidden active task\nstatus: in-progress\npriority: high\nclaimed_by: eng-1\nblocked: waiting on reviewer\nclass: standard\n---\n",
+        )
+        .unwrap();
+
+        let mut daemon = TestDaemonBuilder::new(&repo).build();
+
+        daemon.repair_malformed_board_frontmatter().unwrap();
+
+        let content = std::fs::read_to_string(&task_path).unwrap();
+        assert!(content.contains("blocked: true"));
+        assert!(content.contains("block_reason: waiting on reviewer"));
+        assert!(content.contains("blocked_on: waiting on reviewer"));
+
+        let events_path = repo.join(".batty").join("team_config").join("events.jsonl");
+        let events = std::fs::read_to_string(events_path).unwrap_or_default();
+        assert!(events.contains("\"event\":\"state_reconciliation\""));
+        assert!(events.contains("\"reason\":\"task_frontmatter_repair\""));
+        assert!(events.contains("\"task\":\"41\""));
     }
 
     #[test]

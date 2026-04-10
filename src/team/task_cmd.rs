@@ -600,45 +600,50 @@ fn set_blocked_reason(mapping: &mut Mapping, reason: Option<&str>, blocked_on: O
     set_optional_string(mapping, "blocked_on", blocked_on.or(reason));
 }
 
-pub(crate) fn normalize_blocked_frontmatter(task_path: &Path) -> Result<bool> {
-    let mut changed = false;
-    update_task_frontmatter(task_path, |mapping| {
-        let blocked_value = mapping.get(yaml_key("blocked")).cloned();
-        let block_reason = mapping
-            .get(yaml_key("block_reason"))
-            .and_then(Value::as_str)
-            .map(str::to_string);
-        let blocked_on = mapping
-            .get(yaml_key("blocked_on"))
-            .and_then(Value::as_str)
-            .map(str::to_string);
-        let status_is_blocked = mapping
-            .get(yaml_key("status"))
-            .and_then(Value::as_str)
-            .is_some_and(|status| status == "blocked");
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TaskFrontmatterRepair {
+    pub(crate) task_id: Option<u32>,
+    pub(crate) status: Option<String>,
+    pub(crate) reason: Option<String>,
+    pub(crate) path: PathBuf,
+}
 
-        let legacy_reason = match blocked_value {
-            Some(Value::String(reason)) if !reason.trim().is_empty() => Some(reason),
-            Some(Value::Bool(true)) => block_reason.clone().or(blocked_on.clone()),
-            Some(Value::Bool(false)) => None,
-            _ => block_reason.clone().or(blocked_on.clone()),
-        };
+pub(crate) fn normalize_blocked_frontmatter(
+    task_path: &Path,
+) -> Result<Option<TaskFrontmatterRepair>> {
+    if !crate::task::normalize_blocked_frontmatter(task_path)? {
+        return Ok(None);
+    }
 
-        if status_is_blocked && legacy_reason.is_some() {
-            let desired_reason = legacy_reason.as_deref();
-            let desired_blocked_on = blocked_on.as_deref().or(desired_reason).map(str::to_string);
-            let needs_rewrite =
-                !matches!(mapping.get(yaml_key("blocked")), Some(Value::Bool(true)))
-                    || block_reason.as_deref() != desired_reason
-                    || mapping.get(yaml_key("blocked_on")).and_then(Value::as_str)
-                        != desired_blocked_on.as_deref();
-            if needs_rewrite {
-                set_blocked_reason(mapping, desired_reason, desired_blocked_on.as_deref());
-                changed = true;
-            }
+    let task = Task::from_file(task_path)?;
+    Ok(Some(TaskFrontmatterRepair {
+        task_id: Some(task.id),
+        status: Some(task.status),
+        reason: task.blocked,
+        path: task_path.to_path_buf(),
+    }))
+}
+
+pub(crate) fn repair_board_frontmatter_compat(
+    board_dir: &Path,
+) -> Result<Vec<TaskFrontmatterRepair>> {
+    let tasks_dir = board_dir.join("tasks");
+    let Ok(entries) = std::fs::read_dir(&tasks_dir) else {
+        return Ok(Vec::new());
+    };
+
+    let mut repairs = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("md") {
+            continue;
         }
-    })?;
-    Ok(changed)
+        if let Some(repair) = normalize_blocked_frontmatter(&path)? {
+            repairs.push(repair);
+        }
+    }
+
+    Ok(repairs)
 }
 
 pub(crate) fn set_optional_string(mapping: &mut Mapping, key: &str, value: Option<&str>) {
@@ -810,14 +815,57 @@ mod tests {
         )
         .unwrap();
 
-        let changed = normalize_blocked_frontmatter(&task_path).unwrap();
+        let repair = normalize_blocked_frontmatter(&task_path).unwrap();
 
-        assert!(changed);
+        assert_eq!(repair.as_ref().and_then(|entry| entry.task_id), Some(14));
         let content = std::fs::read_to_string(&task_path).unwrap();
         assert!(content.contains("blocked: true"));
         assert!(content.contains("block_reason: legacy verification reason"));
         let task = Task::from_file(&task_path).unwrap();
         assert_eq!(task.blocked.as_deref(), Some("legacy verification reason"));
+    }
+
+    #[test]
+    fn normalize_blocked_frontmatter_repairs_hidden_in_progress_task_without_changing_status() {
+        let tmp = tempfile::tempdir().unwrap();
+        let board_dir = tmp.path();
+        let task_path = write_task_file(board_dir, 15, "in-progress");
+        std::fs::write(
+            &task_path,
+            "---\nid: 15\ntitle: Task 15\nstatus: in-progress\npriority: high\nclaimed_by: eng-1-2\nblocked: waiting on reviewer\nclass: standard\n---\n\nTask body.\n",
+        )
+        .unwrap();
+
+        let repair = normalize_blocked_frontmatter(&task_path).unwrap();
+
+        assert_eq!(repair.as_ref().and_then(|entry| entry.task_id), Some(15));
+        assert_eq!(
+            repair.as_ref().and_then(|entry| entry.status.as_deref()),
+            Some("in-progress")
+        );
+        let content = std::fs::read_to_string(&task_path).unwrap();
+        assert!(content.contains("status: in-progress"));
+        assert!(content.contains("blocked: true"));
+        assert!(content.contains("block_reason: waiting on reviewer"));
+        assert!(content.contains("blocked_on: waiting on reviewer"));
+    }
+
+    #[test]
+    fn normalize_blocked_frontmatter_is_idempotent_after_first_repair() {
+        let tmp = tempfile::tempdir().unwrap();
+        let board_dir = tmp.path();
+        let task_path = write_task_file(board_dir, 16, "todo");
+        std::fs::write(
+            &task_path,
+            "---\nid: 16\ntitle: Task 16\nstatus: todo\npriority: high\nblocked: waiting on manager\nclass: standard\n---\n\nTask body.\n",
+        )
+        .unwrap();
+
+        let first = normalize_blocked_frontmatter(&task_path).unwrap();
+        let second = normalize_blocked_frontmatter(&task_path).unwrap();
+
+        assert!(first.is_some());
+        assert!(second.is_none());
     }
 
     #[test]
