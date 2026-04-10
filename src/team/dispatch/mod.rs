@@ -200,7 +200,14 @@ impl TeamDaemon {
                     &team_config_dir,
                     None,
                 )?;
-                crate::worktree::ensure_worktree_branch_for_dispatch(&work_dir, task_branch)?;
+                let reset =
+                    crate::worktree::ensure_worktree_branch_for_dispatch(&work_dir, task_branch)?;
+                if let Some(reason) = reset.fallback_reason.as_deref() {
+                    self.emit_event(TeamEvent::worktree_refreshed(
+                        engineer,
+                        &format!("{reason}; path={}", work_dir.display()),
+                    ));
+                }
                 work_dir
             } else {
                 self.maybe_refresh_assignment_worktree(
