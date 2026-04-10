@@ -230,7 +230,7 @@ Discord gives you three dedicated channels for monitoring your team from your ph
 batty discord
 ```
 
-The wizard validates the bot token, lets you pick the server and channels, prompts for allowed Discord user IDs, writes the resulting `channel: discord` user role into `team.yaml`, and sends test messages to all three channels. It also reads `BATTY_DISCORD_BOT_TOKEN` if you already exported the token.
+The wizard validates the bot token, lets you pick the server and channels, prompts for allowed Discord user IDs, writes the resulting `channel: discord` user role into `team.yaml`, saves `BATTY_DISCORD_BOT_TOKEN` into the repo `.env`, and sends test messages to all three channels. It also reads `BATTY_DISCORD_BOT_TOKEN` if you already exported the token.
 
 4. Verify the connection later with:
 
@@ -254,9 +254,10 @@ If you prefer Telegram over Discord, or want both:
 batty telegram
 ```
 
-The setup flow validates the bot configuration and writes the resulting channel
-settings into `team.yaml`. All `$` commands from Discord also work in Telegram
-in single-channel mode.
+The setup flow validates the bot configuration, writes the Telegram routing
+settings into `team.yaml`, and saves `BATTY_TELEGRAM_BOT_TOKEN` into the repo
+`.env`. All `$` commands from Discord also work in Telegram in single-channel
+mode.
 
 ## 11. Stop And Resume
 

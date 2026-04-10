@@ -52,7 +52,6 @@ roles:
     channel_config:
       target: "170281556"
       provider: openclaw
-      bot_token: "BATTY_TELEGRAM_BOT_TOKEN_REDACTED"
       allowed_user_ids: [170281556]
     talks_to: [architect]
 
@@ -60,7 +59,6 @@ roles:
     role_type: user
     channel: discord
     channel_config:
-      bot_token: "BATTY_DISCORD_BOT_TOKEN_REDACTED"
       commands_channel_id: "1490930426812829716"
       events_channel_id: "1490930323608047647"
       agents_channel_id: "1490930375822676070"

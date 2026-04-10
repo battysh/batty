@@ -3,13 +3,14 @@
 //! Provides a blocking HTTP client that sends messages and polls for updates
 //! via the Telegram Bot API. Access control is enforced by numeric user IDs.
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use std::hash::{Hash, Hasher};
 use std::io::{self, Write as IoWrite};
 use std::path::Path;
 use tracing::{debug, warn};
 
 use super::config::ChannelConfig;
+use crate::env_file;
 
 /// An inbound message received from a Telegram user.
 #[derive(Debug, Clone)]
@@ -290,9 +291,12 @@ pub fn setup_telegram(project_root: &Path) -> Result<()> {
     }
 
     // Step 4: Update team.yaml
-    update_team_yaml(&config_path, &bot_token, user_id)?;
+    let env_path = project_root.join(".env");
+    env_file::upsert_env_var(&env_path, "BATTY_TELEGRAM_BOT_TOKEN", &bot_token)?;
+    update_team_yaml(&config_path, user_id)?;
 
     println!("Telegram configured successfully.");
+    println!("Saved BATTY_TELEGRAM_BOT_TOKEN to {}", env_path.display());
     println!("Restart the daemon with: batty stop && batty start");
 
     Ok(())
@@ -381,7 +385,7 @@ pub fn parse_get_me_response(json: &serde_json::Value) -> Option<String> {
 
 /// Update team.yaml with Telegram credentials.
 /// Uses serde_yaml round-trip (simple, loses comments but team templates have few).
-fn update_team_yaml(path: &Path, bot_token: &str, user_id: i64) -> Result<()> {
+fn update_team_yaml(path: &Path, user_id: i64) -> Result<()> {
     let content = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read {}", path.display()))?;
 
@@ -424,10 +428,7 @@ fn update_team_yaml(path: &Path, bot_token: &str, user_id: i64) -> Result<()> {
                 serde_yaml::Value::String("target".into()),
                 serde_yaml::Value::String(user_id_str),
             );
-            mapping.insert(
-                serde_yaml::Value::String("bot_token".into()),
-                serde_yaml::Value::String(bot_token.into()),
-            );
+            mapping.remove(&serde_yaml::Value::String("bot_token".into()));
             mapping.insert(
                 serde_yaml::Value::String("provider".into()),
                 serde_yaml::Value::String("openclaw".into()),
@@ -448,10 +449,6 @@ fn update_team_yaml(path: &Path, bot_token: &str, user_id: i64) -> Result<()> {
 
         let mut cc = serde_yaml::Mapping::new();
         cc.insert("target".into(), serde_yaml::Value::String(user_id_str));
-        cc.insert(
-            "bot_token".into(),
-            serde_yaml::Value::String(bot_token.into()),
-        );
         cc.insert("provider".into(), "openclaw".into());
         let ids = vec![serde_yaml::Value::Number(serde_yaml::Number::from(user_id))];
         cc.insert("allowed_user_ids".into(), serde_yaml::Value::Sequence(ids));
@@ -778,10 +775,12 @@ mod tests {
             "result": {}
         });
 
-        assert!(parse_send_message_response(&json)
-            .unwrap_err()
-            .to_string()
-            .contains("message_id"));
+        assert!(
+            parse_send_message_response(&json)
+                .unwrap_err()
+                .to_string()
+                .contains("message_id")
+        );
     }
 
     #[test]
@@ -807,11 +806,11 @@ roles:
         )
         .unwrap();
 
-        update_team_yaml(&path, "123:abc-token", 99887766).unwrap();
+        update_team_yaml(&path, 99887766).unwrap();
 
         let content = std::fs::read_to_string(&path).unwrap();
-        assert!(content.contains("123:abc-token"));
         assert!(content.contains("99887766"));
+        assert!(!content.contains("bot_token"));
     }
 
     #[test]
@@ -830,13 +829,13 @@ roles:
         )
         .unwrap();
 
-        update_team_yaml(&path, "456:xyz-token", 11223344).unwrap();
+        update_team_yaml(&path, 11223344).unwrap();
 
         let content = std::fs::read_to_string(&path).unwrap();
-        assert!(content.contains("456:xyz-token"));
         assert!(content.contains("11223344"));
         assert!(content.contains("user"));
         assert!(content.contains("human"));
+        assert!(!content.contains("bot_token"));
     }
 
     #[test]

@@ -11,6 +11,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use tracing::{debug, warn};
 
 use super::config::{ChannelConfig, RoleType, TeamConfig};
+use crate::env_file;
 
 const DISCORD_API_BASE: &str = "https://discord.com/api/v10";
 const MAX_EMBED_TITLE_LEN: usize = 256;
@@ -384,9 +385,10 @@ pub fn setup_discord(project_root: &Path) -> Result<()> {
     )?;
     println!("Test messages sent to all selected channels.\n");
 
+    let env_path = project_root.join(".env");
+    env_file::upsert_env_var(&env_path, "BATTY_DISCORD_BOT_TOKEN", &bot_token)?;
     update_team_yaml_for_discord(
         &config_path,
-        &bot_token,
         &commands_channel.id,
         &events_channel.id,
         &agents_channel.id,
@@ -394,6 +396,7 @@ pub fn setup_discord(project_root: &Path) -> Result<()> {
     )?;
 
     println!("Discord configured successfully.");
+    println!("Saved BATTY_DISCORD_BOT_TOKEN to {}", env_path.display());
     println!("Restart the daemon with: batty stop && batty start");
     Ok(())
 }
@@ -770,7 +773,6 @@ fn send_setup_test_messages(
 
 fn update_team_yaml_for_discord(
     path: &Path,
-    bot_token: &str,
     commands_channel_id: &str,
     events_channel_id: &str,
     agents_channel_id: &str,
@@ -810,10 +812,7 @@ fn update_team_yaml_for_discord(
             .ok_or_else(|| anyhow!("channel_config must be a mapping"))?;
         mapping.remove(&serde_yaml::Value::String("target".into()));
         mapping.remove(&serde_yaml::Value::String("provider".into()));
-        mapping.insert(
-            "bot_token".into(),
-            serde_yaml::Value::String(bot_token.into()),
-        );
+        mapping.remove(&serde_yaml::Value::String("bot_token".into()));
         mapping.insert(
             "commands_channel_id".into(),
             serde_yaml::Value::String(commands_channel_id.into()),
@@ -843,10 +842,6 @@ fn update_team_yaml_for_discord(
         new_role.insert("channel".into(), "discord".into());
 
         let mut channel_config = serde_yaml::Mapping::new();
-        channel_config.insert(
-            "bot_token".into(),
-            serde_yaml::Value::String(bot_token.into()),
-        );
         channel_config.insert(
             "commands_channel_id".into(),
             serde_yaml::Value::String(commands_channel_id.into()),
@@ -1064,22 +1059,14 @@ roles:
         )
         .unwrap();
 
-        update_team_yaml_for_discord(
-            &path,
-            "discord-token",
-            "cmd-1",
-            "evt-1",
-            "agt-1",
-            &[111, 222],
-        )
-        .unwrap();
+        update_team_yaml_for_discord(&path, "cmd-1", "evt-1", "agt-1", &[111, 222]).unwrap();
 
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(content.contains("channel: discord"));
-        assert!(content.contains("discord-token"));
         assert!(content.contains("commands_channel_id: cmd-1"));
         assert!(content.contains("events_channel_id: evt-1"));
         assert!(content.contains("agents_channel_id: agt-1"));
+        assert!(!content.contains("bot_token"));
         assert!(!content.contains("target: placeholder"));
         assert!(!content.contains("provider: openclaw"));
     }
@@ -1100,14 +1087,14 @@ roles:
         )
         .unwrap();
 
-        update_team_yaml_for_discord(&path, "discord-token", "cmd-1", "evt-1", "agt-1", &[111])
-            .unwrap();
+        update_team_yaml_for_discord(&path, "cmd-1", "evt-1", "agt-1", &[111]).unwrap();
 
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(content.contains("name: human"));
         assert!(content.contains("role_type: user"));
         assert!(content.contains("channel: discord"));
         assert!(content.contains("commands_channel_id: cmd-1"));
+        assert!(!content.contains("bot_token"));
     }
 
     #[test]
