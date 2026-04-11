@@ -180,6 +180,11 @@ jobs:
     needs: changes
     if: github.event_name == 'push' || needs.changes.outputs.non_docs == 'true'
     runs-on: ubuntu-latest
+    # Tarpaulin intermittently segfaults on subprocess-heavy tests (child PTYs,
+    # fake shim channels). Coverage is a reporting metric, not a correctness
+    # gate — don't block merge on a flaky profiler. The main Rust Checks job
+    # is the source of truth for test correctness.
+    continue-on-error: true
 
     steps:
       - uses: actions/checkout@v4

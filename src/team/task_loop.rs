@@ -93,8 +93,13 @@ pub(crate) fn run_tests_in_worktree(
         .unwrap_or_else(|| worktree_dir.join(".batty").join("cargo-home"));
     std::fs::create_dir_all(&cargo_home)
         .with_context(|| format!("failed to create {}", cargo_home.display()))?;
+    // Use `sh -c` (not `sh -lc`): a login shell re-sources profile files and
+    // can drop ~/.cargo/bin from PATH on some macOS environments (notably
+    // GitHub's hosted runners), causing `cargo` lookups to fail. Plain
+    // `sh -c` inherits the parent's PATH unchanged, which is what we want
+    // both in production (daemon PATH carries rustup) and in tests.
     command
-        .arg("-lc")
+        .arg("-c")
         .arg(command_text)
         .current_dir(worktree_dir);
     command.env("CARGO_HOME", &cargo_home);
