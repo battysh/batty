@@ -2,6 +2,106 @@
 
 All notable changes to Batty are documented here.
 
+## 0.11.0 — 2026-04-11
+
+Throughput and stability release. Clears the review queue, ships the
+scenario framework, and lands five targeted stability fixes that were
+stuck on blocked/in-progress engineer lanes.
+
+### Scenario framework (tickets #636 – #646)
+
+- New `tests/scenarios/` integration target driving the real
+  `TeamDaemon` against in-process fake shims (`FakeShim` +
+  `ShimBehavior`) on per-test tempdirs. Zero subprocess spawn, zero
+  tmux, fully deterministic.
+- 22 prescribed scenarios: happy path + 7 regression scenarios (one
+  per recent release bug) + 14 cross-feature scenarios (worktree
+  corruption, merge conflicts, narration-only, scope fence
+  violations, ack loops, context exhaustion, silent death,
+  multi-engineer, disk pressure, stale merge lock, and more).
+- `proptest-state-machine` fuzz harness: `ModelBoard` reference model
+  + `FuzzTest` SUT + 10 cross-subsystem invariants + three fuzz
+  targets (`fuzz_workflow_happy`, `fuzz_workflow_with_faults`,
+  `fuzz_restart_resilience`).
+- New `TeamDaemon::tick() -> TickReport` factoring so tests can drive
+  one iteration at a time. `run()` keeps signal handling, sleep
+  cadence, hot reload, heartbeat persistence.
+- `ScenarioHooks` feature-gated public test surface so integration
+  tests can manipulate daemon state without widening visibility of
+  daemon internals.
+- CI wiring: `cargo test --test scenarios --features scenario-test`
+  runs on every PR (~60s); nightly cron runs fuzz targets in release
+  mode with `PROPTEST_CASES=2048`.
+- `docs/testing.md` — end-to-end guide to running the suite, writing
+  a new scenario, using fake shims, and reading fuzz shrinks.
+
+### Review queue landings
+
+- **#629** (`src/team/telemetry_db.rs`, +557/-41) — auto-repair
+  legacy telemetry schemas in `init_schema` with a column-aware
+  upgrade path. Replaces blind `ALTER TABLE` patterns that masked
+  missing columns until first write or read failures.
+- **#592** — parallel evolution on main already implemented the
+  auto-merge gate (`merge_request_skip_reason` +
+  `AutoMergeSkipReason` enum with `WrongStatus` / `MissingPacket` /
+  `NoBranch` categories and a full unit test catalog).
+- **#631** — centralized supervisory notice pressure classifier in
+  `src/team/supervisory_notice.rs`, consumed by both manager digest
+  routing and inbox digesting.
+- **#621** — supervisory inbox digests now count only actionable
+  notices; status output suppresses stall signals when triage or
+  review backlog is present.
+
+### Stability fixes
+
+- **#634 Supervisory shim restart recovery**
+  (`src/team/daemon/health/poll_shim.rs`) —
+  `handle_supervisory_stall` now honors the `stall-restart::{name}`
+  cooldown so a stall check firing right after a restart cannot
+  re-trigger another respawn (previous behavior degraded into
+  repeated control-plane disconnects as
+  `orchestrator disconnected / Broken pipe`). After a cold respawn
+  the daemon tracks the member as `Idle` until the freshly-started
+  shim emits its first `StateChanged` event. +1 regression test.
+- **#635 Completion rejection bookkeeping drift**
+  (`src/team/merge/completion.rs`) — `is_narration_only` now
+  requires `total_commits > 0`. Fixes a drift where zero-commit
+  attempts double-counted as narration-only rejections and
+  silently escalated after one extra retry. +1 regression test
+  covering mixed zero-commit → narration → narration sequences.
+- **#618 Supervisory stalls report actionable backlog**
+  (`src/team/status.rs`) — added a regression test pinning
+  `actionable_backlog_present` suppression of generic stall text
+  when `needs review`/`needs triage` is active.
+- **#612 Collapse stale escalation storms**
+  (`src/team/inbox.rs`, `src/team/messaging.rs`) — new
+  `extract_task_ids_from_body` and `demote_stale_escalations`
+  helpers. `format_inbox_digest` now demotes escalations whose
+  referenced tasks are `done`/`archived` on the board from
+  `Escalation` category to `Status` so stale spam no longer occupies
+  top-of-inbox actionable slots. `--raw` view is unchanged.
+- **#630 Post-approval dirty lane recovery**
+  (`src/team/daemon/automation.rs`) — `reconcile_active_tasks` now
+  calls `preserve_worktree_before_restart` before clearing an
+  engineer whose task landed as `done`/`archived`, snapshotting any
+  dirty tracked work into a preservation commit so the worktree
+  can be freed for the next assignment instead of parking the
+  engineer on the completed branch indefinitely.
+
+### Housekeeping
+
+- **#598 archived** — Discord/Telegram bot-token rotation moved to
+  `.batty/team_config/board/archive/` with an operator runbook note.
+  Cannot be completed from repository code; requires provider-console
+  access.
+
+### Numbers
+
+- `cargo test --lib`: **3,410 passing** (was 3,369 at 0.10.10; +41)
+- `cargo test --test scenarios --features scenario-test`:
+  **58 passing** (new target)
+- `cargo fmt --check`: clean
+
 ## 0.10.10 — 2026-04-10
 
 Package two more review-queue items. Both branches were clean (merge-tree
