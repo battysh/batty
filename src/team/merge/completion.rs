@@ -16,7 +16,8 @@ use crate::team::artifact::read_test_timing_log;
 use crate::team::artifact::{append_test_timing_record, track_artifact};
 use crate::team::auto_merge::{self, AutoMergeDecisionKind};
 #[cfg(test)]
-use crate::team::board::{WorkflowMetadata, write_workflow_metadata};
+use crate::team::board::WorkflowMetadata;
+use crate::team::board::{read_workflow_metadata, write_workflow_metadata};
 use crate::team::daemon::verification::{inspect_scope_fence, run_automatic_verification};
 use crate::team::daemon::{MergeRequest, TeamDaemon};
 use crate::team::task_loop::{
@@ -225,6 +226,76 @@ fn empty_test_results(framework: &str, summary: Option<String>) -> TestResults {
         ignored: 0,
         failures: Vec::new(),
         summary,
+    }
+}
+
+/// Record the completion packet metadata on a task file after the daemon has
+/// successfully verified an engineer's work. This mirrors what
+/// `completion::ingest_completion_message` does for messages containing a
+/// literal `Completion Packet` block, and is required by
+/// `merge_queue::missing_completion_packet_detail` before the merge queue
+/// will process the request. Without this step, every daemon-initiated
+/// auto-merge is skipped with `missing_packet` — a silent throughput killer
+/// observed under multi-engineer load.
+fn record_completion_packet_metadata(
+    project_root: &Path,
+    board_dir: &Path,
+    task_id: u32,
+    branch: &str,
+    worktree_dir: &Path,
+    tests_passed: bool,
+    test_results: Option<TestResults>,
+) -> Result<()> {
+    let task_path = crate::team::task_cmd::find_task_path(board_dir, task_id)
+        .with_context(|| format!("failed to locate task #{task_id} for completion metadata"))?;
+    let mut metadata = read_workflow_metadata(&task_path)?;
+    metadata.branch = Some(branch.to_string());
+    metadata.commit = Some(read_worktree_head_commit(worktree_dir)?);
+    metadata.worktree_path = Some(relativize_worktree_path(project_root, worktree_dir));
+    metadata.tests_run = Some(true);
+    metadata.tests_passed = Some(tests_passed);
+    if metadata
+        .outcome
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or("")
+        .is_empty()
+    {
+        metadata.outcome = Some("ready_for_review".to_string());
+    }
+    if test_results.is_some() {
+        metadata.test_results = test_results;
+    }
+    write_workflow_metadata(&task_path, &metadata).with_context(|| {
+        format!("failed to persist completion packet metadata for task #{task_id}")
+    })
+}
+
+fn read_worktree_head_commit(worktree_dir: &Path) -> Result<String> {
+    let output = std::process::Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(worktree_dir)
+        .output()
+        .with_context(|| {
+            format!(
+                "failed to invoke git rev-parse in {}",
+                worktree_dir.display()
+            )
+        })?;
+    if !output.status.success() {
+        bail!(
+            "git rev-parse HEAD failed in {}: {}",
+            worktree_dir.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn relativize_worktree_path(project_root: &Path, worktree_dir: &Path) -> String {
+    match worktree_dir.strip_prefix(project_root) {
+        Ok(rel) => rel.to_string_lossy().into_owned(),
+        Err(_) => worktree_dir.to_string_lossy().into_owned(),
     }
 }
 
@@ -894,6 +965,22 @@ pub(crate) fn handle_engineer_completion(daemon: &mut TeamDaemon, engineer: &str
                             )? {
                                 return Ok(());
                             }
+                            if let Err(error) = record_completion_packet_metadata(
+                                daemon.project_root(),
+                                &board_dir,
+                                task_id,
+                                &task_branch,
+                                &worktree_dir,
+                                true,
+                                Some(verification_run.results.clone()),
+                            ) {
+                                warn!(
+                                    engineer,
+                                    task_id,
+                                    error = %error,
+                                    "failed to record completion packet metadata for auto-merge"
+                                );
+                            }
                             info!(
                                 engineer,
                                 task_id,
@@ -933,6 +1020,22 @@ pub(crate) fn handle_engineer_completion(daemon: &mut TeamDaemon, engineer: &str
                                 engineer,
                             )? {
                                 return Ok(());
+                            }
+                            if let Err(error) = record_completion_packet_metadata(
+                                daemon.project_root(),
+                                &board_dir,
+                                task_id,
+                                &task_branch,
+                                &worktree_dir,
+                                true,
+                                Some(verification_run.results.clone()),
+                            ) {
+                                warn!(
+                                    engineer,
+                                    task_id,
+                                    error = %error,
+                                    "failed to record completion packet metadata for manual review"
+                                );
                             }
                             if let Some(ref manager_name) = manager_name {
                                 let reason_text = decision.reasons.join("; ");
@@ -1713,11 +1816,15 @@ mod tests {
         let worktree_dir = repo.join(".batty").join("worktrees").join(engineer);
         setup_engineer_worktree(&repo, &worktree_dir, engineer, &team_config_dir).unwrap();
 
-        // Create a small change in the worktree
+        // Create a small change in the worktree. We intentionally do NOT
+        // pre-seed completion packet metadata here: production code is
+        // responsible for writing it during `handle_engineer_completion`
+        // before the merge queue picks up the request. Tests that depend on
+        // the metadata being already present should exercise the real
+        // completion path rather than faking the seed.
         std::fs::write(worktree_dir.join("note.txt"), "done\n").unwrap();
         git_ok(&worktree_dir, &["add", "note.txt"]);
         git_ok(&worktree_dir, &["commit", "-m", "add note"]);
-        seed_completion_packet_metadata(&repo, 42, "auto-merge-task", &worktree_dir);
 
         (tmp, repo, worktree_dir)
     }
@@ -3057,6 +3164,72 @@ mod tests {
             .expect("should record post-merge verification result");
         assert_eq!(post_verify_event.success, Some(true));
         assert_eq!(post_verify_event.reason.as_deref(), Some("passed"));
+    }
+
+    #[test]
+    fn handle_engineer_completion_records_packet_metadata_for_auto_merge() {
+        // Regression test for the "missing_packet" silent throughput killer:
+        // when the daemon decides to auto-merge a passing task, it used to
+        // move the task to review and enqueue a merge request without ever
+        // writing `branch`, `commit`, `worktree_path`, `tests_run`,
+        // `tests_passed`, or `outcome` to the task's workflow metadata. The
+        // merge queue would then skip the request every time with
+        // `missing_packet; branch marker missing; commit marker missing;
+        // worktree marker missing`, preventing the auto-merge from ever
+        // landing. Verify the daemon now writes those markers itself.
+        let (_tmp, repo, worktree_dir) = setup_auto_merge_repo("eng-1");
+        let policy = AutoMergePolicy {
+            enabled: true,
+            ..AutoMergePolicy::default()
+        };
+        let mut daemon = auto_merge_daemon(&repo, policy);
+
+        handle_engineer_completion(&mut daemon, "eng-1").unwrap();
+
+        let task_path = repo
+            .join(".batty")
+            .join("team_config")
+            .join("board")
+            .join("tasks")
+            .join("042-auto-merge-task.md");
+        let metadata =
+            crate::team::board::read_workflow_metadata(&task_path).expect("read metadata");
+        let expected_branch = current_worktree_branch(&worktree_dir).unwrap();
+        assert_eq!(
+            metadata.branch.as_deref(),
+            Some(expected_branch.as_str()),
+            "branch marker should match the worktree's HEAD branch"
+        );
+        assert!(
+            metadata
+                .commit
+                .as_deref()
+                .is_some_and(|commit| commit.len() >= 7),
+            "commit marker should be populated with the worktree HEAD SHA, got {:?}",
+            metadata.commit
+        );
+        assert!(
+            metadata
+                .worktree_path
+                .as_deref()
+                .is_some_and(|path| !path.trim().is_empty()),
+            "worktree_path marker should be populated"
+        );
+        assert_eq!(metadata.tests_run, Some(true));
+        assert_eq!(metadata.tests_passed, Some(true));
+        // The daemon's verification snapshot writes outcome=verification_passed
+        // on the Complete phase; the merge queue treats any non-empty outcome
+        // other than `verification_retry_required` / `verification_escalated`
+        // as merge-ready, so both `verification_passed` and `ready_for_review`
+        // are acceptable here. What matters is that *some* merge-ready outcome
+        // is present — the previous bug left the field unset.
+        let outcome = metadata.outcome.as_deref().unwrap_or("");
+        assert!(
+            !outcome.is_empty()
+                && outcome != "verification_retry_required"
+                && outcome != "verification_escalated",
+            "outcome marker should be merge-ready, got {outcome:?}"
+        );
     }
 
     #[test]

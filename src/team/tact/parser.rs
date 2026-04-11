@@ -304,14 +304,20 @@ fn create_board_tasks_with_program(
         let output = crate::team::board_cmd::run_board_with_program(program, board_dir, &arg_refs)
             .with_context(|| format!("failed to create board task '{}'", sanitized.title))?;
 
-        let task_id = output
-            .stdout
-            .trim()
-            .strip_prefix("Created task #")
-            .unwrap_or(output.stdout.trim());
-        let parsed_id = task_id
+        // kanban-md output has evolved over versions: older releases print
+        // `Created task #629\n`, newer ones (0.32+) print
+        // `Created task #629: <title>\n`. Parse only the leading run of
+        // digits after `#` so the parser works across both shapes instead
+        // of crashing planning responses whenever a task is created.
+        let raw = output.stdout.trim();
+        let after_prefix = raw.strip_prefix("Created task #").unwrap_or(raw);
+        let digits: String = after_prefix
+            .chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
+        let parsed_id = digits
             .parse::<u32>()
-            .with_context(|| format!("invalid task id returned by kanban-md: '{task_id}'"))?;
+            .with_context(|| format!("invalid task id returned by kanban-md: '{raw}'"))?;
         created_ids.push(parsed_id);
     }
     Ok(created_ids)
@@ -702,6 +708,56 @@ test result: FAILED. 3011 passed; 14 failed; 119 ignored; 0 measured; 0 filtered
         let tasks = crate::task::load_tasks_from_dir(&board_dir.join("tasks")).unwrap();
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].title, "Plan planning telemetry");
+    }
+
+    /// Stand up a fake kanban-md binary that emits the new `Created task
+    /// #ID: Title` output shape introduced in kanban-md 0.32+. The previous
+    /// implementation only understood the older `Created task #ID` form and
+    /// planning cycles would crash with
+    /// `invalid task id returned by kanban-md: '629: Auto-repair…'`.
+    fn setup_fake_kanban_with_title_suffix(tmp: &tempfile::TempDir) -> std::path::PathBuf {
+        let fake_bin = tmp.path().join("fake-bin-titled");
+        std::fs::create_dir_all(&fake_bin).unwrap();
+        let script = fake_bin.join("kanban-md");
+        std::fs::write(
+            &script,
+            "#!/bin/bash\nset -euo pipefail\nif [ \"$1\" != \"create\" ]; then exit 1; fi\nshift\ntitle=\"$1\"\nshift\nbody=\"\"\npriority=\"high\"\nwhile [ $# -gt 0 ]; do\n  case \"$1\" in\n    --body) body=\"$2\"; shift 2 ;;\n    --priority) priority=\"$2\"; shift 2 ;;\n    --tags) shift 2 ;;\n    --depends-on) shift 2 ;;\n    --dir) board_dir=\"$2\"; shift 2 ;;\n    *) shift ;;\n  esac\ndone\nmkdir -p \"$board_dir/tasks\"\ncount=$(find \"$board_dir/tasks\" -maxdepth 1 -name '*.md' | wc -l | tr -d ' ')\nid=$((count + 1))\nprintf -- '---\\nid: %s\\ntitle: %s\\nstatus: todo\\npriority: %s\\n---\\n\\n%s\\n' \"$id\" \"$title\" \"$priority\" \"$body\" > \"$board_dir/tasks/$(printf '%03d' \"$id\")-task.md\"\nprintf 'Created task #%s: %s\\n' \"$id\" \"$title\"\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        fake_bin
+    }
+
+    #[test]
+    fn create_board_tasks_parses_new_output_shape_with_title_suffix() {
+        // Regression: kanban-md 0.32+ appends `: <title>` after the ID in
+        // its `Created task #` output, and the parser used to crash planning
+        // with `invalid task id returned by kanban-md: '629: Auto-repair…'`.
+        let tmp = tempfile::tempdir().unwrap();
+        let board_dir = tmp.path().join("board");
+        std::fs::create_dir_all(board_dir.join("tasks")).unwrap();
+        let fake_kanban = setup_fake_kanban_with_title_suffix(&tmp).join("kanban-md");
+
+        let specs = vec![TaskSpec {
+            title: "Auto-repair legacy telemetry schemas before event writes fail".into(),
+            body: "Planning response body.".into(),
+            priority: Some("high".into()),
+            depends_on: vec![],
+            tags: vec!["stability".into()],
+        }];
+
+        let ids =
+            create_board_tasks_with_program(&specs, &board_dir, fake_kanban.to_str().unwrap())
+                .unwrap();
+        assert_eq!(
+            ids,
+            vec![1],
+            "parser should extract numeric id from new output shape"
+        );
     }
 
     #[test]
