@@ -14,8 +14,27 @@ use super::STARTUP_PREFLIGHT_RESPAWN_DELAY;
 impl TeamDaemon {
     pub(in super::super) fn run_startup_preflight(&mut self) -> Result<()> {
         ensure_tmux_session_ready(&self.config.session)?;
-        ensure_git_ready(&self.config.project_root)?;
-        ensure_worktree_operations(&self.config.project_root)?;
+
+        // Only require git + worktree probe when at least one engineer
+        // actually uses worktrees. Content-centric teams (marketing,
+        // docs, ops) may run entirely in the project root with
+        // `use_worktrees: false` for every engineer — in that case
+        // git is never touched at runtime and demanding a repo here
+        // needlessly crash-loops the daemon at startup.
+        let needs_git = self
+            .config
+            .members
+            .iter()
+            .any(|m| m.role_type == RoleType::Engineer && m.use_worktrees);
+        if needs_git {
+            ensure_git_ready(&self.config.project_root)?;
+            ensure_worktree_operations(&self.config.project_root)?;
+        } else {
+            info!(
+                "skipping git preflight: no engineer members use worktrees (use_worktrees=true)"
+            );
+        }
+
         ensure_telemetry_writable(&self.config.project_root)?;
         ensure_agent_binaries_available(&self.config.members)?;
         self.ensure_member_panes_ready()?;
