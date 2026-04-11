@@ -2,6 +2,40 @@
 
 All notable changes to Batty are documented here.
 
+## 0.11.3 — 2026-04-11
+
+Patch release for four production regressions found during live monitoring
+immediately after 0.11.2.
+
+### Fixes
+
+- **Daemon startup no longer crash-loops on non-git content teams** —
+  preflight now skips `ensure_git_ready` and
+  `ensure_worktree_operations` when no engineer is configured with
+  `use_worktrees = true`. This keeps marketing/docs/ops teams running
+  from plain directories instead of failing at startup on an unnecessary
+  git prerequisite. (`src/team/daemon/health/preflight.rs`)
+- **1M-context agents stop tripping false context-pressure restarts** —
+  proactive pressure checks now bump the effective context window to the
+  1M tier when observed token usage already exceeds the stripped SDK
+  model name's nominal 200K budget. (`src/shim/runtime_sdk.rs`)
+- **Cache-creation tokens are counted once instead of twice** —
+  `SdkOutput::usage_total_tokens` now delegates to the canonical
+  `token_usage().total_tokens()` path so
+  `cache_creation_input_tokens` is de-duped against the classified
+  ephemeral cache buckets instead of being summed on top of them.
+  (`src/shim/sdk_types.rs`)
+- **Discord task assignment previews render as plain text again** —
+  `task_assigned` bodies no longer ship as literal `spoiler` markup.
+  The preview now stays readable in-channel and truncates with an
+  explicit expand-style marker near Discord's embed description limit.
+  (`src/team/discord_bridge.rs`)
+- **Auto-resolved rebases stay non-interactive in merge automation** —
+  batty now runs git with `GIT_EDITOR=true`, so a resolved
+  `git rebase --continue` does not fail trying to open `vi` while
+  finalizing the rebased commit message in headless runs.
+  (`src/team/merge/git_ops.rs`)
+
 ## 0.11.2 — 2026-04-11
 
 Emergency stability follow-up to 0.11.1. Fixes the documented "daemon
