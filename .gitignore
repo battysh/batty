@@ -3,6 +3,7 @@
 
 # Rust
 target/
+target-*/
 **/*.rs.bk
 .cargo/config.toml
 
