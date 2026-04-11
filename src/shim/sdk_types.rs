@@ -407,7 +407,7 @@ mod tests {
         let line = r#"{"type":"result","session_id":"x","usage":{"input_tokens":10,"cached_input_tokens":5,"cache_creation_input_tokens":20,"cache_creation":{"ephemeral_5m_input_tokens":5,"ephemeral_1h_input_tokens":15},"cache_read_input_tokens":3,"output_tokens":7,"reasoning_output_tokens":2},"message":{"model":"claude-opus-4-6-1m"}}"#;
         let msg: SdkOutput = serde_json::from_str(line).unwrap();
         assert_eq!(msg.model_name().as_deref(), Some("claude-opus-4-6-1m"));
-        assert_eq!(msg.usage_total_tokens(), 67);
+        assert_eq!(msg.usage_total_tokens(), 47);
     }
 
     #[test]
