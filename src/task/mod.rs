@@ -1,4 +1,5 @@
 use anyhow::{Context, Result, bail};
+use chrono::{DateTime, FixedOffset, Utc};
 use serde::{Deserialize, Deserializer};
 use serde_yaml::{Mapping, Value};
 use std::path::{Path, PathBuf};
@@ -135,11 +136,31 @@ fn default_status() -> String {
     "backlog".to_string()
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct TaskFrontmatterCompatRepair {
+    pub repaired_fields: Vec<String>,
+    pub blocked_reason: Option<String>,
+}
+
+const COMPAT_TIMESTAMP_FIELDS: &[&str] = &[
+    "created",
+    "started",
+    "updated",
+    "completed",
+    "claimed_at",
+    "claim_expires_at",
+    "last_progress_at",
+    "claim_warning_sent_at",
+    "scheduled_for",
+    "cron_last_run",
+    "reviewed_at",
+];
+
 impl Task {
     /// Returns true if this task has a `scheduled_for` timestamp in the future.
     pub fn is_schedule_blocked(&self) -> bool {
         self.scheduled_for.as_ref().is_some_and(|scheduled| {
-            chrono::DateTime::parse_from_rfc3339(scheduled).is_ok_and(|ts| ts > chrono::Utc::now())
+            parse_frontmatter_timestamp_compat(scheduled).is_some_and(|ts| ts > Utc::now())
         })
     }
 
@@ -147,9 +168,9 @@ impl Task {
     pub fn from_file(path: &Path) -> Result<Self> {
         let contents = std::fs::read_to_string(path)
             .with_context(|| format!("failed to read task file: {}", path.display()))?;
-        let normalized = normalize_blocked_frontmatter_content(&contents)?;
+        let normalized = normalize_task_frontmatter_content(&contents)?;
         let contents = match normalized {
-            Some(updated) => {
+            Some((updated, _)) => {
                 std::fs::write(path, &updated)
                     .with_context(|| format!("failed to repair task file: {}", path.display()))?;
                 updated
@@ -265,10 +286,93 @@ fn set_blocked_reason(mapping: &mut Mapping, reason: Option<&str>, blocked_on: O
     set_optional_string(mapping, "blocked_on", blocked_on.or(reason));
 }
 
-fn normalize_blocked_frontmatter_content(content: &str) -> Result<Option<String>> {
+fn legacy_offset_candidate(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.len() < 5 {
+        return None;
+    }
+
+    let sign_idx = trimmed.len().checked_sub(5)?;
+    let suffix = &trimmed[sign_idx..];
+    if !(suffix.starts_with('+') || suffix.starts_with('-')) {
+        return None;
+    }
+    if !suffix[1..].chars().all(|ch| ch.is_ascii_digit()) {
+        return None;
+    }
+
+    let mut normalized = trimmed.to_string();
+    normalized.insert(normalized.len() - 2, ':');
+    Some(normalized)
+}
+
+fn normalize_legacy_timestamp_value(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || DateTime::parse_from_rfc3339(trimmed).is_ok() {
+        return None;
+    }
+
+    let candidate = legacy_offset_candidate(trimmed)?;
+    DateTime::parse_from_rfc3339(&candidate)
+        .ok()
+        .map(|parsed| parsed.to_rfc3339())
+}
+
+pub(crate) fn parse_frontmatter_timestamp(value: &str) -> Option<DateTime<FixedOffset>> {
+    let trimmed = value.trim();
+    DateTime::parse_from_rfc3339(trimmed).ok().or_else(|| {
+        normalize_legacy_timestamp_value(trimmed)
+            .and_then(|normalized| DateTime::parse_from_rfc3339(&normalized).ok())
+    })
+}
+
+pub(crate) fn parse_frontmatter_timestamp_compat(value: &str) -> Option<DateTime<Utc>> {
+    parse_frontmatter_timestamp(value).map(|timestamp| timestamp.with_timezone(&Utc))
+}
+
+fn normalize_timestamp_frontmatter_fields(mapping: &mut Mapping) -> Vec<String> {
+    let mut repaired = Vec::new();
+    for field in COMPAT_TIMESTAMP_FIELDS {
+        let key = yaml_key(field);
+        let Some(raw_value) = mapping.get(&key).and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(normalized) = normalize_legacy_timestamp_value(raw_value) else {
+            continue;
+        };
+        if raw_value == normalized {
+            continue;
+        }
+        mapping.insert(key, Value::String(normalized));
+        repaired.push((*field).to_string());
+    }
+    repaired
+}
+
+fn render_frontmatter_content(mapping: &Mapping, body: &str) -> Result<String> {
+    let mut rendered =
+        serde_yaml::to_string(mapping).context("failed to serialize task frontmatter")?;
+    if let Some(stripped) = rendered.strip_prefix("---\n") {
+        rendered = stripped.to_string();
+    }
+
+    let mut updated = String::from("---\n");
+    updated.push_str(&rendered);
+    if !updated.ends_with('\n') {
+        updated.push('\n');
+    }
+    updated.push_str("---\n");
+    updated.push_str(body);
+    Ok(updated)
+}
+
+fn normalize_task_frontmatter_content(
+    content: &str,
+) -> Result<Option<(String, TaskFrontmatterCompatRepair)>> {
     let (frontmatter, body) = split_frontmatter(content)?;
     let mut mapping: Mapping =
         serde_yaml::from_str(frontmatter).context("failed to parse YAML frontmatter")?;
+    let mut repaired_fields = normalize_timestamp_frontmatter_fields(&mut mapping);
 
     let blocked_value = mapping.get(yaml_key("blocked")).cloned();
     let block_reason = mapping
@@ -317,37 +421,47 @@ fn normalize_blocked_frontmatter_content(content: &str) -> Result<Option<String>
     if !rewrites_hidden_string_block
         && !rewrites_incomplete_blocked_task
         && !rewrites_incomplete_bool_shape
+        && repaired_fields.is_empty()
     {
         return Ok(None);
     }
 
-    set_blocked_reason(&mut mapping, desired_reason, desired_blocked_on.as_deref());
-
-    let mut rendered =
-        serde_yaml::to_string(&mapping).context("failed to serialize task frontmatter")?;
-    if let Some(stripped) = rendered.strip_prefix("---\n") {
-        rendered = stripped.to_string();
+    if rewrites_hidden_string_block
+        || rewrites_incomplete_blocked_task
+        || rewrites_incomplete_bool_shape
+    {
+        set_blocked_reason(&mut mapping, desired_reason, desired_blocked_on.as_deref());
+        repaired_fields.extend([
+            "blocked".to_string(),
+            "block_reason".to_string(),
+            "blocked_on".to_string(),
+        ]);
     }
 
-    let mut updated = String::from("---\n");
-    updated.push_str(&rendered);
-    if !updated.ends_with('\n') {
-        updated.push('\n');
-    }
-    updated.push_str("---\n");
-    updated.push_str(body);
-    Ok(Some(updated))
+    repaired_fields.sort();
+    repaired_fields.dedup();
+
+    let updated = render_frontmatter_content(&mapping, body)?;
+    Ok(Some((
+        updated,
+        TaskFrontmatterCompatRepair {
+            repaired_fields,
+            blocked_reason: desired_reason.map(str::to_string),
+        },
+    )))
 }
 
-pub(crate) fn normalize_blocked_frontmatter(task_path: &Path) -> Result<bool> {
+pub(crate) fn repair_task_frontmatter_compat(
+    task_path: &Path,
+) -> Result<Option<TaskFrontmatterCompatRepair>> {
     let contents = std::fs::read_to_string(task_path)
         .with_context(|| format!("failed to read task file: {}", task_path.display()))?;
-    let Some(updated) = normalize_blocked_frontmatter_content(&contents)? else {
-        return Ok(false);
+    let Some((updated, repair)) = normalize_task_frontmatter_content(&contents)? else {
+        return Ok(None);
     };
     std::fs::write(task_path, updated)
         .with_context(|| format!("failed to repair task file: {}", task_path.display()))?;
-    Ok(true)
+    Ok(Some(repair))
 }
 
 /// Parse the Markdown body, extracting an optional `## Batty Config` section.
@@ -939,6 +1053,33 @@ Second task description.
     }
 
     #[test]
+    fn load_tasks_from_dir_repairs_legacy_timestamp_offsets_in_place() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = tmp.path().join("tasks");
+        fs::create_dir_all(&tasks_dir).unwrap();
+        let task_path = tasks_dir.join("623-stale-review.md");
+        fs::write(
+            &task_path,
+            "---\nid: 623\ntitle: stale review\nstatus: review\npriority: high\ncreated: 2026-04-10T16:31:02.743151-04:00\nupdated: 2026-04-10T19:26:40-0400\nartifacts:\n  - .batty/reports/verification/completion/task-623-eng-1-1-attempt-1.json\nreview_disposition: approved\nreviewed_by: architect\nreviewed_at: 2026-04-10T23:26:40+00:00\n---\n\nTask body.\n",
+        )
+        .unwrap();
+
+        let tasks = load_tasks_from_dir(&tasks_dir).unwrap();
+
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].id, 623);
+        let updated = fs::read_to_string(&task_path).unwrap();
+        assert!(updated.contains("updated: 2026-04-10T19:26:40-04:00"));
+        assert!(updated.contains("reviewed_by: architect"));
+        assert!(
+            updated.contains(
+                "- .batty/reports/verification/completion/task-623-eng-1-1-attempt-1.json"
+            )
+        );
+        assert!(updated.ends_with("\n\nTask body.\n"));
+    }
+
+    #[test]
     fn load_real_phase1_tasks() {
         let phase1_dir = Path::new("kanban/phase-1/tasks");
         if !phase1_dir.exists() {
@@ -983,6 +1124,16 @@ Second task description.
         let content = "---\nid: 303\ntitle: bad date\nstatus: todo\nscheduled_for: \"not-a-date\"\n---\n\nDesc.\n";
         let task = Task::parse(content).unwrap();
         assert!(!task.is_schedule_blocked());
+    }
+
+    #[test]
+    fn is_schedule_blocked_accepts_legacy_offset_timestamp() {
+        let future = "2999-04-10T19:26:40-0400";
+        let content = format!(
+            "---\nid: 304\ntitle: legacy offset schedule\nstatus: todo\nscheduled_for: \"{future}\"\n---\n\nDesc.\n"
+        );
+        let task = Task::parse(&content).unwrap();
+        assert!(task.is_schedule_blocked());
     }
 
     #[test]
