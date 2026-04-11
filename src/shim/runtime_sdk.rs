@@ -825,8 +825,7 @@ fn proactive_context_warning(
     let model = msg
         .model_name()
         .or_else(|| last_model_name.map(str::to_string));
-    let context_limit_tokens =
-        effective_context_limit_tokens(model.as_deref(), used_tokens);
+    let context_limit_tokens = effective_context_limit_tokens(model.as_deref(), used_tokens);
     let usage_pct = ((used_tokens.saturating_mul(100)) / context_limit_tokens.max(1)) as u8;
     if usage_pct < PROACTIVE_CONTEXT_WARNING_PCT {
         return None;
