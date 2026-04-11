@@ -15,6 +15,7 @@ use batty_cli::task;
 use batty_cli::team::daemon::TeamDaemon;
 use batty_cli::team::daemon::tick_report::TickReport;
 use batty_cli::team::harness::{TestHarness, engineer_member, manager_member};
+use batty_cli::team::inbox::InboxMessage;
 use batty_cli::team::standup::MemberState;
 
 /// Default upper bound for `tick_until` so runaway scenarios fail fast
@@ -198,6 +199,58 @@ impl ScenarioFixture {
     /// Override the daemon's in-memory [`MemberState`] for `member`.
     pub fn set_member_state(&mut self, member: &str, state: MemberState) {
         self.daemon.scenario_hooks().set_member_state(member, state);
+    }
+
+    // -----------------------------------------------------------------
+    // Board / inbox inspection
+    // -----------------------------------------------------------------
+
+    /// Pending (undelivered) inbox messages for `member`. Scenarios use
+    /// this to assert that an intervention or completion routed a
+    /// message to the expected recipient.
+    pub fn pending_inbox_for(&self, member: &str) -> Vec<InboxMessage> {
+        self.harness
+            .pending_inbox_messages(member)
+            .unwrap_or_default()
+    }
+
+    /// Write a raw task file directly into the tempdir's board/tasks
+    /// directory. Scenarios use this to seed shapes the builder's
+    /// `with_task` helper can't express (legacy frontmatter, review
+    /// timestamps, etc.).
+    pub fn write_raw_task_file(&self, filename: &str, contents: &str) -> PathBuf {
+        let tasks_dir = self.board_tasks_dir();
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+        let path = tasks_dir.join(filename);
+        std::fs::write(&path, contents).unwrap();
+        path
+    }
+
+    /// Append a synthetic `TeamEvent`-shaped JSON line to the team
+    /// events.jsonl. Scenarios use this to simulate events emitted in
+    /// prior daemon sessions (e.g. stale stall_detected events).
+    pub fn append_raw_event_line(&self, json_line: &str) {
+        let events_path = self.daemon_events_path();
+        if let Some(parent) = events_path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&events_path)
+            .unwrap();
+        writeln!(file, "{json_line}").unwrap();
+    }
+
+    /// Absolute path to `.batty/team_config/events.jsonl` for this
+    /// fixture's project root.
+    pub fn daemon_events_path(&self) -> PathBuf {
+        self.harness
+            .project_root()
+            .join(".batty")
+            .join("team_config")
+            .join("events.jsonl")
     }
 }
 

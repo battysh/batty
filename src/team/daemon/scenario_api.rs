@@ -16,7 +16,7 @@
 
 #![cfg(any(test, feature = "scenario-test"))]
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use crate::shim::protocol::{Channel, ShimState};
@@ -214,6 +214,79 @@ impl<'a> ScenarioHooks<'a> {
     /// ticks a scenario has driven.
     pub fn poll_cycle_count(&self) -> u64 {
         self.daemon.poll_cycle_count
+    }
+
+    // -----------------------------------------------------------------
+    // Regression-scenario hooks (ticket #641)
+    // -----------------------------------------------------------------
+
+    /// Call the daemon's internal preserve-failure reporter. Used by
+    /// `preserve_dedup` to verify the dedup window suppresses repeated
+    /// alerts. Returns `true` if the call would have emitted a new
+    /// alert (i.e. was NOT suppressed by dedup), `false` if it was
+    /// deduplicated.
+    pub fn report_preserve_failure_for_test(
+        &mut self,
+        member: &str,
+        task_id: Option<u32>,
+        context: &str,
+        detail: &str,
+    ) -> bool {
+        let before = self.daemon.recent_escalations.len();
+        self.daemon
+            .report_preserve_failure(member, task_id, context, detail);
+        self.daemon.recent_escalations.len() > before
+    }
+
+    /// Number of dedup entries currently tracked in
+    /// `recent_escalations`. Used by `preserve_dedup` to verify the
+    /// dedup window is actually storing keys.
+    pub fn recent_escalations_count(&self) -> usize {
+        self.daemon.recent_escalations.len()
+    }
+
+    /// Call `task::repair_task_frontmatter_compat` on a file without
+    /// exposing the full pub(crate) module. Returns `true` if a repair
+    /// was applied (i.e. `Some(_)` was returned), `false` if the file
+    /// was already canonical. Used by `frontmatter_idempotent`.
+    pub fn repair_task_frontmatter(&self, task_path: &Path) -> bool {
+        matches!(
+            crate::task::repair_task_frontmatter_compat(task_path),
+            Ok(Some(_))
+        )
+    }
+
+    /// Returns `true` if the status subsystem currently reports a
+    /// supervisory stall signal for `member` after walking the
+    /// events.jsonl file. Used by `stall_cross_session` to verify the
+    /// cross-session filter suppresses pre-restart stall events.
+    pub fn has_supervisory_stall_signal(&self, member: &str) -> bool {
+        let health = crate::team::status::agent_health_by_member(
+            &self.daemon.config.project_root,
+            &self.daemon.config.members,
+        );
+        health
+            .get(member)
+            .is_some_and(|h| h.has_supervisory_warning())
+    }
+
+    /// Absolute path to the team events.jsonl file for this daemon.
+    /// Scenarios write synthetic events directly to it to simulate
+    /// prior daemon sessions.
+    pub fn team_events_path(&self) -> PathBuf {
+        crate::team::team_events_path(&self.daemon.config.project_root)
+    }
+
+    /// Absolute path to the daemon's project root. Scenarios use this
+    /// for filesystem manipulation (e.g. creating stale worktrees).
+    pub fn project_root(&self) -> &Path {
+        &self.daemon.config.project_root
+    }
+
+    /// Run `maybe_run_disk_hygiene` once so scenarios can exercise the
+    /// disk-pressure path deterministically. Returns any error.
+    pub fn run_disk_hygiene(&mut self) -> anyhow::Result<()> {
+        self.daemon.maybe_run_disk_hygiene()
     }
 }
 
