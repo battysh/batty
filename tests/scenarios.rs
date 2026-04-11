@@ -19,6 +19,9 @@
 #[path = "scenarios/common/mod.rs"]
 mod scenarios_common;
 
+#[path = "scenarios/prescribed/mod.rs"]
+mod prescribed;
+
 use scenarios_common::ScenarioFixture;
 
 #[test]

@@ -108,13 +108,16 @@ pub struct FakeShim {
 impl FakeShim {
     /// Construct a fake shim and return it along with the parent side of
     /// the socketpair (to be handed to [`ScenarioHooks::insert_fake_shim`]).
+    ///
+    /// Both sides of the socket are configured with a short read timeout
+    /// so the daemon's `try_recv_event` (parent side) and the fake's
+    /// `process_inbound` (child side) return `WouldBlock`/`TimedOut`
+    /// instead of blocking forever on empty sockets.
     pub fn new_pair(name: &str) -> Result<(Self, Channel)> {
         let (parent, child) = protocol::socketpair()?;
-        // Put a short non-blocking timeout on the child side so
-        // `process_inbound` can drain all pending commands without
-        // blocking forever on an empty socket.
         let child_channel = Channel::new(child);
-        let parent_channel = Channel::new(parent);
+        let mut parent_channel = Channel::new(parent);
+        parent_channel.set_read_timeout(Some(Duration::from_millis(10)))?;
 
         let mut fake = Self {
             name: name.to_string(),
