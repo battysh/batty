@@ -8,6 +8,7 @@ use std::io::{self, Write as IoWrite};
 use std::path::Path;
 
 use anyhow::{Context, Result, anyhow, bail};
+use chrono::Utc;
 use tracing::{debug, warn};
 
 use crate::env_file;
@@ -17,7 +18,171 @@ use super::config::{ChannelConfig, RoleType, TeamConfig};
 const DISCORD_API_BASE: &str = "https://discord.com/api/v10";
 const MAX_EMBED_TITLE_LEN: usize = 256;
 const MAX_EMBED_DESCRIPTION_LEN: usize = 4_000;
+const MAX_EMBED_FIELD_NAME_LEN: usize = 256;
+const MAX_EMBED_FIELD_VALUE_LEN: usize = 1_024;
+const MAX_EMBED_FOOTER_LEN: usize = 2_048;
+const MAX_EMBED_AUTHOR_NAME_LEN: usize = 256;
+const MAX_EMBED_FIELDS: usize = 25;
 const MAX_CONTENT_LEN: usize = 2_000;
+
+/// A single key/value pair inside an embed. Matches Discord's
+/// `embed.fields[]` element. Inline fields are shown side-by-side on
+/// wide screens, non-inline fields stack vertically. Up to 25 fields
+/// per embed. Names and values are truncated to Discord's limits.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EmbedField {
+    pub name: String,
+    pub value: String,
+    pub inline: bool,
+}
+
+impl EmbedField {
+    pub fn new(name: impl Into<String>, value: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            value: value.into(),
+            inline: false,
+        }
+    }
+
+    pub fn inline(name: impl Into<String>, value: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            value: value.into(),
+            inline: true,
+        }
+    }
+}
+
+/// Rich embed payload. Everything except `title` and `color` is
+/// optional — builders that only care about title/description/color can
+/// still default the rest. See `send_rich_embed` for the transport side.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RichEmbed {
+    pub title: String,
+    pub description: Option<String>,
+    pub color: u32,
+    pub url: Option<String>,
+    /// Author block — shown in small type above the title. Commonly used
+    /// to attribute an event to an agent (e.g. `eng-1-2` or `manager`).
+    pub author_name: Option<String>,
+    pub author_icon_url: Option<String>,
+    pub author_url: Option<String>,
+    /// Footer — shown below the embed body. Good place for provenance
+    /// (daemon id, version, event id) and deep-links.
+    pub footer: Option<String>,
+    pub footer_icon_url: Option<String>,
+    /// ISO 8601 timestamp for the embed. Discord renders this as a
+    /// right-aligned relative time near the footer.
+    pub timestamp: Option<String>,
+    /// Right-hand thumbnail image (square, ~80x80).
+    pub thumbnail_url: Option<String>,
+    pub fields: Vec<EmbedField>,
+}
+
+impl RichEmbed {
+    pub fn new(title: impl Into<String>, color: u32) -> Self {
+        Self {
+            title: title.into(),
+            color,
+            ..Self::default()
+        }
+    }
+
+    pub fn with_description(mut self, description: impl Into<String>) -> Self {
+        self.description = Some(description.into());
+        self
+    }
+
+    pub fn with_author(mut self, name: impl Into<String>) -> Self {
+        self.author_name = Some(name.into());
+        self
+    }
+
+    pub fn with_footer(mut self, footer: impl Into<String>) -> Self {
+        self.footer = Some(footer.into());
+        self
+    }
+
+    pub fn with_timestamp(mut self, timestamp: impl Into<String>) -> Self {
+        self.timestamp = Some(timestamp.into());
+        self
+    }
+
+    pub fn with_url(mut self, url: impl Into<String>) -> Self {
+        self.url = Some(url.into());
+        self
+    }
+
+    pub fn push_field(mut self, field: EmbedField) -> Self {
+        if self.fields.len() < MAX_EMBED_FIELDS {
+            self.fields.push(field);
+        }
+        self
+    }
+
+    /// Serialize to a `serde_json::Value` suitable for nesting under an
+    /// `embeds` array in a Discord message payload. Applies all of
+    /// Discord's length limits via `truncate_for_discord`.
+    pub fn to_json(&self) -> serde_json::Value {
+        let mut embed = serde_json::json!({
+            "title": truncate_for_discord(&self.title, MAX_EMBED_TITLE_LEN),
+            "color": self.color,
+        });
+        if let Some(description) = self.description.as_deref() {
+            embed["description"] = serde_json::Value::String(truncate_for_discord(
+                description,
+                MAX_EMBED_DESCRIPTION_LEN,
+            ));
+        }
+        if let Some(url) = self.url.as_deref() {
+            embed["url"] = serde_json::Value::String(url.to_string());
+        }
+        if let Some(author_name) = self.author_name.as_deref() {
+            let mut author = serde_json::json!({
+                "name": truncate_for_discord(author_name, MAX_EMBED_AUTHOR_NAME_LEN),
+            });
+            if let Some(icon_url) = self.author_icon_url.as_deref() {
+                author["icon_url"] = serde_json::Value::String(icon_url.to_string());
+            }
+            if let Some(author_url) = self.author_url.as_deref() {
+                author["url"] = serde_json::Value::String(author_url.to_string());
+            }
+            embed["author"] = author;
+        }
+        if let Some(footer) = self.footer.as_deref() {
+            let mut footer_obj = serde_json::json!({
+                "text": truncate_for_discord(footer, MAX_EMBED_FOOTER_LEN),
+            });
+            if let Some(icon_url) = self.footer_icon_url.as_deref() {
+                footer_obj["icon_url"] = serde_json::Value::String(icon_url.to_string());
+            }
+            embed["footer"] = footer_obj;
+        }
+        if let Some(timestamp) = self.timestamp.as_deref() {
+            embed["timestamp"] = serde_json::Value::String(timestamp.to_string());
+        }
+        if let Some(thumbnail) = self.thumbnail_url.as_deref() {
+            embed["thumbnail"] = serde_json::json!({ "url": thumbnail });
+        }
+        if !self.fields.is_empty() {
+            let fields: Vec<serde_json::Value> = self
+                .fields
+                .iter()
+                .take(MAX_EMBED_FIELDS)
+                .map(|field| {
+                    serde_json::json!({
+                        "name": truncate_for_discord(&field.name, MAX_EMBED_FIELD_NAME_LEN),
+                        "value": truncate_for_discord(&field.value, MAX_EMBED_FIELD_VALUE_LEN),
+                        "inline": field.inline,
+                    })
+                })
+                .collect();
+            embed["fields"] = serde_json::Value::Array(fields);
+        }
+        embed
+    }
+}
 
 /// An inbound message received from Discord.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -113,13 +278,26 @@ impl DiscordBot {
         self.post_message(channel_id, &body).map(|_| ())
     }
 
+    /// Post a single rich embed to a channel. Supports fields, footer,
+    /// author, timestamp, URL and thumbnail — strictly a superset of
+    /// `send_embed`. Use `RichEmbed::new(...).with_*(...).push_field(...)`
+    /// to build the payload. All length limits are applied by
+    /// `RichEmbed::to_json`.
+    pub fn send_rich_embed(&self, channel_id: &str, embed: &RichEmbed) -> Result<()> {
+        let body = serde_json::json!({
+            "embeds": [embed.to_json()],
+            "allowed_mentions": { "parse": [] }
+        });
+        self.post_message(channel_id, &body).map(|_| ())
+    }
+
     pub fn send_command_reply(&self, text: &str) -> Result<()> {
         self.send_plain_message(&self.commands_channel_id, text)
     }
 
     pub fn send_formatted_message(&self, channel_id: &str, message: &str) -> Result<()> {
-        let (title, description, color) = outbound_embed_parts(message);
-        self.send_embed(channel_id, &title, &description, color)
+        let embed = outbound_embed(message);
+        self.send_rich_embed(channel_id, &embed)
     }
 
     pub fn validate_token(&self) -> Result<BotIdentity> {
@@ -484,24 +662,23 @@ pub fn discord_status(project_root: &Path) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn outbound_embed_parts(message: &str) -> (String, String, u32) {
+pub(super) fn outbound_embed(message: &str) -> RichEmbed {
     let trimmed = message.trim();
     if let Some(rest) = trimmed.strip_prefix("--- Message from ") {
         if let Some((sender, body)) = rest.split_once("---\n") {
             let sender = sender.trim();
-            return (
-                format!("Message from {sender}"),
-                body.trim().to_string(),
-                color_for_role(sender),
-            );
+            return RichEmbed::new("💬 Command Update", color_for_role(sender))
+                .with_author(role_author_label(sender))
+                .with_description(body.trim())
+                .with_footer("batty · command surface")
+                .with_timestamp(Utc::now().to_rfc3339());
         }
     }
 
-    (
-        "Batty update".to_string(),
-        trimmed.to_string(),
-        color_for_role("system"),
-    )
+    RichEmbed::new("💬 Batty Update", color_for_role("system"))
+        .with_description(trimmed)
+        .with_footer("batty · command surface")
+        .with_timestamp(Utc::now().to_rfc3339())
 }
 
 pub(super) fn color_for_role(role: &str) -> u32 {
@@ -518,6 +695,105 @@ pub(super) fn color_for_role(role: &str) -> u32 {
         0x64748B
     } else {
         0x0EA5E9
+    }
+}
+
+/// Severity classification for Discord embed colors. Derived from the
+/// event type — NOT the sender role. Role-based coloring made success
+/// and failure look identical whenever they came from the same
+/// engineer; severity-based coloring matches the Discord brand palette
+/// (green/blurple/yellow/red/dark-red) and is what users expect from
+/// ops bots in 2025+.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Severity {
+    Success,
+    Info,
+    Warn,
+    Error,
+    Critical,
+    Neutral,
+}
+
+impl Severity {
+    /// Discord-brand-aligned hex color for the severity.
+    pub fn color(self) -> u32 {
+        match self {
+            Severity::Success => 0x57F287,  // Discord Green
+            Severity::Info => 0x5865F2,     // Discord Blurple
+            Severity::Warn => 0xFEE75C,     // Discord Yellow
+            Severity::Error => 0xED4245,    // Discord Red
+            Severity::Critical => 0x992D22, // DarkRed
+            Severity::Neutral => 0x99AAB5,  // Greyple
+        }
+    }
+}
+
+/// Map a `TeamEvent` kind (the `event` string) to a severity tier.
+///
+/// Keeps the classifier next to `color_for_role` so the Discord layer
+/// has one place for "how should this look?" decisions. The match is
+/// intentionally explicit — we'd rather a new event default to
+/// `Neutral` than pick up the wrong color from a regex-ish fallback.
+pub fn severity_for_event(event: &str) -> Severity {
+    use Severity::*;
+    match event {
+        // Green — something good finished.
+        "merge_success"
+        | "task_auto_merged"
+        | "task_manual_merged"
+        | "verification_evidence_collected"
+        | "daemon_started"
+        | "agent_spawned"
+        | "auto_doctor_action" => Success,
+
+        // Blurple — routine operational information.
+        "task_assigned"
+        | "task_claim_created"
+        | "verification_phase_changed"
+        | "standup_posted"
+        | "merge_confidence_scored" => Info,
+
+        // Yellow — soft warning; needs attention soon but not broken.
+        "task_stale"
+        | "dispatch_overlap_skipped"
+        | "pattern_detected"
+        | "narration_rejection"
+        | "review_aging" => Warn,
+
+        // Red — something is broken or blocked and someone needs to act.
+        "task_escalated"
+        | "stall_detected"
+        | "context_exhausted"
+        | "verification_failed"
+        | "merge_conflict"
+        | "merge_failed"
+        | "pane_death"
+        | "scope_fence_violation" => Error,
+
+        // DarkRed — critical; the daemon or a backend is out of service.
+        "backend_quota_exhausted" | "daemon_stopped" | "loop_step_error" | "shim_crash" => Critical,
+
+        // Everything else defaults to neutral grey.
+        _ => Neutral,
+    }
+}
+
+/// Convert a role string into a (prefix, emoji) pair for the embed
+/// author block. Kept tiny so callers can embed it in a single line.
+pub(super) fn role_author_label(role: &str) -> String {
+    let role_lc = role.to_ascii_lowercase();
+    if role_lc.contains("architect") {
+        format!("🏗️ {role}")
+    } else if role_lc.contains("manager") {
+        format!("📋 {role}")
+    } else if role_lc.starts_with("eng") || role_lc.contains("engineer") {
+        format!("🔧 {role}")
+    } else if role_lc.contains("human") || role_lc.contains("user") {
+        format!("👤 {role}")
+    } else if role_lc.contains("daemon") || role_lc.contains("system") || role_lc == "batty" {
+        format!("⚙️ {role}")
+    } else {
+        role.to_string()
     }
 }
 
@@ -965,20 +1241,29 @@ mod tests {
     }
 
     #[test]
-    fn outbound_embed_parts_extracts_sender_header() {
-        let (title, description, color) =
-            outbound_embed_parts("--- Message from architect ---\nFocus on tests");
-        assert_eq!(title, "Message from architect");
-        assert_eq!(description, "Focus on tests");
-        assert_eq!(color, color_for_role("architect"));
+    fn outbound_embed_extracts_sender_header() {
+        let embed = outbound_embed("--- Message from architect ---\nFocus on tests");
+        assert_eq!(embed.title, "💬 Command Update");
+        assert_eq!(embed.description.as_deref(), Some("Focus on tests"));
+        assert_eq!(embed.color, color_for_role("architect"));
+        assert_eq!(embed.author_name.as_deref(), Some("🏗️ architect"));
+        assert_eq!(embed.footer.as_deref(), Some("batty · command surface"));
+        assert!(
+            embed
+                .timestamp
+                .as_deref()
+                .is_some_and(|ts| ts.contains('T'))
+        );
     }
 
     #[test]
-    fn outbound_embed_parts_falls_back_for_plain_text() {
-        let (title, description, color) = outbound_embed_parts("plain message");
-        assert_eq!(title, "Batty update");
-        assert_eq!(description, "plain message");
-        assert_eq!(color, color_for_role("system"));
+    fn outbound_embed_falls_back_for_plain_text() {
+        let embed = outbound_embed("plain message");
+        assert_eq!(embed.title, "💬 Batty Update");
+        assert_eq!(embed.description.as_deref(), Some("plain message"));
+        assert_eq!(embed.color, color_for_role("system"));
+        assert_eq!(embed.author_name, None);
+        assert_eq!(embed.footer.as_deref(), Some("batty · command surface"));
     }
 
     #[test]
