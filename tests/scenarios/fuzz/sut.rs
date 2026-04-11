@@ -33,6 +33,17 @@ pub struct FuzzSut {
     /// Used to dedup `insert_fake_shim` when the same engineer is
     /// dispatched twice in a row.
     pub wired_fakes: Vec<String>,
+    /// Largest main_tip value the invariant checker has observed so
+    /// far. Enforced monotonic by `main_monotonic` (#645 invariant 3).
+    pub last_main_tip_observed: u32,
+    /// Cached mirror of daemon's `recent_escalations` length. Read
+    /// by invariants over `&FuzzSut`; refreshed by
+    /// [`Self::refresh_audit`].
+    pub cached_recent_escalations: usize,
+    /// Cached mirror of members currently carrying a supervisory
+    /// stall signal. Refreshed after every tick by
+    /// [`Self::refresh_audit`].
+    pub cached_supervisory_stalls: Vec<String>,
 }
 
 impl FuzzSut {
@@ -46,6 +57,45 @@ impl FuzzSut {
     fn drive_tick(&mut self) {
         let report = self.fixture.tick();
         self.tick_errors.extend(report.subsystem_errors);
+        self.refresh_audit();
+    }
+
+    /// Immutable access to the fixture for invariants and read-only
+    /// introspection (`&FuzzSut`-friendly).
+    pub fn fixture_ref(&self) -> &ScenarioFixture {
+        &self.fixture
+    }
+
+    /// Count of dedup keys currently tracked in the daemon's
+    /// `recent_escalations` map. Read from the cached mirror so
+    /// invariants over `&FuzzSut` don't need mutable access.
+    pub fn recent_escalations_count(&self) -> usize {
+        self.cached_recent_escalations
+    }
+
+    /// Whether the daemon currently reports a supervisory stall
+    /// signal for `member`. Read from the cached mirror.
+    pub fn has_supervisory_stall_signal(&self, member: &str) -> bool {
+        self.cached_supervisory_stalls
+            .iter()
+            .any(|name| name == member)
+    }
+
+    /// Refresh the cached mirrors of daemon-side state that
+    /// invariants check. Called by `drive_tick` after every tick.
+    pub fn refresh_audit(&mut self) {
+        let wired = self.wired_fakes.clone();
+        let mut stalls = Vec::new();
+        {
+            let hooks = self.fixture.daemon_mut().scenario_hooks();
+            self.cached_recent_escalations = hooks.recent_escalations_count();
+            for name in &wired {
+                if hooks.has_supervisory_stall_signal(name) {
+                    stalls.push(name.clone());
+                }
+            }
+        }
+        self.cached_supervisory_stalls = stalls;
     }
 }
 
@@ -86,14 +136,23 @@ impl StateMachineTest for FuzzTest {
             fixture,
             tick_errors: Vec::new(),
             wired_fakes: Vec::new(),
+            last_main_tip_observed: 0,
+            cached_recent_escalations: 0,
+            cached_supervisory_stalls: Vec::new(),
         }
     }
 
     fn apply(
         mut state: Self::SystemUnderTest,
-        _ref_state: &ModelBoard,
+        ref_state: &ModelBoard,
         transition: Transition,
     ) -> Self::SystemUnderTest {
+        // Track the highest main_tip seen so the main_monotonic
+        // invariant can assert the model's main_tip only moves
+        // forward across the full sequence.
+        if ref_state.main_tip > state.last_main_tip_observed {
+            state.last_main_tip_observed = ref_state.main_tip;
+        }
         match transition {
             Transition::DispatchTask { task_id, engineer } => {
                 // Wire a fake shim for the engineer so the dispatch
@@ -267,16 +326,16 @@ impl StateMachineTest for FuzzTest {
         state
     }
 
-    fn check_invariants(state: &Self::SystemUnderTest, _ref_state: &ModelBoard) {
-        // Phase 1 invariant: the subsystem error count across the
-        // whole test run must stay bounded. The real invariant
-        // catalog lands in ticket #645.
+    fn check_invariants(state: &Self::SystemUnderTest, ref_state: &ModelBoard) {
+        // Bound tick errors first — the rest of the invariants assume
+        // the daemon is still healthy enough to reason about.
         assert!(
             state.tick_errors.len() < 200,
             "fuzz SUT accumulated too many tick errors ({}): {:?}",
             state.tick_errors.len(),
             &state.tick_errors[..state.tick_errors.len().min(10)]
         );
+        super::invariants::check_all(state, ref_state);
     }
 
     fn teardown(_state: Self::SystemUnderTest, _ref_state: ModelBoard) {
