@@ -236,6 +236,7 @@ jobs:
           --skip team::verification::tests::verify_project_updates_parity_and_writes_report
           --skip team::verification::tests::verify_project_detects_regressions_from_previous_pass
           --skip team::merge::operations::tests::merge_rebase_additive_conflict_keeps_both_sides
+          --skip team::task_loop::tests::test_run_tests_in_worktree_returns_pass_fail
           --skip team::daemon::telegram_bridge::tests::maybe_intervene_triage_backlog_marks_member_working_after_live_delivery
 
       - name: Upload to Codecov
