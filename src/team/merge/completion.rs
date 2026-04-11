@@ -15,6 +15,7 @@ use crate::task::load_tasks_from_dir;
 use crate::team::artifact::read_test_timing_log;
 use crate::team::artifact::{append_test_timing_record, track_artifact};
 use crate::team::auto_merge::{self, AutoMergeDecisionKind};
+#[cfg(test)]
 use crate::team::board::{WorkflowMetadata, write_workflow_metadata};
 use crate::team::daemon::verification::{inspect_scope_fence, run_automatic_verification};
 use crate::team::daemon::{MergeRequest, TeamDaemon};
