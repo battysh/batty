@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
@@ -965,6 +965,15 @@ fn run_git_with_timeout(worktree_dir: &Path, args: &[&str], timeout: Duration) -
     for program in ["git", "/usr/bin/git", "/opt/homebrew/bin/git"] {
         let mut command = Command::new(program);
         command.arg("-C").arg(worktree_dir).args(args);
+        // Pipe stderr so we can surface it in error messages. Without this,
+        // failures like `git add -A -- . :(exclude).batty :(exclude).cargo`
+        // just say "exit status: 1" with no reason, making preserve-worktree
+        // bugs impossible to diagnose from daemon logs alone. Stdout goes to
+        // /dev/null because we never consume it in this helper.
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped());
         #[cfg(unix)]
         {
             use std::os::unix::process::CommandExt;
@@ -1007,14 +1016,35 @@ fn run_git_with_timeout(worktree_dir: &Path, args: &[&str], timeout: Duration) -
     loop {
         if let Some(status) = child.try_wait()? {
             if status.success() {
+                // Drain stderr so the pipe closes cleanly; discard contents.
+                if let Some(mut err) = child.stderr.take() {
+                    let mut sink = Vec::new();
+                    let _ = std::io::Read::read_to_end(&mut err, &mut sink);
+                }
                 return Ok(());
             }
-            bail!(
-                "`git {}` failed in {} with status {}",
-                args.join(" "),
-                worktree_dir.display(),
-                status
-            );
+            let mut stderr_buf = Vec::new();
+            if let Some(mut err) = child.stderr.take() {
+                let _ = std::io::Read::read_to_end(&mut err, &mut stderr_buf);
+            }
+            let stderr = String::from_utf8_lossy(&stderr_buf);
+            let stderr_trimmed = stderr.trim();
+            if stderr_trimmed.is_empty() {
+                bail!(
+                    "`git {}` failed in {} with status {}",
+                    args.join(" "),
+                    worktree_dir.display(),
+                    status
+                );
+            } else {
+                bail!(
+                    "`git {}` failed in {} with status {}: {}",
+                    args.join(" "),
+                    worktree_dir.display(),
+                    status,
+                    stderr_trimmed
+                );
+            }
         }
 
         if Instant::now() >= deadline {
