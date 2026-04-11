@@ -230,8 +230,8 @@ jobs:
           --skip team::daemon::tests::restart_member_corrects_mismatched_cwd_after_respawn
           --skip worktree::tests::branch_fully_merged
           --skip worktree::tests::reset_worktree_to_base
-          --skip team::daemon::health::tests::check_backend_health_emits_event_on_transition
-          --skip team::daemon::health::tests::check_backend_health_no_event_when_state_unchanged
+          --skip team::daemon::health::checks::tests::check_backend_health_emits_event_on_transition
+          --skip team::daemon::health::checks::tests::check_backend_health_no_event_when_state_unchanged
           --skip team::daemon::health::tests::uncommitted_diff_lines
           --skip team::verification::tests::verify_project_updates_parity_and_writes_report
           --skip team::verification::tests::verify_project_detects_regressions_from_previous_pass
