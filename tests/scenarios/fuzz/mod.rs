@@ -17,6 +17,8 @@
 
 #![allow(dead_code)]
 
+pub mod fuzz_workflow;
+pub mod invariants;
 pub mod model;
 pub mod reference_sm;
 pub mod sut;
