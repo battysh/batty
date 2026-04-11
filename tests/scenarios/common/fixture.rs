@@ -252,6 +252,46 @@ impl ScenarioFixture {
             .join("team_config")
             .join("events.jsonl")
     }
+
+    /// Cross-subsystem invariant check. Phase 1 version validates the
+    /// minimal invariants the fixture can express: every tracked
+    /// active_task corresponds to a task on the board, and no board
+    /// task has inconsistent claimed_by/status combinations. Scenarios
+    /// call this at the end to pin the invariants that the cross-
+    /// feature catalog enforces.
+    pub fn assert_state_consistent(&mut self) {
+        let tasks = task::load_tasks_from_dir(&self.board_tasks_dir())
+            .expect("board tasks should be loadable");
+
+        // Every task that is claimed must have a status compatible
+        // with being claimed (in-progress, review, blocked, or done).
+        for task in &tasks {
+            if let Some(claimed_by) = task.claimed_by.as_deref() {
+                assert!(
+                    matches!(
+                        task.status.as_str(),
+                        "in-progress" | "review" | "blocked" | "done" | "archived"
+                    ),
+                    "task #{} claimed by {claimed_by} has invalid status {:?}",
+                    task.id,
+                    task.status
+                );
+            }
+        }
+
+        // Every tracked active task must exist on the board (either
+        // in-progress, review, blocked, or done — never vanished).
+        let engineers = self.engineers.clone();
+        for engineer in &engineers {
+            if let Some(task_id) = self.daemon.scenario_hooks().active_task_for(engineer) {
+                let present = tasks.iter().any(|t| t.id == task_id);
+                assert!(
+                    present,
+                    "engineer {engineer} has active_task {task_id} but it's not on the board"
+                );
+            }
+        }
+    }
 }
 
 /// Builder for [`ScenarioFixture`]. Defaults: no engineers, no manager,
