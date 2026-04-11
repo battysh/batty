@@ -2,6 +2,39 @@
 
 All notable changes to Batty are documented here.
 
+## 0.11.2 — 2026-04-11
+
+Emergency stability follow-up to 0.11.1. Fixes the documented "daemon
+event loop freezes after 10-15 min productive window" pattern that has
+been the #1 reliability issue for weeks of live-agent monitoring.
+
+### Fixes
+
+- **Daemon event loop freeze after 10-15 min productive window** —
+  The parent-side `Channel` to each shim subprocess had a read timeout
+  (25ms) but **no write timeout**. `Channel::send` called
+  `stream.write_all()`, which on Unix stream sockets blocks
+  indefinitely when the peer stops draining its receive buffer. Under
+  normal operation shims read commands as fast as they arrive, so the
+  block never materialises — but when a shim wedges (slow codex tool
+  call, hung SDK stream, blocked subprocess), its receive buffer fills
+  up and the daemon's next `send_ping` / `send_kill` / `Resize` /
+  message delivery blocks inside `write_all` waiting for bytes that
+  never drain. The `ping_pong` health subsystem runs inside the main
+  poll loop, so one wedged shim freezes the entire event loop: no
+  more merges, no more dispatch, no more logging. Restart buys another
+  10-15 min productive window before the cycle repeats. New
+  `Channel::set_write_timeout` helper mirrors `set_read_timeout`;
+  `shim_spawn::spawn_shim` applies a 2-second ceiling so a wedged
+  shim surfaces as a send error within one or two ping_pong cycles
+  and flows through the usual stale-handle / respawn path instead of
+  hanging forever. Regression test
+  `shim::protocol::tests::send_times_out_when_peer_stops_reading`
+  opens a socketpair, sets a 50ms write timeout, and blasts large
+  payloads without ever draining the peer — asserts `send()` returns
+  a WouldBlock/TimedOut error within 5s instead of hanging.
+  (`src/shim/protocol.rs`, `src/team/daemon/shim_spawn.rs`)
+
 ## 0.11.1 — 2026-04-11
 
 Stability patch release surfaced by a live-daemon monitoring session on
