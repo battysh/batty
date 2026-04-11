@@ -398,6 +398,34 @@ fn watcher_mut_returns_context_for_unknown_member() {
 }
 
 #[test]
+fn daemon_startup_repairs_legacy_telemetry_schema_only_once() {
+    let tmp = tempfile::tempdir().unwrap();
+    let batty_dir = tmp.path().join(".batty");
+    std::fs::create_dir_all(&batty_dir).unwrap();
+    let legacy = rusqlite::Connection::open(batty_dir.join("telemetry.db")).unwrap();
+    crate::team::telemetry_db::install_legacy_schema_for_tests(&legacy).unwrap();
+    drop(legacy);
+
+    let daemon = make_test_daemon(tmp.path(), vec![manager_member("manager", None)]);
+    assert!(daemon.telemetry_db.is_some());
+    drop(daemon);
+
+    let daemon = make_test_daemon(tmp.path(), vec![manager_member("manager", None)]);
+    assert!(daemon.telemetry_db.is_some());
+    drop(daemon);
+
+    let conn = crate::team::telemetry_db::open(tmp.path()).unwrap();
+    let repair_events: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM events WHERE event_type = 'telemetry_schema_repaired'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(repair_events, 1);
+}
+
+#[test]
 fn test_auto_dispatch_filters_idle_engineers_only() {
     let tmp = tempfile::tempdir().unwrap();
     let roles = vec![

@@ -4,7 +4,7 @@
 //! in `.batty/telemetry.db`. All tables use `CREATE TABLE IF NOT EXISTS` —
 //! no migration framework needed.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -17,6 +17,123 @@ use super::test_results::{TestFailure, TestResults};
 
 /// Database file name under `.batty/`.
 const DB_FILENAME: &str = "telemetry.db";
+
+struct SchemaColumn {
+    name: &'static str,
+    definition: &'static str,
+}
+
+const TASK_METRICS_COLUMNS: &[SchemaColumn] = &[
+    SchemaColumn {
+        name: "started_at",
+        definition: "started_at INTEGER",
+    },
+    SchemaColumn {
+        name: "completed_at",
+        definition: "completed_at INTEGER",
+    },
+    SchemaColumn {
+        name: "retries",
+        definition: "retries INTEGER NOT NULL DEFAULT 0",
+    },
+    SchemaColumn {
+        name: "narration_rejections",
+        definition: "narration_rejections INTEGER NOT NULL DEFAULT 0",
+    },
+    SchemaColumn {
+        name: "escalations",
+        definition: "escalations INTEGER NOT NULL DEFAULT 0",
+    },
+    SchemaColumn {
+        name: "context_restart_count",
+        definition: "context_restart_count INTEGER NOT NULL DEFAULT 0",
+    },
+    SchemaColumn {
+        name: "handoff_attempts",
+        definition: "handoff_attempts INTEGER NOT NULL DEFAULT 0",
+    },
+    SchemaColumn {
+        name: "handoff_successes",
+        definition: "handoff_successes INTEGER NOT NULL DEFAULT 0",
+    },
+    SchemaColumn {
+        name: "carry_forward_effective",
+        definition: "carry_forward_effective INTEGER",
+    },
+    SchemaColumn {
+        name: "merge_time_secs",
+        definition: "merge_time_secs INTEGER",
+    },
+    SchemaColumn {
+        name: "confidence_score",
+        definition: "confidence_score REAL",
+    },
+];
+
+const SESSION_SUMMARY_COLUMNS: &[SchemaColumn] = &[
+    SchemaColumn {
+        name: "started_at",
+        definition: "started_at INTEGER NOT NULL",
+    },
+    SchemaColumn {
+        name: "ended_at",
+        definition: "ended_at INTEGER",
+    },
+    SchemaColumn {
+        name: "tasks_completed",
+        definition: "tasks_completed INTEGER NOT NULL DEFAULT 0",
+    },
+    SchemaColumn {
+        name: "total_merges",
+        definition: "total_merges INTEGER NOT NULL DEFAULT 0",
+    },
+    SchemaColumn {
+        name: "total_events",
+        definition: "total_events INTEGER NOT NULL DEFAULT 0",
+    },
+    SchemaColumn {
+        name: "discord_events_sent",
+        definition: "discord_events_sent INTEGER NOT NULL DEFAULT 0",
+    },
+    SchemaColumn {
+        name: "verification_passes",
+        definition: "verification_passes INTEGER NOT NULL DEFAULT 0",
+    },
+    SchemaColumn {
+        name: "verification_failures",
+        definition: "verification_failures INTEGER NOT NULL DEFAULT 0",
+    },
+    SchemaColumn {
+        name: "notification_isolations",
+        definition: "notification_isolations INTEGER NOT NULL DEFAULT 0",
+    },
+    SchemaColumn {
+        name: "notification_latency_total_secs",
+        definition: "notification_latency_total_secs INTEGER NOT NULL DEFAULT 0",
+    },
+    SchemaColumn {
+        name: "notification_latency_samples",
+        definition: "notification_latency_samples INTEGER NOT NULL DEFAULT 0",
+    },
+];
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+struct SchemaRepairReport {
+    repaired_columns: BTreeMap<String, Vec<String>>,
+}
+
+impl SchemaRepairReport {
+    fn record(&mut self, table: &str, column: &str) {
+        self.repaired_columns
+            .entry(table.to_string())
+            .or_default()
+            .push(column.to_string());
+    }
+
+    fn is_empty(&self) -> bool {
+        self.repaired_columns.is_empty()
+    }
+}
 
 /// Open or create the telemetry database, initializing the schema.
 pub fn open(project_root: &Path) -> Result<Connection> {
@@ -117,46 +234,125 @@ fn init_schema(conn: &Connection) -> Result<()> {
         ",
     )
     .context("failed to initialize telemetry schema")?;
-    let _ = conn.execute(
-        "ALTER TABLE task_metrics ADD COLUMN context_restart_count INTEGER NOT NULL DEFAULT 0",
-        [],
-    );
-    let _ = conn.execute(
-        "ALTER TABLE task_metrics ADD COLUMN carry_forward_effective INTEGER",
-        [],
-    );
-    let _ = conn.execute(
-        "ALTER TABLE task_metrics ADD COLUMN handoff_attempts INTEGER NOT NULL DEFAULT 0",
-        [],
-    );
-    let _ = conn.execute(
-        "ALTER TABLE task_metrics ADD COLUMN handoff_successes INTEGER NOT NULL DEFAULT 0",
-        [],
-    );
-    let _ = conn.execute(
-        "ALTER TABLE session_summary ADD COLUMN discord_events_sent INTEGER NOT NULL DEFAULT 0",
-        [],
-    );
-    let _ = conn.execute(
-        "ALTER TABLE session_summary ADD COLUMN verification_passes INTEGER NOT NULL DEFAULT 0",
-        [],
-    );
-    let _ = conn.execute(
-        "ALTER TABLE session_summary ADD COLUMN verification_failures INTEGER NOT NULL DEFAULT 0",
-        [],
-    );
-    let _ = conn.execute(
-        "ALTER TABLE session_summary ADD COLUMN notification_isolations INTEGER NOT NULL DEFAULT 0",
-        [],
-    );
-    let _ = conn.execute(
-        "ALTER TABLE session_summary ADD COLUMN notification_latency_total_secs INTEGER NOT NULL DEFAULT 0",
-        [],
-    );
-    let _ = conn.execute(
-        "ALTER TABLE session_summary ADD COLUMN notification_latency_samples INTEGER NOT NULL DEFAULT 0",
-        [],
-    );
+    let repairs = repair_legacy_schema(conn)?;
+    if !repairs.is_empty() {
+        record_schema_repair_event(conn, &repairs)?;
+    }
+    Ok(())
+}
+
+fn repair_legacy_schema(conn: &Connection) -> Result<SchemaRepairReport> {
+    let mut repairs = SchemaRepairReport::default();
+    ensure_table_columns(conn, "task_metrics", TASK_METRICS_COLUMNS, &mut repairs)?;
+    ensure_table_columns(
+        conn,
+        "session_summary",
+        SESSION_SUMMARY_COLUMNS,
+        &mut repairs,
+    )?;
+    Ok(repairs)
+}
+
+fn ensure_table_columns(
+    conn: &Connection,
+    table: &str,
+    columns: &[SchemaColumn],
+    repairs: &mut SchemaRepairReport,
+) -> Result<()> {
+    let mut existing = query_table_columns(conn, table)?;
+    for column in columns {
+        if existing.contains(column.name) {
+            continue;
+        }
+        let sql = format!("ALTER TABLE {table} ADD COLUMN {}", column.definition);
+        conn.execute(&sql, []).with_context(|| {
+            format!(
+                "failed to add {}.{} to telemetry schema",
+                table, column.name
+            )
+        })?;
+        existing.insert(column.name.to_string());
+        repairs.record(table, column.name);
+    }
+    Ok(())
+}
+
+fn query_table_columns(conn: &Connection, table: &str) -> Result<BTreeSet<String>> {
+    let sql = format!("PRAGMA table_info({table})");
+    let mut stmt = conn
+        .prepare(&sql)
+        .with_context(|| format!("failed to inspect telemetry schema for table {table}"))?;
+    let columns = stmt
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<std::result::Result<BTreeSet<_>, _>>()?;
+    Ok(columns)
+}
+
+fn record_schema_repair_event(conn: &Connection, repairs: &SchemaRepairReport) -> Result<()> {
+    let payload = serde_json::to_string(repairs).context("failed to serialize schema repair")?;
+    conn.execute(
+        "INSERT INTO events (timestamp, event_type, role, task_id, payload)
+         VALUES (?1, ?2, NULL, NULL, ?3)",
+        params![
+            chrono::Utc::now().timestamp(),
+            "telemetry_schema_repaired",
+            payload
+        ],
+    )
+    .context("failed to record telemetry schema repair event")?;
+    Ok(())
+}
+
+#[cfg(test)]
+pub(crate) fn install_legacy_schema_for_tests(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "
+        DROP TABLE IF EXISTS events;
+        DROP TABLE IF EXISTS agent_metrics;
+        DROP TABLE IF EXISTS task_metrics;
+        DROP TABLE IF EXISTS session_summary;
+        DROP TABLE IF EXISTS test_case_metrics;
+        DROP TABLE IF EXISTS task_cycle_times;
+
+        CREATE TABLE events (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp   INTEGER NOT NULL,
+            event_type  TEXT NOT NULL,
+            role        TEXT,
+            task_id     TEXT,
+            payload     TEXT NOT NULL
+        );
+
+        CREATE TABLE agent_metrics (
+            role            TEXT PRIMARY KEY,
+            completions     INTEGER NOT NULL DEFAULT 0,
+            failures        INTEGER NOT NULL DEFAULT 0,
+            restarts        INTEGER NOT NULL DEFAULT 0,
+            total_cycle_secs INTEGER NOT NULL DEFAULT 0,
+            idle_polls      INTEGER NOT NULL DEFAULT 0,
+            working_polls   INTEGER NOT NULL DEFAULT 0
+        );
+
+        CREATE TABLE task_metrics (
+            task_id         TEXT PRIMARY KEY,
+            started_at      INTEGER,
+            completed_at    INTEGER,
+            retries         INTEGER NOT NULL DEFAULT 0,
+            escalations     INTEGER NOT NULL DEFAULT 0,
+            merge_time_secs INTEGER
+        );
+
+        CREATE TABLE session_summary (
+            session_id      TEXT PRIMARY KEY,
+            started_at      INTEGER NOT NULL,
+            ended_at        INTEGER,
+            tasks_completed INTEGER NOT NULL DEFAULT 0,
+            total_merges    INTEGER NOT NULL DEFAULT 0,
+            total_events    INTEGER NOT NULL DEFAULT 0
+        );
+        ",
+    )
+    .context("failed to install legacy telemetry schema fixture")?;
     Ok(())
 }
 
@@ -1153,6 +1349,44 @@ mod tests {
     }
 
     #[test]
+    fn legacy_schema_repairs_missing_columns_once() {
+        let conn = Connection::open_in_memory().unwrap();
+        install_legacy_schema_for_tests(&conn).unwrap();
+
+        init_schema(&conn).unwrap();
+        init_schema(&conn).unwrap();
+
+        let task_columns = query_table_columns(&conn, "task_metrics").unwrap();
+        assert!(task_columns.contains("narration_rejections"));
+        assert!(task_columns.contains("confidence_score"));
+        assert!(task_columns.contains("context_restart_count"));
+
+        let session_columns = query_table_columns(&conn, "session_summary").unwrap();
+        assert!(session_columns.contains("verification_passes"));
+        assert!(session_columns.contains("notification_latency_samples"));
+
+        let repair_events: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM events WHERE event_type = 'telemetry_schema_repaired'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(repair_events, 1);
+
+        let payload: String = conn
+            .query_row(
+                "SELECT payload FROM events WHERE event_type = 'telemetry_schema_repaired'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(payload.contains("narration_rejections"));
+        assert!(payload.contains("confidence_score"));
+        assert!(payload.contains("verification_passes"));
+    }
+
+    #[test]
     fn insert_and_query_event_round_trip() {
         let conn = open_in_memory().unwrap();
         let event = TeamEvent::daemon_started();
@@ -1228,6 +1462,62 @@ mod tests {
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].task_id, "42");
         assert_eq!(tasks[0].narration_rejections, 2);
+    }
+
+    #[test]
+    fn legacy_schema_accepts_new_task_metric_event_writes_after_repair() {
+        let conn = Connection::open_in_memory().unwrap();
+        install_legacy_schema_for_tests(&conn).unwrap();
+        init_schema(&conn).unwrap();
+
+        insert_event(&conn, &TeamEvent::daemon_started()).unwrap();
+        insert_event(&conn, &TeamEvent::narration_rejection("eng-1", 42, 1)).unwrap();
+        insert_event(
+            &conn,
+            &TeamEvent::merge_confidence_scored(&crate::team::events::MergeConfidenceInfo {
+                engineer: "eng-1",
+                task: "42",
+                confidence: 0.82,
+                files_changed: 3,
+                lines_changed: 40,
+                has_migrations: false,
+                has_config_changes: false,
+                rename_count: 0,
+            }),
+        )
+        .unwrap();
+
+        let tasks = query_task_metrics(&conn).unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].task_id, "42");
+        assert_eq!(tasks[0].narration_rejections, 1);
+        assert_eq!(tasks[0].confidence_score, Some(0.82));
+    }
+
+    #[test]
+    fn legacy_schema_accepts_new_session_summary_counters_after_repair() {
+        let conn = Connection::open_in_memory().unwrap();
+        install_legacy_schema_for_tests(&conn).unwrap();
+        init_schema(&conn).unwrap();
+
+        insert_event(&conn, &TeamEvent::daemon_started()).unwrap();
+        insert_event(
+            &conn,
+            &TeamEvent::auto_merge_post_verify_result("eng-1", "42", Some(true), "passed", None),
+        )
+        .unwrap();
+        insert_event(
+            &conn,
+            &TeamEvent::notification_delivery_sample("daemon", "manager", 12, "digest"),
+        )
+        .unwrap();
+
+        let summaries = query_session_summaries(&conn).unwrap();
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].verification_passes, 1);
+        assert_eq!(summaries[0].verification_failures, 0);
+        assert_eq!(summaries[0].notification_latency_total_secs, 12);
+        assert_eq!(summaries[0].notification_latency_samples, 1);
     }
 
     #[test]

@@ -498,6 +498,8 @@ pub fn run(project_root: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+
     use crate::team::events::TeamEvent;
     use crate::team::telemetry_db;
 
@@ -607,6 +609,15 @@ mod tests {
         conn
     }
 
+    fn create_legacy_project_db(tmp: &tempfile::TempDir) -> Connection {
+        let batty_dir = tmp.path().join(".batty");
+        fs::create_dir_all(&batty_dir).unwrap();
+        let db_path = batty_dir.join("telemetry.db");
+        let conn = Connection::open(&db_path).unwrap();
+        telemetry_db::install_legacy_schema_for_tests(&conn).unwrap();
+        conn
+    }
+
     #[test]
     fn metrics_with_data() {
         let conn = setup_db_with_data();
@@ -675,6 +686,38 @@ mod tests {
         assert!(m.completion_rate.is_none());
         assert!(m.failure_rate.is_none());
         assert!(m.merge_success_rate.is_none());
+    }
+
+    #[test]
+    fn query_dashboard_reads_repaired_legacy_schema_rows() {
+        let tmp = tempfile::tempdir().unwrap();
+        let legacy = create_legacy_project_db(&tmp);
+        legacy
+            .execute(
+                "INSERT INTO session_summary (session_id, started_at, tasks_completed, total_merges, total_events)
+                 VALUES ('legacy-session', 100, 2, 1, 5)",
+                [],
+            )
+            .unwrap();
+        legacy
+            .execute(
+                "INSERT INTO task_metrics (task_id, started_at, completed_at, retries, escalations, merge_time_secs)
+                 VALUES ('42', 100, 160, 3, 1, 60)",
+                [],
+            )
+            .unwrap();
+        drop(legacy);
+
+        let conn = telemetry_db::open(tmp.path()).unwrap();
+        let metrics = query_dashboard(&conn).unwrap();
+
+        assert_eq!(metrics.sessions_count, 1);
+        assert_eq!(metrics.total_tasks_completed, 2);
+        assert_eq!(metrics.total_merges, 1);
+        assert_eq!(metrics.total_events, 5);
+        assert_eq!(metrics.verification_pass_count, 0);
+        assert_eq!(metrics.notification_isolation_count, 0);
+        assert_eq!(metrics.avg_cycle_time_secs, Some(60.0));
     }
 
     #[test]

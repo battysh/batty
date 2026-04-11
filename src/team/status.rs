@@ -2494,6 +2494,7 @@ pub(crate) fn format_standup_status(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rusqlite::Connection;
     use std::fs;
 
     use crate::team::config::RoleType;
@@ -2580,6 +2581,14 @@ mod tests {
             format!("---\n{frontmatter}class: standard\n---\n"),
         )
         .unwrap();
+    }
+
+    fn create_legacy_telemetry_db(project_root: &Path) -> Connection {
+        let batty_dir = project_root.join(".batty");
+        fs::create_dir_all(&batty_dir).unwrap();
+        let conn = Connection::open(batty_dir.join("telemetry.db")).unwrap();
+        crate::team::telemetry_db::install_legacy_schema_for_tests(&conn).unwrap();
+        conn
     }
 
     #[test]
@@ -3220,6 +3229,67 @@ mod tests {
         assert!(formatted.contains("Workflow Metrics"));
         assert!(formatted.contains("Runnable: 1"));
         assert_eq!(metrics.runnable_count, 1);
+    }
+
+    #[test]
+    fn workflow_metrics_section_repairs_legacy_telemetry_db_before_querying() {
+        let tmp = tempfile::tempdir().unwrap();
+        let team_config_dir = tmp.path().join(".batty").join("team_config");
+        fs::create_dir_all(&team_config_dir).unwrap();
+        fs::write(
+            team_config_dir.join("team.yaml"),
+            "team: test\nworkflow_mode: hybrid\n",
+        )
+        .unwrap();
+        write_board_task(
+            tmp.path(),
+            "001-runnable.md",
+            "id: 1\ntitle: Runnable\nstatus: todo\npriority: high\n",
+        );
+
+        let legacy = create_legacy_telemetry_db(tmp.path());
+        let completed = TeamEvent::task_completed("eng-1", Some("1"));
+        let merged = TeamEvent::task_auto_merged_with_mode(
+            "eng-1",
+            "1",
+            0.9,
+            2,
+            30,
+            Some(crate::team::merge::MergeMode::DirectRoot),
+        );
+        for event in [completed, merged] {
+            legacy
+                .execute(
+                    "INSERT INTO events (timestamp, event_type, role, task_id, payload)
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                    rusqlite::params![
+                        event.ts as i64,
+                        event.event,
+                        event.role,
+                        event.task,
+                        serde_json::to_string(&event).unwrap()
+                    ],
+                )
+                .unwrap();
+        }
+        drop(legacy);
+
+        let (formatted, metrics) =
+            workflow_metrics_section(tmp.path(), &[engineer("eng-1")]).unwrap();
+
+        assert!(formatted.contains("Workflow Metrics"));
+        assert!(formatted.contains("Auto-merge Rate: 100%"));
+        assert_eq!(metrics.auto_merge_count, 1);
+
+        let conn = crate::team::telemetry_db::open(tmp.path()).unwrap();
+        let repairs: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM events WHERE event_type = 'telemetry_schema_repaired'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(repairs, 1);
     }
 
     #[test]
