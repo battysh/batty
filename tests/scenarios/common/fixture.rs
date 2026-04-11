@@ -1,0 +1,230 @@
+//! `ScenarioFixture` — the top-level scenario harness.
+//!
+//! Composes `TempDir + git repo + kanban board + TeamDaemon + N FakeShim`s
+//! into a single struct that drives the daemon through tick sequences.
+//! Phase 1 ships a minimal API: team composition, `tick*`, board
+//! inspection. Later tickets extend it with fake-shim command scripting,
+//! worktree corruption helpers, and time-warp primitives.
+
+use std::path::PathBuf;
+
+use batty_cli::task;
+use batty_cli::team::daemon::TeamDaemon;
+use batty_cli::team::daemon::tick_report::TickReport;
+use batty_cli::team::harness::{TestHarness, engineer_member, manager_member};
+
+/// Default upper bound for `tick_until` so runaway scenarios fail fast
+/// instead of spinning. 200 ≈ 200 poll cycles in model time; real
+/// scenarios usually converge in <20.
+pub const DEFAULT_TICK_BUDGET: usize = 200;
+
+/// Returned by [`ScenarioFixture::tick_until`] when the predicate does
+/// not fire within the tick budget.
+#[derive(Debug)]
+pub struct TickBudgetExceeded {
+    pub budget: usize,
+    pub last_cycle: u64,
+}
+
+impl std::fmt::Display for TickBudgetExceeded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "tick_until budget exceeded: drove {} ticks, last cycle = {}",
+            self.budget, self.last_cycle
+        )
+    }
+}
+
+impl std::error::Error for TickBudgetExceeded {}
+
+/// Top-level scenario harness. Owns a `TestHarness` (which owns the
+/// `TempDir`) and a built `TeamDaemon`. Dropped at end of scope, which
+/// cleans up the tempdir.
+#[allow(dead_code)]
+pub struct ScenarioFixture {
+    harness: TestHarness,
+    daemon: TeamDaemon,
+    engineers: Vec<String>,
+}
+
+#[allow(dead_code)]
+impl ScenarioFixture {
+    /// Construct a fresh fixture builder.
+    pub fn builder() -> ScenarioFixtureBuilder {
+        ScenarioFixtureBuilder::default()
+    }
+
+    /// Drive one productive iteration of the daemon. Returns the tick
+    /// report; any subsystem errors are captured in `report.subsystem_errors`.
+    pub fn tick(&mut self) -> TickReport {
+        self.daemon.tick()
+    }
+
+    /// Drive `n` consecutive ticks, returning every report in order.
+    pub fn tick_n(&mut self, n: usize) -> Vec<TickReport> {
+        (0..n).map(|_| self.tick()).collect()
+    }
+
+    /// Drive ticks until the predicate returns true, up to the default
+    /// tick budget. Returns the matching report, or
+    /// [`TickBudgetExceeded`] if no tick satisfied the predicate.
+    pub fn tick_until<F>(&mut self, mut pred: F) -> Result<TickReport, TickBudgetExceeded>
+    where
+        F: FnMut(&TickReport) -> bool,
+    {
+        self.tick_until_with_budget(DEFAULT_TICK_BUDGET, &mut pred)
+    }
+
+    /// Same as `tick_until` but with an explicit tick budget.
+    pub fn tick_until_with_budget<F>(
+        &mut self,
+        budget: usize,
+        pred: &mut F,
+    ) -> Result<TickReport, TickBudgetExceeded>
+    where
+        F: FnMut(&TickReport) -> bool,
+    {
+        let mut last_cycle = 0u64;
+        for _ in 0..budget {
+            let report = self.tick();
+            last_cycle = report.cycle;
+            if pred(&report) {
+                return Ok(report);
+            }
+        }
+        Err(TickBudgetExceeded { budget, last_cycle })
+    }
+
+    /// Absolute path to the project root (the fixture's tempdir).
+    pub fn project_root(&self) -> &std::path::Path {
+        self.harness.project_root()
+    }
+
+    /// Absolute path to the board tasks directory.
+    pub fn board_tasks_dir(&self) -> PathBuf {
+        self.harness.board_tasks_dir()
+    }
+
+    /// Every engineer name in fixture order.
+    pub fn engineers(&self) -> &[String] {
+        &self.engineers
+    }
+
+    /// IDs of every task on the board, sorted ascending.
+    pub fn task_ids(&self) -> Vec<u32> {
+        let Ok(tasks) = task::load_tasks_from_dir(&self.board_tasks_dir()) else {
+            return Vec::new();
+        };
+        let mut ids: Vec<u32> = tasks.into_iter().map(|t| t.id).collect();
+        ids.sort_unstable();
+        ids
+    }
+
+    /// Mutable access to the underlying daemon for escape hatches. Tests
+    /// that need more than the curated fixture API can reach in here,
+    /// but new scenarios should prefer adding a method on
+    /// `ScenarioFixture` first.
+    pub fn daemon_mut(&mut self) -> &mut TeamDaemon {
+        &mut self.daemon
+    }
+}
+
+/// Builder for [`ScenarioFixture`]. Defaults: no engineers, no manager,
+/// no architect, no tasks. Scenarios call the `with_*` methods to shape
+/// the team before `build`.
+#[derive(Default)]
+pub struct ScenarioFixtureBuilder {
+    engineer_count: usize,
+    manager_name: Option<String>,
+    tasks: Vec<TaskSeed>,
+}
+
+struct TaskSeed {
+    id: u32,
+    title: String,
+    status: String,
+    claimed_by: Option<String>,
+}
+
+impl ScenarioFixtureBuilder {
+    /// Add `n` engineers named `eng-1` through `eng-n`, each reporting
+    /// to the configured manager (if any).
+    pub fn with_engineers(mut self, n: usize) -> Self {
+        self.engineer_count = n;
+        self
+    }
+
+    /// Add a manager with the given name. Every engineer added
+    /// afterward will report to this manager.
+    pub fn with_manager(mut self, name: impl Into<String>) -> Self {
+        self.manager_name = Some(name.into());
+        self
+    }
+
+    /// Seed a task on the board before the daemon starts.
+    pub fn with_task(
+        mut self,
+        id: u32,
+        title: impl Into<String>,
+        status: impl Into<String>,
+        claimed_by: Option<&str>,
+    ) -> Self {
+        self.tasks.push(TaskSeed {
+            id,
+            title: title.into(),
+            status: status.into(),
+            claimed_by: claimed_by.map(str::to_string),
+        });
+        self
+    }
+
+    /// Finalize the fixture. Panics on any construction error — this is
+    /// a test helper, not production code.
+    pub fn build(self) -> ScenarioFixture {
+        // Seed a TestHarness, then layer on the scenario-specific bits.
+        let mut harness = TestHarness::new();
+
+        // Bootstrap the tasks dir unconditionally. Several subsystems
+        // (owned-tasks intervention, auto-unblock, cron recycle) treat
+        // a missing directory as an error and leak into
+        // TickReport::subsystem_errors if we don't create it up-front.
+        std::fs::create_dir_all(harness.board_tasks_dir()).unwrap();
+
+        // Manager first so engineers can point at it via reports_to.
+        if let Some(ref manager_name) = self.manager_name {
+            harness = harness.with_member(manager_member(manager_name, None));
+        }
+
+        let mut engineers = Vec::new();
+        for idx in 1..=self.engineer_count {
+            let name = format!("eng-{idx}");
+            harness = harness.with_member(engineer_member(
+                &name,
+                self.manager_name.as_deref(),
+                false, // use_worktrees is scenario-specific; default off
+            ));
+            engineers.push(name);
+        }
+
+        // Seed tasks before building the daemon so the initial reconcile
+        // sees them.
+        for TaskSeed {
+            id,
+            title,
+            status,
+            claimed_by,
+        } in self.tasks.iter()
+        {
+            harness = harness.with_board_task(*id, title, status, claimed_by.as_deref());
+        }
+
+        let daemon = harness.build_daemon().expect("build_daemon");
+
+        ScenarioFixture {
+            harness,
+            daemon,
+            engineers,
+        }
+    }
+}
