@@ -91,6 +91,23 @@ impl TeamDaemon {
         Ok(count)
     }
 
+    pub(super) fn restart_count_for_reason(&self, task_id: u32, reason: &str) -> Result<u32> {
+        let events_path = self
+            .config
+            .project_root
+            .join(".batty")
+            .join("team_config")
+            .join("events.jsonl");
+        let task_id = task_id.to_string();
+        let count = super::super::events::read_events(&events_path)?
+            .into_iter()
+            .filter(|event| event.event == "agent_restarted")
+            .filter(|event| event.task.as_deref() == Some(task_id.as_str()))
+            .filter(|event| event.reason.as_deref() == Some(reason))
+            .count() as u32;
+        Ok(count)
+    }
+
     pub(super) fn restart_assignment_message(task: &crate::task::Task) -> String {
         let mut message = format!(
             "Continuing Task #{}: {}\nPrevious session exhausted context; resume from the current worktree state and continue.\n\n{}",

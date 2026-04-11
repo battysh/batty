@@ -8,6 +8,7 @@ use anyhow::Result;
 use tracing::warn;
 
 use super::super::*;
+use crate::team::{checkpoint, context_management};
 
 impl TeamDaemon {
     pub(in super::super) fn consume_restart_handoff(
@@ -15,7 +16,7 @@ impl TeamDaemon {
         member_name: &str,
         task: &crate::task::Task,
         work_dir: &Path,
-        reason: &str,
+        source: &str,
     ) -> Option<String> {
         if !self
             .config
@@ -38,7 +39,44 @@ impl TeamDaemon {
                 "failed to remove restart handoff file after injection"
             );
         }
-        self.record_handoff_injected(member_name, task.id.to_string(), reason);
+
+        let resume_context =
+            checkpoint::read_restart_context(work_dir).filter(|context| context.task_id == task.id);
+        let event_reason = resume_context
+            .as_ref()
+            .map(|context| context.reason.as_str())
+            .unwrap_or(source);
+        self.record_handoff_injected(member_name, task.id.to_string(), event_reason);
+
+        if let Some(context) = resume_context {
+            if context.reason == "context_pressure" {
+                match context_management::consume_restart_context(work_dir) {
+                    Ok(Some(consumed)) => {
+                        self.record_task_resumed(
+                            member_name,
+                            task.id.to_string(),
+                            &consumed.reason,
+                            consumed.restart_count,
+                        );
+                    }
+                    Ok(None) => {}
+                    Err(error) => warn!(
+                        member = %member_name,
+                        task_id = task.id,
+                        error = %error,
+                        "failed to mark proactive restart context as consumed"
+                    ),
+                }
+            } else {
+                self.record_task_resumed(
+                    member_name,
+                    task.id.to_string(),
+                    &context.reason,
+                    context.restart_count,
+                );
+                context_management::clear_restart_context(work_dir);
+            }
+        }
 
         Some(handoff)
     }
@@ -607,6 +645,15 @@ mod tests {
             "# Carry-Forward Summary\n## Task Spec\nTask #42: resume widget",
         )
         .unwrap();
+        crate::team::context_management::stage_restart_context(
+            tmp.path(),
+            "eng-1",
+            &task,
+            "context_pressure",
+            1,
+            Some(420_000),
+        )
+        .unwrap();
 
         let message = daemon.restart_assignment_with_handoff("eng-1", &task, tmp.path());
 
@@ -629,7 +676,16 @@ mod tests {
             event.event == "handoff_injected"
                 && event.role.as_deref() == Some("eng-1")
                 && event.task.as_deref() == Some("42")
+                && event.reason.as_deref() == Some("context_pressure")
         }));
+        assert!(events.iter().any(|event| {
+            event.event == "task_resumed"
+                && event.role.as_deref() == Some("eng-1")
+                && event.task.as_deref() == Some("42")
+                && event.reason.as_deref() == Some("context_pressure")
+        }));
+        let resume_context = crate::team::checkpoint::read_restart_context(tmp.path()).unwrap();
+        assert!(resume_context.handoff_consumed);
     }
 
     #[test]

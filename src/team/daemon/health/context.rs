@@ -6,6 +6,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tracing::{debug, warn};
 
 use super::super::*;
+use crate::team::context_management;
 use crate::team::watcher::CodexQualitySignals;
 
 const WARNING_PERCENT: u64 = 70;
@@ -256,6 +257,7 @@ impl TeamDaemon {
         proactive_usage_pct: Option<u8>,
     ) -> Result<()> {
         let is_working = self.states.get(member_name) == Some(&MemberState::Working);
+        self.clear_stale_context_pressure_resume_guard(member_name, output_bytes);
         let threshold = self
             .config
             .team_config
@@ -341,7 +343,7 @@ impl TeamDaemon {
                         continue;
                     }
 
-                    if self.handle_context_pressure_restart(member_name, task_id)? {
+                    if self.handle_context_pressure_restart(member_name, task_id, output_bytes)? {
                         self.record_orchestrator_action(format!(
                             "health: restarted {} after sustained context pressure (score={}/{})",
                             member_name, score, threshold
@@ -429,6 +431,23 @@ impl TeamDaemon {
             .unwrap_or(Duration::ZERO)
             .as_secs();
         Some(now.saturating_sub(commit_ts))
+    }
+
+    fn clear_stale_context_pressure_resume_guard(&self, member_name: &str, output_bytes: u64) {
+        let Some(member) = self
+            .config
+            .members
+            .iter()
+            .find(|member| member.name == member_name)
+        else {
+            return;
+        };
+        let work_dir = self.member_work_dir(member);
+        let _ = context_management::clear_proactive_restart_context_if_stale(
+            &work_dir,
+            output_bytes,
+            super::CONTEXT_RESTART_COOLDOWN,
+        );
     }
 }
 

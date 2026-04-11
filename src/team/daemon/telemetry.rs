@@ -126,6 +126,17 @@ impl TeamDaemon {
         self.emit_event(TeamEvent::handoff_injected(role, &task, reason));
     }
 
+    pub(super) fn record_task_resumed(
+        &mut self,
+        role: &str,
+        task: impl Into<String>,
+        reason: &str,
+        restart_count: u32,
+    ) {
+        let task = task.into();
+        self.emit_event(TeamEvent::task_resumed(role, &task, reason, restart_count));
+    }
+
     pub(super) fn record_context_exhausted(
         &mut self,
         role: &str,

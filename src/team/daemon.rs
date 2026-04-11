@@ -1200,6 +1200,14 @@ impl TeamDaemon {
         self.verification_states.remove(engineer);
         // Clean up any progress checkpoint left from a prior restart.
         super::checkpoint::remove_checkpoint(&self.config.project_root, engineer);
+        let work_dir = self
+            .config
+            .members
+            .iter()
+            .find(|member| member.name == engineer)
+            .map(|member| self.member_work_dir(member))
+            .unwrap_or_else(|| self.config.project_root.clone());
+        super::checkpoint::remove_restart_context(&work_dir);
     }
 
     /// Remove active_task entries for tasks that are done, archived, or no longer on the board.

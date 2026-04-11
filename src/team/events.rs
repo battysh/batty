@@ -2073,6 +2073,21 @@ mod tests {
     }
 
     #[test]
+    fn event_round_trip_preserves_fields_for_task_resumed() {
+        let original = TeamEvent::task_resumed("eng-1", "42", "context_pressure", 1);
+
+        let json = serde_json::to_string(&original).unwrap();
+        let parsed: TeamEvent = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(parsed.event, "task_resumed");
+        assert_eq!(parsed.role.as_deref(), Some("eng-1"));
+        assert_eq!(parsed.task.as_deref(), Some("42"));
+        assert_eq!(parsed.reason.as_deref(), Some("context_pressure"));
+        assert_eq!(parsed.restart_count, Some(1));
+        assert_eq!(parsed.ts, original.ts);
+    }
+
+    #[test]
     fn event_round_trip_preserves_fields_for_load_snapshot() {
         let original = TeamEvent::load_snapshot(4, 8, true);
 

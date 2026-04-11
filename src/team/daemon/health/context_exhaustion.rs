@@ -7,6 +7,7 @@ use tracing::{info, warn};
 
 use super::super::*;
 use super::{CONTEXT_RESTART_COOLDOWN, format_checkpoint_section};
+use crate::team::context_management;
 
 impl TeamDaemon {
     pub(in super::super) fn handle_context_exhaustion(&mut self, member_name: &str) -> Result<()> {
@@ -69,7 +70,16 @@ impl TeamDaemon {
             task_id = task.id,
             "context exhausted; restarting agent with task context"
         );
-        self.restart_member_with_task_context(member_name, "context exhaustion")?;
+        let work_dir = self.member_work_dir(&member);
+        self.stage_restart_resume_context(
+            member_name,
+            &task,
+            &work_dir,
+            "context_exhausted",
+            prior_restarts + 1,
+            None,
+        );
+        self.restart_member_with_task_context(member_name, "context_exhausted")?;
         self.intervention_cooldowns
             .insert(restart_cooldown_key, Instant::now());
         self.record_agent_restarted(
@@ -85,7 +95,31 @@ impl TeamDaemon {
         &mut self,
         member_name: &str,
         task_id: Option<u32>,
+        output_bytes: u64,
     ) -> Result<bool> {
+        let Some(member) = self
+            .config
+            .members
+            .iter()
+            .find(|member| member.name == member_name)
+            .cloned()
+        else {
+            return Ok(false);
+        };
+        let work_dir = self.member_work_dir(&member);
+        if context_management::proactive_restart_is_suppressed(
+            &work_dir,
+            output_bytes,
+            CONTEXT_RESTART_COOLDOWN,
+        ) {
+            info!(
+                member = %member_name,
+                task_id,
+                "context pressure restart suppressed until fresh progress arrives"
+            );
+            return Ok(false);
+        }
+
         let restart_cooldown_key = Self::context_restart_cooldown_key(member_name);
         let restart_on_cooldown = self
             .intervention_cooldowns
@@ -100,11 +134,32 @@ impl TeamDaemon {
             return Ok(false);
         }
 
-        self.restart_member_with_task_context(member_name, "context pressure")?;
+        let Some(task) = self.active_task(member_name)? else {
+            warn!(
+                member = %member_name,
+                "context pressure restart requested but no active task is recorded"
+            );
+            return Ok(false);
+        };
+        let restart_count = self.restart_count_for_reason(task.id, "context_pressure")? + 1;
+        self.stage_restart_resume_context(
+            member_name,
+            &task,
+            &work_dir,
+            "context_pressure",
+            restart_count,
+            Some(output_bytes),
+        );
+        self.restart_member_with_task_context(member_name, "context_pressure")?;
         self.intervention_cooldowns
             .insert(restart_cooldown_key, Instant::now());
         if let Some(task_id) = task_id {
-            self.record_agent_restarted(member_name, task_id.to_string(), "context_pressure", 1);
+            self.record_agent_restarted(
+                member_name,
+                task_id.to_string(),
+                "context_pressure",
+                restart_count,
+            );
         }
         Ok(true)
     }
@@ -143,9 +198,11 @@ impl TeamDaemon {
 
         let assignment = self.restart_assignment_with_handoff(member_name, &task, &work_dir);
         let launch = self.launch_task_assignment(member_name, &assignment, Some(task.id), false)?;
+        let display_reason = reason.replace('_', " ");
         let mut restart_notice = format!(
             "Restarted after {reason}. Continue task #{} from the current worktree state.",
-            task.id
+            task.id,
+            reason = display_reason
         );
         if let Some(branch) = launch.branch.as_deref() {
             restart_notice.push_str(&format!("\nBranch: {branch}"));
@@ -167,6 +224,33 @@ impl TeamDaemon {
             info!(member = %member_name, task_id = task.id, branch, reason, "context restart relaunched assignment");
         }
         Ok(())
+    }
+
+    fn stage_restart_resume_context(
+        &self,
+        member_name: &str,
+        task: &crate::task::Task,
+        work_dir: &std::path::Path,
+        reason: &str,
+        restart_count: u32,
+        output_bytes: Option<u64>,
+    ) {
+        if let Err(error) = context_management::stage_restart_context(
+            work_dir,
+            member_name,
+            task,
+            reason,
+            restart_count,
+            output_bytes,
+        ) {
+            warn!(
+                member = %member_name,
+                task_id = task.id,
+                reason,
+                error = %error,
+                "failed to stage restart resume context"
+            );
+        }
     }
 
     pub(super) fn capture_context_handoff_output(&self, pane_id: &str) -> Option<String> {
@@ -658,9 +742,69 @@ mod tests {
         );
 
         let restarted = daemon
-            .handle_context_pressure_restart(member_name, Some(42))
+            .handle_context_pressure_restart(member_name, Some(42), 0)
             .unwrap();
 
         assert!(!restarted, "cooldown should suppress the proactive restart");
+    }
+
+    #[test]
+    fn handle_context_pressure_restart_suppresses_without_fresh_progress() {
+        let tmp = tempfile::tempdir().unwrap();
+        let member_name = "eng-1";
+        let task = crate::task::Task {
+            id: 42,
+            title: "resume".to_string(),
+            status: "in-progress".to_string(),
+            priority: "high".to_string(),
+            claimed_by: Some(member_name.to_string()),
+            claimed_at: None,
+            claim_ttl_secs: None,
+            claim_expires_at: None,
+            last_progress_at: None,
+            claim_warning_sent_at: None,
+            claim_extensions: None,
+            last_output_bytes: None,
+            blocked: None,
+            tags: Vec::new(),
+            depends_on: Vec::new(),
+            review_owner: None,
+            blocked_on: None,
+            worktree_path: None,
+            branch: None,
+            commit: None,
+            artifacts: Vec::new(),
+            next_action: None,
+            scheduled_for: None,
+            cron_schedule: None,
+            cron_last_run: None,
+            completed: None,
+            description: "resume".to_string(),
+            batty_config: None,
+            source_path: tmp.path().join("task-42.md"),
+        };
+        crate::team::context_management::stage_restart_context(
+            tmp.path(),
+            member_name,
+            &task,
+            "context_pressure",
+            1,
+            Some(0),
+        )
+        .unwrap();
+        crate::team::context_management::consume_restart_context(tmp.path()).unwrap();
+
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![engineer_member(member_name, Some("manager"), false)])
+            .build();
+
+        let restarted = daemon
+            .handle_context_pressure_restart(member_name, Some(42), 0)
+            .unwrap();
+
+        assert!(
+            !restarted,
+            "no-progress proactive restarts should be suppressed"
+        );
     }
 }

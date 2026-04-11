@@ -2,10 +2,12 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 
-use crate::team::checkpoint::{self, Checkpoint};
+use crate::task::Task;
+use crate::team::checkpoint::{self, Checkpoint, RestartContext};
 
 const DEFAULT_THRESHOLD_PCT: u8 = 80;
 const DEFAULT_CONTEXT_LIMIT_TOKENS: usize = 128_000;
@@ -72,6 +74,92 @@ pub fn create_checkpoint(worktree: &Path, task_id: u32) -> Result<Checkpoint> {
     };
     checkpoint::write_checkpoint(&project_root, &checkpoint)?;
     Ok(checkpoint)
+}
+
+pub fn stage_restart_context(
+    worktree: &Path,
+    role: &str,
+    task: &Task,
+    reason: &str,
+    restart_count: u32,
+    output_bytes: Option<u64>,
+) -> Result<RestartContext> {
+    let context = RestartContext {
+        role: role.to_string(),
+        task_id: task.id,
+        task_title: task.title.clone(),
+        task_description: task.description.clone(),
+        branch: task
+            .branch
+            .clone()
+            .or_else(|| git_output(worktree, &["rev-parse", "--abbrev-ref", "HEAD"])),
+        worktree_path: Some(worktree.display().to_string()),
+        restart_count,
+        reason: reason.to_string(),
+        output_bytes,
+        last_commit: git_output(worktree, &["rev-parse", "HEAD"]),
+        created_at_epoch_secs: Some(epoch_now_secs()),
+        handoff_consumed: false,
+    };
+    checkpoint::write_restart_context(worktree, &context)?;
+    Ok(context)
+}
+
+pub fn consume_restart_context(worktree: &Path) -> Result<Option<RestartContext>> {
+    let Some(mut context) = checkpoint::read_restart_context(worktree) else {
+        return Ok(None);
+    };
+    context.handoff_consumed = true;
+    checkpoint::write_restart_context(worktree, &context)?;
+    Ok(Some(context))
+}
+
+pub fn clear_restart_context(worktree: &Path) {
+    checkpoint::remove_restart_context(worktree);
+}
+
+pub fn clear_proactive_restart_context_if_stale(
+    worktree: &Path,
+    output_bytes: u64,
+    cooldown: Duration,
+) -> bool {
+    let Some(context) = checkpoint::read_restart_context(worktree) else {
+        return false;
+    };
+    if context.reason != "context_pressure" {
+        return false;
+    }
+
+    let commit_changed = git_output(worktree, &["rev-parse", "HEAD"]) != context.last_commit;
+    let cooldown_elapsed = context
+        .created_at_epoch_secs
+        .map(|started| epoch_now_secs().saturating_sub(started) >= cooldown.as_secs())
+        .unwrap_or(true);
+    if output_bytes > 0 || commit_changed || cooldown_elapsed {
+        checkpoint::remove_restart_context(worktree);
+        return true;
+    }
+    false
+}
+
+pub fn proactive_restart_is_suppressed(
+    worktree: &Path,
+    output_bytes: u64,
+    cooldown: Duration,
+) -> bool {
+    let Some(context) = checkpoint::read_restart_context(worktree) else {
+        return false;
+    };
+    if context.reason != "context_pressure" || !context.handoff_consumed {
+        return false;
+    }
+
+    let commit_changed = git_output(worktree, &["rev-parse", "HEAD"]) != context.last_commit;
+    let cooldown_elapsed = context
+        .created_at_epoch_secs
+        .map(|started| epoch_now_secs().saturating_sub(started) >= cooldown.as_secs())
+        .unwrap_or(true);
+    output_bytes == 0 && !commit_changed && !cooldown_elapsed
 }
 
 fn worktree_role(worktree: &Path) -> Result<String> {
@@ -161,18 +249,20 @@ fn last_test_output(worktree: &Path) -> Option<String> {
 }
 
 fn timestamp_now() -> String {
-    use std::time::SystemTime;
-
-    let now = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap_or_default();
-    let secs = now.as_secs();
+    let secs = epoch_now_secs();
     let hours = (secs / 3600) % 24;
     let minutes = (secs / 60) % 60;
     let seconds = secs % 60;
     let days_since_epoch = secs / 86400;
     let (year, month, day) = epoch_days_to_date(days_since_epoch);
     format!("{year:04}-{month:02}-{day:02}T{hours:02}:{minutes:02}:{seconds:02}Z")
+}
+
+fn epoch_now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 fn epoch_days_to_date(days: u64) -> (u64, u64, u64) {
@@ -307,5 +397,132 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let err = create_checkpoint(tmp.path(), 1).unwrap_err();
         assert!(err.to_string().contains(".batty/worktrees"));
+    }
+
+    fn make_task(id: u32) -> Task {
+        Task {
+            id,
+            title: format!("Task #{id}"),
+            status: "in-progress".to_string(),
+            priority: "high".to_string(),
+            claimed_by: Some("eng-1-2".to_string()),
+            claimed_at: None,
+            claim_ttl_secs: None,
+            claim_expires_at: None,
+            last_progress_at: None,
+            claim_warning_sent_at: None,
+            claim_extensions: None,
+            last_output_bytes: None,
+            blocked: None,
+            tags: vec![],
+            depends_on: vec![],
+            review_owner: None,
+            blocked_on: None,
+            worktree_path: Some("/tmp/worktree".to_string()),
+            branch: Some(format!("eng-1-2/{id}")),
+            commit: None,
+            artifacts: vec![],
+            next_action: Some("Finish the implementation.".to_string()),
+            scheduled_for: None,
+            cron_schedule: None,
+            cron_last_run: None,
+            completed: None,
+            description: "Continue from the saved state.".to_string(),
+            batty_config: None,
+            source_path: PathBuf::from("/tmp/task.md"),
+        }
+    }
+
+    #[test]
+    fn staged_restart_context_round_trips_and_marks_consumed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("eng-1-2");
+        init_git_repo(&repo);
+        commit_file(&repo, "src/lib.rs", "pub fn ready() {}\n", "initial");
+        let task = make_task(77);
+
+        let staged =
+            stage_restart_context(&repo, "eng-1-2", &task, "context_pressure", 2, Some(256))
+                .unwrap();
+        assert_eq!(staged.reason, "context_pressure");
+        assert_eq!(staged.restart_count, 2);
+        assert_eq!(staged.output_bytes, Some(256));
+        assert!(!staged.handoff_consumed);
+
+        let consumed = consume_restart_context(&repo).unwrap().unwrap();
+        assert!(consumed.handoff_consumed);
+        assert_eq!(consumed.last_commit, staged.last_commit);
+    }
+
+    #[test]
+    fn proactive_restart_is_suppressed_until_progress_or_cooldown() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("eng-1-2");
+        init_git_repo(&repo);
+        commit_file(&repo, "src/lib.rs", "pub fn ready() {}\n", "initial");
+        let task = make_task(88);
+
+        stage_restart_context(&repo, "eng-1-2", &task, "context_pressure", 1, Some(0)).unwrap();
+        let consumed = consume_restart_context(&repo).unwrap().unwrap();
+        assert!(consumed.handoff_consumed);
+
+        assert!(proactive_restart_is_suppressed(
+            &repo,
+            0,
+            Duration::from_secs(30)
+        ));
+        assert!(!clear_proactive_restart_context_if_stale(
+            &repo,
+            0,
+            Duration::from_secs(30)
+        ));
+    }
+
+    #[test]
+    fn proactive_restart_guard_clears_after_new_output() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("eng-1-2");
+        init_git_repo(&repo);
+        commit_file(&repo, "src/lib.rs", "pub fn ready() {}\n", "initial");
+        let task = make_task(89);
+
+        stage_restart_context(&repo, "eng-1-2", &task, "context_pressure", 1, Some(0)).unwrap();
+        consume_restart_context(&repo).unwrap();
+
+        assert!(clear_proactive_restart_context_if_stale(
+            &repo,
+            12,
+            Duration::from_secs(30)
+        ));
+        assert!(checkpoint::read_restart_context(&repo).is_none());
+    }
+
+    #[test]
+    fn proactive_restart_guard_clears_after_new_commit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("eng-1-2");
+        init_git_repo(&repo);
+        commit_file(&repo, "src/lib.rs", "pub fn ready() {}\n", "initial");
+        let task = make_task(90);
+
+        stage_restart_context(&repo, "eng-1-2", &task, "context_pressure", 1, Some(0)).unwrap();
+        consume_restart_context(&repo).unwrap();
+        commit_file(
+            &repo,
+            "src/lib.rs",
+            "pub fn ready() { println!(\"ok\"); }\n",
+            "follow-up",
+        );
+
+        assert!(clear_proactive_restart_context_if_stale(
+            &repo,
+            0,
+            Duration::from_secs(30)
+        ));
+        assert!(!proactive_restart_is_suppressed(
+            &repo,
+            0,
+            Duration::from_secs(30)
+        ));
     }
 }
