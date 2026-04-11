@@ -5,6 +5,11 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  schedule:
+    # Nightly fuzz run at 02:15 UTC. Only the `scenario-fuzz` job
+    # reacts to this trigger — see its `if: github.event_name ==
+    # 'schedule'` guard.
+    - cron: '15 2 * * *'
 
 env:
   CARGO_TERM_COLOR: always
@@ -121,6 +126,43 @@ jobs:
           --skip team::daemon::health::tests::uncommitted_diff_lines
           --skip team::daemon::health::tests::reconcile_skips_unmerged_branch
           --skip team::daemon::telegram_bridge::tests::maybe_intervene_triage_backlog_marks_member_working_after_live_delivery
+
+      - name: Scenario framework (prescriptive + fuzz smoke)
+        run: cargo test --test scenarios --features scenario-test
+        env:
+          # Default proptest cases; the nightly fuzz job scales this up.
+          PROPTEST_CASES: '32'
+
+  scenario-fuzz:
+    name: Scenario Framework Fuzz (nightly)
+    needs: changes
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y tmux
+
+      - name: Install kanban-md
+        run: |
+          KMD_VERSION="0.32.2"
+          curl -sL "https://github.com/antopolskiy/kanban-md/releases/download/v${KMD_VERSION}/kanban-md_${KMD_VERSION}_linux_amd64.tar.gz" | sudo tar xz -C /usr/local/bin kanban-md
+        shell: bash
+
+      - name: Run fuzz targets with expanded case budget
+        run: >-
+          cargo test --test scenarios --features scenario-test --release
+          fuzz_workflow_happy fuzz_workflow_with_faults fuzz_restart_resilience
+        env:
+          PROPTEST_CASES: '2048'
+          PROPTEST_MAX_SHRINK_ITERS: '8192'
 
   coverage:
     name: Code Coverage

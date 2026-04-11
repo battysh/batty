@@ -24,6 +24,7 @@ nav:
       - Runtime Config: reference/config.md
       - Modules: reference/modules.md
   - Architecture: architecture.md
+  - Testing: testing.md
   - Troubleshooting: troubleshooting.md
   - Contributor Docs: contributing.md
 site_dir: site
