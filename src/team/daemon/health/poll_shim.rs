@@ -1013,9 +1013,18 @@ impl TeamDaemon {
             reason,
             disposition,
         )?;
+        // The freshly respawned shim is in ShimState::Starting. Reflect
+        // that in the daemon's coarse MemberState so stall detection
+        // and status surfaces treat it as recovering, not productively
+        // Working — otherwise a stall check firing on the old
+        // state_changed_at would immediately re-escalate the restart
+        // and produce control-plane loss (#634). `MemberState::Idle`
+        // is the closest "not stalled" signal we have until the first
+        // StateChanged event from the new handle updates it via
+        // `poll_shim_handles`.
         self.states
-            .insert(member_name.to_string(), MemberState::Working);
-        self.update_automation_timers_for_state(member_name, MemberState::Working);
+            .insert(member_name.to_string(), MemberState::Idle);
+        self.update_automation_timers_for_state(member_name, MemberState::Idle);
         self.emit_event(TeamEvent::pane_respawned(member_name));
         self.record_orchestrator_action(format!(
             "lifecycle: downgraded warm resume to {} for {} after {}",
@@ -1282,6 +1291,25 @@ impl TeamDaemon {
     }
 
     fn handle_supervisory_stall(&mut self, name: &str, reason: &str) -> anyhow::Result<()> {
+        // Respect the stall-restart cooldown so a stall check firing
+        // immediately after a restart does not re-trigger another
+        // respawn. Without this guard the supervisory restart loop
+        // could degrade into repeated control-plane disconnects (the
+        // shim sees "orchestrator disconnected / Broken pipe" every
+        // time the daemon drops the old handle) — #634.
+        let restart_cooldown_key = format!("stall-restart::{name}");
+        if self
+            .intervention_cooldowns
+            .get(&restart_cooldown_key)
+            .is_some_and(|last| last.elapsed() < CONTEXT_RESTART_COOLDOWN)
+        {
+            debug!(
+                member = name,
+                "supervisory stall recovery cooldown active; skipping restart"
+            );
+            return Ok(());
+        }
+
         let stall_secs = self
             .shim_handles
             .get(name)
@@ -1955,7 +1983,12 @@ mod tests {
 
         daemon.check_working_state_timeouts().unwrap();
 
-        assert_eq!(daemon.states.get("eng-1"), Some(&MemberState::Working));
+        // Regression for #634: the daemon's coarse MemberState must
+        // track Idle after a cold respawn until the new shim reports
+        // its first ShimState transition. Leaving it on Working would
+        // let stall detection re-fire immediately and degrade the
+        // restart into control-plane loss.
+        assert_eq!(daemon.states.get("eng-1"), Some(&MemberState::Idle));
         assert_eq!(daemon.shim_handles["eng-1"].state, ShimState::Starting);
         assert!(
             daemon
@@ -2012,10 +2045,16 @@ mod tests {
         daemon.check_working_state_timeouts().unwrap();
 
         for member_name in ["architect", "manager"] {
+            // Regression for #634: after a supervisory cold respawn
+            // the daemon must track the member as Idle so the next
+            // stall check does not immediately re-fire on the stale
+            // state_changed_at timestamp. The freshly-started shim
+            // will transition back to Working via a StateChanged
+            // event once it is actually productively working.
             assert_eq!(
                 daemon.states.get(member_name),
-                Some(&MemberState::Working),
-                "management role {member_name} should stay working while the replacement shim starts"
+                Some(&MemberState::Idle),
+                "management role {member_name} should track Idle during restart recovery"
             );
             assert_eq!(daemon.shim_handles[member_name].state, ShimState::Starting);
             assert!(
@@ -2204,7 +2243,12 @@ mod tests {
 
         daemon.check_working_state_timeouts().unwrap();
 
-        assert_eq!(daemon.states.get("manager"), Some(&MemberState::Working));
+        // After a cold respawn the daemon tracks the member as Idle
+        // until the freshly-started shim emits its first StateChanged
+        // event. Tracking them as Working would let stall detection
+        // re-fire on the stale state_changed_at and degrade the
+        // restart into control-plane loss (#634).
+        assert_eq!(daemon.states.get("manager"), Some(&MemberState::Idle));
         assert_eq!(daemon.shim_handles["manager"].state, ShimState::Starting);
         assert!(
             daemon
@@ -2237,6 +2281,85 @@ mod tests {
                 && event.role.as_deref() == Some("manager")
                 && event.reason.as_deref() == Some("supervisory_stall_escalated")
         }));
+    }
+
+    /// Regression for #634: a stall check firing immediately after a
+    /// supervisory restart must not re-trigger `handle_shim_cold_respawn`.
+    /// Without the cooldown guard, repeated restarts degrade into
+    /// control-plane disconnects (the shim sees "orchestrator
+    /// disconnected / Broken pipe" every time the daemon drops the
+    /// old handle).
+    #[test]
+    fn supervisory_stall_recovery_is_rate_limited_by_cooldown() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".batty").join("team_config")).unwrap();
+        let inbox_root = inbox::inboxes_root(tmp.path());
+        inbox::init_inbox(&inbox_root, "architect").unwrap();
+        inbox::init_inbox(&inbox_root, "manager").unwrap();
+
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![
+                architect_member("architect"),
+                manager_member("manager", Some("architect")),
+            ])
+            .build();
+        daemon.config.team_config.shim_working_state_timeout_secs = 1;
+        daemon.config.team_config.workflow_policy.max_stall_restarts = 10;
+
+        insert_mock_handle(&mut daemon, "manager");
+        daemon
+            .shim_handles
+            .get_mut("manager")
+            .unwrap()
+            .apply_state_change(ShimState::Working);
+        daemon
+            .shim_handles
+            .get_mut("manager")
+            .unwrap()
+            .state_changed_at = std::time::Instant::now() - std::time::Duration::from_secs(10);
+        daemon.states.insert("manager".into(), MemberState::Working);
+
+        // Seed a recent stall-restart cooldown so the next stall
+        // check should NOT escalate into another respawn.
+        daemon.intervention_cooldowns.insert(
+            "stall-restart::manager".to_string(),
+            std::time::Instant::now(),
+        );
+
+        let starting_restart_count = crate::team::events::read_events(
+            &tmp.path()
+                .join(".batty")
+                .join("team_config")
+                .join("events.jsonl"),
+        )
+        .map(|events| {
+            events
+                .into_iter()
+                .filter(|e| e.event == "agent_restarted")
+                .count()
+        })
+        .unwrap_or(0);
+
+        daemon.check_working_state_timeouts().unwrap();
+
+        let ending_restart_count = crate::team::events::read_events(
+            &tmp.path()
+                .join(".batty")
+                .join("team_config")
+                .join("events.jsonl"),
+        )
+        .map(|events| {
+            events
+                .into_iter()
+                .filter(|e| e.event == "agent_restarted")
+                .count()
+        })
+        .unwrap_or(0);
+
+        assert_eq!(
+            starting_restart_count, ending_restart_count,
+            "cooldown should have suppressed the stall-driven respawn; no new agent_restarted event should have been emitted"
+        );
     }
 
     #[test]

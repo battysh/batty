@@ -570,7 +570,15 @@ pub(crate) fn handle_engineer_completion(daemon: &mut TeamDaemon, engineer: &str
             telemetry_db::record_test_results(conn, task_id, engineer, &verification_results, &[])?;
         }
         let is_zero_commit = !has_required_evidence && total_commits == 0;
-        let is_narration_only = !has_required_evidence && code_files_changed == 0;
+        // A narration-only completion is one that DID land real commits
+        // but produced no code changes (e.g. docs-only, markdown-only,
+        // or empty commits). A zero-commit attempt is a distinct
+        // failure mode and must not inflate the narration counter —
+        // the two conditions would otherwise overlap when
+        // total_commits == 0 and silently escalate zero-commit attempts
+        // into narration-only escalations after one extra retry (#635).
+        let is_narration_only =
+            !has_required_evidence && total_commits > 0 && code_files_changed == 0;
         let narration_count = if is_narration_only {
             let count = {
                 let entry = daemon
@@ -2419,6 +2427,86 @@ mod tests {
         assert_eq!(
             narration_events[1].reason.as_deref(),
             Some("rejection_count=2")
+        );
+    }
+
+    /// Regression for #635: the narration-rejection counter and the
+    /// `verification_state.iteration` counter must both remain
+    /// consistent across a mixed sequence of zero-commit and
+    /// narration-only attempts. Before the fix it was possible to
+    /// escalate prematurely because the metadata sources disagreed
+    /// about how many narration attempts had occurred.
+    #[test]
+    fn narration_rejection_counter_survives_mixed_zero_commit_and_narration_attempts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "batty-merge-test");
+        write_task_file(&repo, 77, "mixed-failure-task");
+
+        let team_config_dir = repo.join(".batty").join("team_config");
+        let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
+        setup_engineer_worktree(&repo, &worktree_dir, "eng-1", &team_config_dir).unwrap();
+
+        let members = vec![
+            manager_member("manager", None),
+            engineer_member("eng-1", Some("manager"), true),
+        ];
+        let mut daemon = make_test_daemon(&repo, members);
+        daemon.set_active_task_for_test("eng-1", 77);
+        daemon.set_member_state_for_test("eng-1", MemberState::Working);
+
+        // First attempt: zero commits ahead of main. The completion
+        // gate rejects it but does NOT increment the narration-only
+        // counter (this is an "insufficient evidence" failure, not
+        // narration).
+        handle_engineer_completion(&mut daemon, "eng-1").unwrap();
+        assert_eq!(
+            daemon.narration_rejection_counts.get(&77),
+            None,
+            "zero-commit rejection must not bump the narration counter"
+        );
+        assert_eq!(daemon.active_task_id("eng-1"), Some(77));
+
+        // Second attempt: narration-only (empty commit). First
+        // narration rejection — counter = 1, no escalation yet.
+        git_ok(
+            &worktree_dir,
+            &["commit", "--allow-empty", "-m", "commentary only"],
+        );
+        handle_engineer_completion(&mut daemon, "eng-1").unwrap();
+        assert_eq!(
+            daemon.narration_rejection_counts.get(&77),
+            Some(&1),
+            "first narration rejection should record count=1"
+        );
+        assert_eq!(daemon.active_task_id("eng-1"), Some(77));
+
+        // Third attempt: another narration-only. Counter = 2 → escalate.
+        git_ok(
+            &worktree_dir,
+            &["commit", "--allow-empty", "-m", "more commentary"],
+        );
+        handle_engineer_completion(&mut daemon, "eng-1").unwrap();
+
+        // After escalation, the counter must be cleared so a future
+        // reassignment starts fresh.
+        assert!(
+            !daemon.narration_rejection_counts.contains_key(&77),
+            "escalation should clear the narration counter for the task"
+        );
+
+        // And the manager must have been notified — exactly once.
+        let manager_messages =
+            inbox::pending_messages(&inbox::inboxes_root(&repo), "manager").unwrap();
+        assert_eq!(
+            manager_messages.len(),
+            1,
+            "manager should see exactly one escalation message across the mixed sequence"
+        );
+        assert!(
+            manager_messages[0]
+                .body
+                .contains("hit the narration-only quality gate 2 times"),
+            "manager escalation must report the accurate narration count, not the iteration count"
         );
     }
 
