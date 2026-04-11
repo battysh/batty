@@ -99,6 +99,8 @@ mod state;
 mod telegram_bridge;
 #[path = "daemon/telemetry.rs"]
 pub(crate) mod telemetry;
+#[path = "daemon/tick_report.rs"]
+pub mod tick_report;
 #[path = "daemon/verification.rs"]
 pub(crate) mod verification;
 
@@ -195,6 +197,12 @@ pub struct TeamDaemon {
     pub(super) review_nudge_sent: HashSet<u32>,
     pub(super) poll_cycle_count: u64,
     pub(super) poll_interval: Duration,
+    /// Errors recorded during the current `tick()` call. Cleared at the
+    /// start of each tick and drained into the returned `TickReport`.
+    /// Always populated (cheap: empty `Vec` cost), so non-test builds can
+    /// also surface tick-level diagnostics from the future
+    /// `batty debug tick` subcommand.
+    pub(super) current_tick_errors: Vec<(String, String)>,
     pub(super) is_git_repo: bool,
     /// True when the project root is not a git repo but contains git sub-repos.
     pub(super) is_multi_repo: bool,
@@ -536,6 +544,7 @@ impl TeamDaemon {
             review_first_seen: HashMap::new(),
             review_nudge_sent: HashSet::new(),
             poll_cycle_count: 0,
+            current_tick_errors: Vec::new(),
             poll_interval: Duration::from_secs(5),
             is_git_repo,
             is_multi_repo,

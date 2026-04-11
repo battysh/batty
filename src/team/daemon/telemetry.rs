@@ -57,6 +57,11 @@ impl TeamDaemon {
     pub(super) fn record_loop_step_error(&mut self, step: &str, error: &str) {
         warn!(step, error = %error, "daemon loop step failed; continuing");
         self.emit_event(TeamEvent::loop_step_error(step, error));
+        // Capture into the per-tick error buffer so `tick()` can return
+        // structured diagnostics in TickReport. Cleared at the start of
+        // each tick. Cheap when no errors occur.
+        self.current_tick_errors
+            .push((step.to_string(), error.to_string()));
     }
 
     pub(super) fn record_daemon_reloading(&mut self) {
@@ -980,6 +985,7 @@ mod tests {
             review_first_seen: HashMap::new(),
             review_nudge_sent: HashSet::new(),
             poll_cycle_count: 0,
+            current_tick_errors: Vec::new(),
             poll_interval: Duration::from_secs(5),
             is_git_repo: false,
             is_multi_repo: false,
@@ -1410,6 +1416,7 @@ mod tests {
             review_first_seen: HashMap::new(),
             review_nudge_sent: HashSet::new(),
             poll_cycle_count: 0,
+            current_tick_errors: Vec::new(),
             poll_interval: Duration::from_secs(5),
             is_git_repo: false,
             is_multi_repo: false,

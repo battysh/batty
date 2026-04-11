@@ -7,6 +7,7 @@ use tracing::{debug, info, warn};
 
 use super::config_reload::ConfigReloadMonitor;
 use super::hot_reload::HotReloadMonitor;
+use super::tick_report::TickReport;
 use super::{TeamDaemon, standup, status};
 use crate::team;
 use crate::team::config::RoleType;
@@ -90,172 +91,20 @@ impl TeamDaemon {
                 break;
             }
 
-            self.poll_cycle_count = self.poll_cycle_count.saturating_add(1);
+            // Run one productive iteration of the daemon's work. Hot-reload
+            // and heartbeat persistence stay outside of `tick()` because
+            // they need run-loop state (the HotReloadMonitor / ConfigReloadMonitor
+            // owned by `run()`).
+            let _tick_report = self.tick();
 
-            // -- Recoverable subsystems: log-and-skip with consecutive-failure tracking --
-            self.run_recoverable_step("poll_shim_handles", |daemon| daemon.poll_shim_handles());
-            self.run_recoverable_step("shim_health_check", |daemon| daemon.shim_health_check());
-            self.run_recoverable_step("check_working_state_timeouts", |daemon| {
-                daemon.check_working_state_timeouts()
-            });
-            self.run_recoverable_step("check_narration_loops", |daemon| {
-                daemon.check_narration_loops()
-            });
-            self.run_recoverable_step("sync_launch_state_session_ids", |daemon| {
-                daemon.sync_launch_state_session_ids()
-            });
-            self.run_recoverable_step("drain_legacy_command_queue", |daemon| {
-                daemon.drain_legacy_command_queue()
-            });
-
-            // -- Critical subsystems: errors logged but no consecutive-failure tracking --
-            self.run_loop_step("deliver_inbox_messages", |daemon| {
-                daemon.deliver_inbox_messages()
-            });
-            self.run_loop_step("retry_failed_deliveries", |daemon| {
-                daemon.retry_failed_deliveries()
-            });
-            self.run_recoverable_step("expire_stale_pending_messages", |daemon| {
-                daemon.expire_stale_pending_messages()
-            });
-
-            // -- Recoverable subsystems --
-            self.run_recoverable_step("maybe_intervene_triage_backlog", |daemon| {
-                daemon.maybe_intervene_triage_backlog()
-            });
-            self.run_recoverable_step("maybe_intervene_owned_tasks", |daemon| {
-                daemon.maybe_intervene_owned_tasks()
-            });
-            self.run_recoverable_step("maybe_intervene_review_backlog", |daemon| {
-                daemon.maybe_intervene_review_backlog()
-            });
-            self.run_recoverable_step("maybe_escalate_stale_reviews", |daemon| {
-                daemon.maybe_escalate_stale_reviews()
-            });
-            self.run_recoverable_step("maybe_emit_task_aging_alerts", |daemon| {
-                daemon.maybe_emit_task_aging_alerts()
-            });
-            self.run_recoverable_step("maybe_auto_unblock_blocked_tasks", |daemon| {
-                daemon.maybe_auto_unblock_blocked_tasks()
-            });
-            self.run_recoverable_step("process_merge_queue", |daemon| daemon.process_merge_queue());
-
-            // -- Critical subsystems --
-            self.run_loop_step("reconcile_active_tasks", |daemon| {
-                daemon.reconcile_active_tasks()
-            });
-            self.run_loop_step("maybe_manage_task_claim_ttls", |daemon| {
-                daemon.maybe_manage_task_claim_ttls()
-            });
-            self.run_loop_step("maybe_auto_dispatch", |daemon| daemon.maybe_auto_dispatch());
-            self.run_recoverable_step("maybe_recycle_cron_tasks", |daemon| {
-                daemon.maybe_recycle_cron_tasks()
-            });
-
-            // -- Recoverable subsystems --
-            self.run_recoverable_step("maybe_intervene_manager_dispatch_gap", |daemon| {
-                daemon.maybe_intervene_manager_dispatch_gap()
-            });
-            self.run_recoverable_step("maybe_intervene_architect_utilization", |daemon| {
-                daemon.maybe_intervene_architect_utilization()
-            });
-            self.run_recoverable_step("maybe_intervene_board_replenishment", |daemon| {
-                daemon.maybe_intervene_board_replenishment()
-            });
-            self.run_recoverable_step("maybe_detect_pipeline_starvation", |daemon| {
-                daemon.maybe_detect_pipeline_starvation()
-            });
-            self.run_recoverable_step("tact_check", |daemon| daemon.tact_check());
-
-            // -- Recoverable with catch_unwind (panic-safe) --
-            self.run_optional_subsystem_step("process_discord_queue", "discord", |daemon| {
-                daemon.process_discord_queue()
-            });
-            self.run_optional_subsystem_step("process_telegram_queue", "telegram", |daemon| {
-                daemon.process_telegram_queue()
-            });
-            self.run_recoverable_step("maybe_fire_nudges", |daemon| daemon.maybe_fire_nudges());
-            self.run_recoverable_step("check_backend_health", |daemon| {
-                daemon.check_backend_health()
-            });
-            self.run_recoverable_step("maybe_reconcile_stale_worktrees", |daemon| {
-                daemon.maybe_reconcile_stale_worktrees()
-            });
-            self.run_recoverable_step("check_worktree_staleness", |daemon| {
-                daemon.check_worktree_staleness()
-            });
-            self.run_recoverable_step("maybe_warn_uncommitted_work", |daemon| {
-                daemon.maybe_warn_uncommitted_work()
-            });
-            self.run_recoverable_step("maybe_cleanup_shared_cargo_target", |daemon| {
-                daemon.maybe_cleanup_shared_cargo_target()
-            });
-            self.run_recoverable_step("maybe_run_disk_hygiene", |daemon| {
-                daemon.maybe_run_disk_hygiene()
-            });
-            self.run_recoverable_step("record_parity_snapshot", |daemon| {
-                if daemon.config.team_config.automation.clean_room_mode {
-                    daemon.sync_cleanroom_specs()?;
-                    if let Ok(report) =
-                        crate::team::parity::ParityReport::load(&daemon.config.project_root)
-                    {
-                        daemon.record_parity_updated(&report.summary());
-                    }
-                    crate::team::parity::sync_gap_tasks(&daemon.config.project_root)?;
-                }
-                Ok(())
-            });
-            self.run_optional_subsystem_step("maybe_generate_standup", "standup", |daemon| {
-                let generated =
-                    standup::maybe_generate_standup(standup::StandupGenerationContext {
-                        project_root: &daemon.config.project_root,
-                        team_config: &daemon.config.team_config,
-                        members: &daemon.config.members,
-                        watchers: &daemon.watchers,
-                        states: &daemon.states,
-                        pane_map: &daemon.config.pane_map,
-                        telegram_bot: daemon.telegram_bot.as_ref(),
-                        paused_standups: &daemon.paused_standups,
-                        last_standup: &mut daemon.last_standup,
-                        backend_health: &daemon.backend_health,
-                    })?;
-                for recipient in generated {
-                    daemon.record_standup_generated(&recipient);
-                }
-                Ok(())
-            });
-            self.run_recoverable_step("maybe_rotate_board", |daemon| daemon.maybe_rotate_board());
-            self.run_recoverable_step("maybe_auto_archive", |daemon| daemon.maybe_auto_archive());
-            self.run_recoverable_step("run_auto_doctor", |daemon| {
-                daemon.run_auto_doctor().map(|_| ())
-            });
-            self.run_recoverable_step_with_catch_unwind("maybe_generate_retrospective", |daemon| {
-                daemon.maybe_generate_retrospective()
-            });
-            self.run_recoverable_step("maybe_notify_failure_patterns", |daemon| {
-                daemon.maybe_notify_failure_patterns()
-            });
+            // Hot-reload checks: kept in `run()` because they own the
+            // monitor handles. They reuse the same recoverable-step error
+            // handling so a panic is logged, not fatal.
             self.run_recoverable_step("maybe_reload_binary", |daemon| {
                 daemon.maybe_hot_reload_binary(hot_reload.as_mut())
             });
             self.run_recoverable_step("maybe_reload_config", |daemon| {
                 daemon.maybe_hot_reload_config(config_reload.as_mut())
-            });
-            status::update_pane_status_labels(status::PaneStatusLabelUpdateContext {
-                project_root: &self.config.project_root,
-                members: &self.config.members,
-                pane_map: &self.config.pane_map,
-                states: &self.states,
-                nudges: &self.nudges,
-                last_standup: &self.last_standup,
-                paused_standups: &self.paused_standups,
-                standup_interval_for_member: |member_name| {
-                    standup::standup_interval_for_member_name(
-                        &self.config.team_config,
-                        &self.config.members,
-                        member_name,
-                    )
-                },
             });
 
             // Periodic heartbeat
@@ -286,6 +135,187 @@ impl TeamDaemon {
         }
         self.record_daemon_stopped(shutdown_reason, uptime);
         Ok(())
+    }
+
+    /// Run one iteration of the daemon's productive work without sleeping
+    /// or touching hot-reload state. This is the inner body of `run()`'s
+    /// loop, factored out so tests (and a future `batty debug tick`
+    /// subcommand) can drive the daemon a single step at a time.
+    ///
+    /// Returns a [`TickReport`] capturing observable side effects of the
+    /// tick. Phase 1 populates `cycle` and `subsystem_errors`; the other
+    /// fields are placeholders that the scenario framework fills in by
+    /// snapshotting state around the call.
+    pub fn tick(&mut self) -> TickReport {
+        // Reset per-tick error capture so the returned report only reflects
+        // failures that happened during this call.
+        self.current_tick_errors.clear();
+
+        self.poll_cycle_count = self.poll_cycle_count.saturating_add(1);
+
+        // -- Recoverable subsystems: log-and-skip with consecutive-failure tracking --
+        self.run_recoverable_step("poll_shim_handles", |daemon| daemon.poll_shim_handles());
+        self.run_recoverable_step("shim_health_check", |daemon| daemon.shim_health_check());
+        self.run_recoverable_step("check_working_state_timeouts", |daemon| {
+            daemon.check_working_state_timeouts()
+        });
+        self.run_recoverable_step("check_narration_loops", |daemon| {
+            daemon.check_narration_loops()
+        });
+        self.run_recoverable_step("sync_launch_state_session_ids", |daemon| {
+            daemon.sync_launch_state_session_ids()
+        });
+        self.run_recoverable_step("drain_legacy_command_queue", |daemon| {
+            daemon.drain_legacy_command_queue()
+        });
+
+        // -- Critical subsystems: errors logged but no consecutive-failure tracking --
+        self.run_loop_step("deliver_inbox_messages", |daemon| {
+            daemon.deliver_inbox_messages()
+        });
+        self.run_loop_step("retry_failed_deliveries", |daemon| {
+            daemon.retry_failed_deliveries()
+        });
+        self.run_recoverable_step("expire_stale_pending_messages", |daemon| {
+            daemon.expire_stale_pending_messages()
+        });
+
+        // -- Recoverable subsystems --
+        self.run_recoverable_step("maybe_intervene_triage_backlog", |daemon| {
+            daemon.maybe_intervene_triage_backlog()
+        });
+        self.run_recoverable_step("maybe_intervene_owned_tasks", |daemon| {
+            daemon.maybe_intervene_owned_tasks()
+        });
+        self.run_recoverable_step("maybe_intervene_review_backlog", |daemon| {
+            daemon.maybe_intervene_review_backlog()
+        });
+        self.run_recoverable_step("maybe_escalate_stale_reviews", |daemon| {
+            daemon.maybe_escalate_stale_reviews()
+        });
+        self.run_recoverable_step("maybe_emit_task_aging_alerts", |daemon| {
+            daemon.maybe_emit_task_aging_alerts()
+        });
+        self.run_recoverable_step("maybe_auto_unblock_blocked_tasks", |daemon| {
+            daemon.maybe_auto_unblock_blocked_tasks()
+        });
+        self.run_recoverable_step("process_merge_queue", |daemon| daemon.process_merge_queue());
+
+        // -- Critical subsystems --
+        self.run_loop_step("reconcile_active_tasks", |daemon| {
+            daemon.reconcile_active_tasks()
+        });
+        self.run_loop_step("maybe_manage_task_claim_ttls", |daemon| {
+            daemon.maybe_manage_task_claim_ttls()
+        });
+        self.run_loop_step("maybe_auto_dispatch", |daemon| daemon.maybe_auto_dispatch());
+        self.run_recoverable_step("maybe_recycle_cron_tasks", |daemon| {
+            daemon.maybe_recycle_cron_tasks()
+        });
+
+        // -- Recoverable subsystems --
+        self.run_recoverable_step("maybe_intervene_manager_dispatch_gap", |daemon| {
+            daemon.maybe_intervene_manager_dispatch_gap()
+        });
+        self.run_recoverable_step("maybe_intervene_architect_utilization", |daemon| {
+            daemon.maybe_intervene_architect_utilization()
+        });
+        self.run_recoverable_step("maybe_intervene_board_replenishment", |daemon| {
+            daemon.maybe_intervene_board_replenishment()
+        });
+        self.run_recoverable_step("maybe_detect_pipeline_starvation", |daemon| {
+            daemon.maybe_detect_pipeline_starvation()
+        });
+        self.run_recoverable_step("tact_check", |daemon| daemon.tact_check());
+
+        // -- Recoverable with catch_unwind (panic-safe) --
+        self.run_optional_subsystem_step("process_discord_queue", "discord", |daemon| {
+            daemon.process_discord_queue()
+        });
+        self.run_optional_subsystem_step("process_telegram_queue", "telegram", |daemon| {
+            daemon.process_telegram_queue()
+        });
+        self.run_recoverable_step("maybe_fire_nudges", |daemon| daemon.maybe_fire_nudges());
+        self.run_recoverable_step("check_backend_health", |daemon| {
+            daemon.check_backend_health()
+        });
+        self.run_recoverable_step("maybe_reconcile_stale_worktrees", |daemon| {
+            daemon.maybe_reconcile_stale_worktrees()
+        });
+        self.run_recoverable_step("check_worktree_staleness", |daemon| {
+            daemon.check_worktree_staleness()
+        });
+        self.run_recoverable_step("maybe_warn_uncommitted_work", |daemon| {
+            daemon.maybe_warn_uncommitted_work()
+        });
+        self.run_recoverable_step("maybe_cleanup_shared_cargo_target", |daemon| {
+            daemon.maybe_cleanup_shared_cargo_target()
+        });
+        self.run_recoverable_step("maybe_run_disk_hygiene", |daemon| {
+            daemon.maybe_run_disk_hygiene()
+        });
+        self.run_recoverable_step("record_parity_snapshot", |daemon| {
+            if daemon.config.team_config.automation.clean_room_mode {
+                daemon.sync_cleanroom_specs()?;
+                if let Ok(report) =
+                    crate::team::parity::ParityReport::load(&daemon.config.project_root)
+                {
+                    daemon.record_parity_updated(&report.summary());
+                }
+                crate::team::parity::sync_gap_tasks(&daemon.config.project_root)?;
+            }
+            Ok(())
+        });
+        self.run_optional_subsystem_step("maybe_generate_standup", "standup", |daemon| {
+            let generated = standup::maybe_generate_standup(standup::StandupGenerationContext {
+                project_root: &daemon.config.project_root,
+                team_config: &daemon.config.team_config,
+                members: &daemon.config.members,
+                watchers: &daemon.watchers,
+                states: &daemon.states,
+                pane_map: &daemon.config.pane_map,
+                telegram_bot: daemon.telegram_bot.as_ref(),
+                paused_standups: &daemon.paused_standups,
+                last_standup: &mut daemon.last_standup,
+                backend_health: &daemon.backend_health,
+            })?;
+            for recipient in generated {
+                daemon.record_standup_generated(&recipient);
+            }
+            Ok(())
+        });
+        self.run_recoverable_step("maybe_rotate_board", |daemon| daemon.maybe_rotate_board());
+        self.run_recoverable_step("maybe_auto_archive", |daemon| daemon.maybe_auto_archive());
+        self.run_recoverable_step("run_auto_doctor", |daemon| {
+            daemon.run_auto_doctor().map(|_| ())
+        });
+        self.run_recoverable_step_with_catch_unwind("maybe_generate_retrospective", |daemon| {
+            daemon.maybe_generate_retrospective()
+        });
+        self.run_recoverable_step("maybe_notify_failure_patterns", |daemon| {
+            daemon.maybe_notify_failure_patterns()
+        });
+        status::update_pane_status_labels(status::PaneStatusLabelUpdateContext {
+            project_root: &self.config.project_root,
+            members: &self.config.members,
+            pane_map: &self.config.pane_map,
+            states: &self.states,
+            nudges: &self.nudges,
+            last_standup: &self.last_standup,
+            paused_standups: &self.paused_standups,
+            standup_interval_for_member: |member_name| {
+                standup::standup_interval_for_member_name(
+                    &self.config.team_config,
+                    &self.config.members,
+                    member_name,
+                )
+            },
+        });
+
+        // Drain the per-tick error buffer into a fresh report.
+        let mut report = TickReport::new(self.poll_cycle_count);
+        report.subsystem_errors = std::mem::take(&mut self.current_tick_errors);
+        report
     }
 
     /// Send Shutdown to all active shim handles, wait for exit, fall back to Kill.
@@ -467,5 +497,48 @@ impl TeamDaemon {
         if timeout_secs > 0 {
             std::thread::sleep(Duration::from_secs(timeout_secs as u64));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::team::test_support::TestDaemonBuilder;
+
+    /// Ticket #636 acceptance test: invoking `tick()` on an empty daemon
+    /// produces a `Default`-shaped report (cycle advances, no errors, all
+    /// observability vecs empty). This pins the `TickReport` contract for
+    /// later phases of the scenario framework.
+    #[test]
+    fn tick_on_empty_daemon_returns_default_shaped_report() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Bootstrap the board tasks directory so subsystems that read it
+        // (owned-tasks intervention, review backlog, auto-unblock, cron
+        // recycling, manager dispatch gap, architect utilization, board
+        // replenishment, pipeline starvation) see an empty-but-valid
+        // board instead of logging a read-directory failure.
+        let tasks_dir = tmp.path().join(".batty/team_config/board/tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+
+        let mut daemon = TestDaemonBuilder::new(tmp.path()).build();
+
+        let report = daemon.tick();
+
+        assert_eq!(report.cycle, 1, "first tick should bump cycle to 1");
+        assert!(
+            report.subsystem_errors.is_empty(),
+            "empty daemon should record no subsystem errors, got {:?}",
+            report.subsystem_errors
+        );
+        assert!(report.events_emitted.is_empty());
+        assert!(report.state_transitions.is_empty());
+        assert!(report.main_advanced_to.is_none());
+        assert!(report.inbox_delivered.is_empty());
+        assert!(report.tasks_transitioned.is_empty());
+        assert!(report.ok(), "report.ok() should be true with no errors");
+
+        // Ticking again advances the cycle counter monotonically.
+        let second = daemon.tick();
+        assert_eq!(second.cycle, 2, "second tick should bump cycle to 2");
+        assert!(second.ok());
     }
 }

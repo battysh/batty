@@ -270,6 +270,7 @@ mod tests {
             review_first_seen: HashMap::new(),
             review_nudge_sent: HashSet::new(),
             poll_cycle_count: 0,
+            current_tick_errors: Vec::new(),
             poll_interval: Duration::from_secs(5),
             is_git_repo: false,
             is_multi_repo: false,
