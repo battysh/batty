@@ -8,6 +8,7 @@ use std::io::{self, Write as IoWrite};
 use std::path::Path;
 
 use anyhow::{Context, Result, anyhow, bail};
+use chrono::Utc;
 use tracing::{debug, warn};
 
 use crate::env_file;
@@ -295,8 +296,8 @@ impl DiscordBot {
     }
 
     pub fn send_formatted_message(&self, channel_id: &str, message: &str) -> Result<()> {
-        let (title, description, color) = outbound_embed_parts(message);
-        self.send_embed(channel_id, &title, &description, color)
+        let embed = outbound_embed(message);
+        self.send_rich_embed(channel_id, &embed)
     }
 
     pub fn validate_token(&self) -> Result<BotIdentity> {
@@ -661,24 +662,23 @@ pub fn discord_status(project_root: &Path) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn outbound_embed_parts(message: &str) -> (String, String, u32) {
+pub(super) fn outbound_embed(message: &str) -> RichEmbed {
     let trimmed = message.trim();
     if let Some(rest) = trimmed.strip_prefix("--- Message from ") {
         if let Some((sender, body)) = rest.split_once("---\n") {
             let sender = sender.trim();
-            return (
-                format!("Message from {sender}"),
-                body.trim().to_string(),
-                color_for_role(sender),
-            );
+            return RichEmbed::new("💬 Command Update", color_for_role(sender))
+                .with_author(role_author_label(sender))
+                .with_description(body.trim())
+                .with_footer("batty · command surface")
+                .with_timestamp(Utc::now().to_rfc3339());
         }
     }
 
-    (
-        "Batty update".to_string(),
-        trimmed.to_string(),
-        color_for_role("system"),
-    )
+    RichEmbed::new("💬 Batty Update", color_for_role("system"))
+        .with_description(trimmed)
+        .with_footer("batty · command surface")
+        .with_timestamp(Utc::now().to_rfc3339())
 }
 
 pub(super) fn color_for_role(role: &str) -> u32 {
@@ -1241,20 +1241,29 @@ mod tests {
     }
 
     #[test]
-    fn outbound_embed_parts_extracts_sender_header() {
-        let (title, description, color) =
-            outbound_embed_parts("--- Message from architect ---\nFocus on tests");
-        assert_eq!(title, "Message from architect");
-        assert_eq!(description, "Focus on tests");
-        assert_eq!(color, color_for_role("architect"));
+    fn outbound_embed_extracts_sender_header() {
+        let embed = outbound_embed("--- Message from architect ---\nFocus on tests");
+        assert_eq!(embed.title, "💬 Command Update");
+        assert_eq!(embed.description.as_deref(), Some("Focus on tests"));
+        assert_eq!(embed.color, color_for_role("architect"));
+        assert_eq!(embed.author_name.as_deref(), Some("🏗️ architect"));
+        assert_eq!(embed.footer.as_deref(), Some("batty · command surface"));
+        assert!(
+            embed
+                .timestamp
+                .as_deref()
+                .is_some_and(|ts| ts.contains('T'))
+        );
     }
 
     #[test]
-    fn outbound_embed_parts_falls_back_for_plain_text() {
-        let (title, description, color) = outbound_embed_parts("plain message");
-        assert_eq!(title, "Batty update");
-        assert_eq!(description, "plain message");
-        assert_eq!(color, color_for_role("system"));
+    fn outbound_embed_falls_back_for_plain_text() {
+        let embed = outbound_embed("plain message");
+        assert_eq!(embed.title, "💬 Batty Update");
+        assert_eq!(embed.description.as_deref(), Some("plain message"));
+        assert_eq!(embed.color, color_for_role("system"));
+        assert_eq!(embed.author_name, None);
+        assert_eq!(embed.footer.as_deref(), Some("batty · command surface"));
     }
 
     #[test]
