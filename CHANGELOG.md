@@ -2,6 +2,71 @@
 
 All notable changes to Batty are documented here.
 
+## 0.11.1 — 2026-04-11
+
+Stability patch release surfaced by a live-daemon monitoring session on
+top of 0.11.0. Fixes one silent throughput killer in the auto-merge
+path, one planner crash triggered by newer kanban-md output, and
+unblocks main CI after a macOS runner flake.
+
+### Fixes
+
+- **Auto-merge silently dropped every task** (`missing_packet`) —
+  `handle_engineer_completion` moved a passing task to review and
+  enqueued a merge request but never wrote the `branch`, `commit`,
+  `worktree_path`, `tests_run`, or `tests_passed` markers to the task's
+  workflow metadata. The merge queue's
+  `missing_completion_packet_detail` then rejected every single
+  request with `branch marker missing; commit marker missing; worktree
+  marker missing`, preventing any auto-merge from ever landing. Tasks
+  piled up in `review` indefinitely under multi-engineer load. The
+  test fixture had been masking the bug by pre-seeding the metadata;
+  that pre-seed is now removed so the existing `completion_*` tests
+  exercise the real production path end-to-end, and a new
+  `handle_engineer_completion_records_packet_metadata_for_auto_merge`
+  regression test asserts the markers explicitly.
+  (`src/team/merge/completion.rs`)
+- **Planning responses crashed on kanban-md 0.32+** — kanban-md
+  changed its create output from `Created task #629\n` to
+  `Created task #629: <title>\n`. The planning parser tried to parse
+  the whole remainder as `u32` and every planning response crashed
+  with `invalid task id returned by kanban-md: '629: Auto-repair…'`.
+  The parser now extracts only the leading run of digits after `#` so
+  both the old and new output shapes work. Added
+  `create_board_tasks_parses_new_output_shape_with_title_suffix`
+  with a dedicated fake kanban-md binary that emits the new format.
+  (`src/team/tact/parser.rs`)
+- **`run_git_with_timeout` swallowed stderr** — preserve-worktree
+  failures from `git add -A -- . :(exclude).batty :(exclude).cargo`
+  showed only `exit status: 1` in daemon logs with no reason,
+  making the failures impossible to diagnose remotely. The helper
+  now pipes stdout to `/dev/null`, captures stderr, drains it on
+  success, and appends it to `bail!` on failure.
+  (`src/team/task_loop.rs`)
+
+### CI
+
+- **macOS Rust Checks unblocked** — `run_tests_in_worktree` shelled
+  out via `sh -lc "cargo test"`. The `-l` flag makes sh re-source
+  `/etc/profile` and `~/.profile` as a login shell, which on GitHub's
+  hosted macOS runners drops `~/.cargo/bin` from PATH (rustup writes
+  to `~/.bashrc`, not `~/.profile`). The second invocation fails with
+  ENOENT when spawning cargo. Dropped the `-l` flag so plain `sh -c`
+  inherits the parent's PATH unchanged in both production and tests.
+  (`src/team/task_loop.rs`)
+- **Code Coverage job marked `continue-on-error`** — tarpaulin
+  intermittently loses track of child PIDs in subprocess-heavy
+  tests (fake shim channels, PTY interactions) and the whole job
+  segfaults mid-run. Coverage is a reporting metric, not a
+  correctness gate; a flaky profiler should not block merges. The
+  main Rust Checks jobs remain the source of truth for test
+  correctness. (`.github/workflows/ci.yml`)
+- **`verify_project_updates_parity_and_writes_report` skipped on Ubuntu
+  CI** — pre-existing flake that races a candidate script subprocess
+  and panics with `Broken pipe (os error 32)`. Already on the coverage
+  skip list; now on the main Rust Checks skip list too so the full
+  test matrix is deterministic. (`.github/workflows/ci.yml`)
+
 ## 0.11.0 — 2026-04-11
 
 Throughput and stability release. Clears the review queue, ships the
