@@ -100,4 +100,5 @@ scenario-test = []
 tempfile = "3"
 serial_test = "3"
 proptest = "1"
+proptest-state-machine = "0.8"
 filetime = "0.2"

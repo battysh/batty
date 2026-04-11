@@ -22,6 +22,9 @@ mod scenarios_common;
 #[path = "scenarios/prescribed/mod.rs"]
 mod prescribed;
 
+#[path = "scenarios/fuzz/mod.rs"]
+mod fuzz;
+
 use scenarios_common::ScenarioFixture;
 
 #[test]
