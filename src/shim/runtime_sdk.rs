@@ -825,7 +825,8 @@ fn proactive_context_warning(
     let model = msg
         .model_name()
         .or_else(|| last_model_name.map(str::to_string));
-    let context_limit_tokens = resolved_model_context_limit_tokens(model.as_deref());
+    let context_limit_tokens =
+        effective_context_limit_tokens(model.as_deref(), used_tokens);
     let usage_pct = ((used_tokens.saturating_mul(100)) / context_limit_tokens.max(1)) as u8;
     if usage_pct < PROACTIVE_CONTEXT_WARNING_PCT {
         return None;
@@ -855,6 +856,49 @@ fn resolved_model_context_limit_tokens(model: Option<&str>) -> u64 {
     } else {
         DEFAULT_CONTEXT_LIMIT_TOKENS
     }
+}
+
+/// Resolve the context window limit for a model with an escape hatch when
+/// reported token usage already exceeds the nominal limit.
+///
+/// The nominal path is [`resolved_model_context_limit_tokens`]: a static
+/// lookup from the SDK-reported model name. That works when the SDK reports
+/// the full variant (e.g. `claude-opus-4-6-1m`), but Claude Code in 1M mode
+/// sometimes reports the bare model name (`claude-opus-4-6`) while the
+/// actual runtime window is 1M. Combined with
+/// [`SdkOutput::usage_total_tokens`] — which sums `cache_read_input_tokens`
+/// (a near-full 1M cache read per turn is common for cached-prompt agents) —
+/// this caused the proactive-context-pressure subsystem to report usage
+/// percentages of 200-500% for healthy 1M-context agents and start
+/// restarting them needlessly.
+///
+/// The defensive path: if the reported `used_tokens` already exceeds the
+/// nominal limit, the nominal limit is provably wrong. Escalate to the
+/// next tier (200K → 1M for Claude models, 128K → 1M otherwise). A
+/// genuinely over-1M agent still trips, but a 1M-variant agent running
+/// under budget no longer gets panicked into a restart loop.
+fn effective_context_limit_tokens(model: Option<&str>, used_tokens: u64) -> u64 {
+    let nominal = resolved_model_context_limit_tokens(model);
+    if used_tokens <= nominal {
+        return nominal;
+    }
+
+    // Nominal is wrong. Bump to the next known Claude tier and re-check.
+    // Claude currently ships 200K and 1M-context variants; any usage that
+    // already exceeds 200K must be the 1M variant (or a future tier we'll
+    // pick up when it ships).
+    let bumped = 1_000_000;
+    if bumped > nominal {
+        tracing::warn!(
+            model = ?model,
+            used_tokens,
+            nominal_limit = nominal,
+            bumped_limit = bumped,
+            "shim nominal context limit exceeded; bumping to 1M-context tier \
+             (SDK likely reported a stripped model name for a 1M variant)"
+        );
+    }
+    bumped
 }
 
 // ---------------------------------------------------------------------------

@@ -226,18 +226,18 @@ impl SdkOutput {
     }
 
     pub fn usage_total_tokens(&self) -> u64 {
-        let Some(usage) = self.usage.as_ref() else {
-            return 0;
-        };
-        let cache_creation = usage.get("cache_creation");
-        json_u64(usage.get("input_tokens"))
-            + json_u64(usage.get("cached_input_tokens"))
-            + json_u64(usage.get("cache_creation_input_tokens"))
-            + json_u64(cache_creation.and_then(|value| value.get("ephemeral_5m_input_tokens")))
-            + json_u64(cache_creation.and_then(|value| value.get("ephemeral_1h_input_tokens")))
-            + json_u64(usage.get("cache_read_input_tokens"))
-            + json_u64(usage.get("output_tokens"))
-            + json_u64(usage.get("reasoning_output_tokens"))
+        // Delegate to `token_usage()` so the total uses the same de-duped
+        // cache-creation accounting as every other consumer. The prior
+        // bespoke implementation summed `cache_creation_input_tokens` AND
+        // `ephemeral_5m_input_tokens` AND `ephemeral_1h_input_tokens`, even
+        // though the first field is already the sum of the latter two in
+        // Claude's stream-json reporting — so cached prompts on the 1M
+        // model showed ~2x inflated totals, pushing healthy agents past
+        // the context-pressure threshold on every turn. See
+        // `token_usage` above for the canonical `.max()` de-dup.
+        self.token_usage()
+            .map(|usage| usage.total_tokens())
+            .unwrap_or(0)
     }
 }
 
