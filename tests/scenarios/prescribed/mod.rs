@@ -6,3 +6,4 @@
 //! cross-feature scenarios land in later tickets (#641, #642).
 
 pub mod happy_path;
+pub mod regressions;
