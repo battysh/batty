@@ -2,6 +2,24 @@
 
 All notable changes to Batty are documented here.
 
+## 0.10.10 — 2026-04-10
+
+Package two more review-queue items. Both branches were clean (merge-tree
+dry-run zero conflicts, tests passing) but had no owner. Cherry-picked
+into main and released.
+
+- **Preserve restart handoff state across context-pressure restarts (#626)**
+  — context-pressure restarts now carry over the handoff state so the
+  engineer picks up on the same task instead of landing cold. 10 files,
+  +613/-15. (`src/team/daemon/health/context.rs` and friends)
+- **Keep review-queue scans compatible with legacy timestamp offsets (#628)**
+  — review queue scan is resilient to older timestamp formats that
+  predate the merge-path-health observability landing in 0.10.7.
+  7 files, +388/-35. (`src/team/daemon/tests.rs`,
+  `src/team/review.rs`)
+
+3,369 tests passing.
+
 ## 0.10.9 — 2026-04-10
 
 Clean up the last three compile-time warnings so the release build ships
