@@ -90,6 +90,11 @@ integration = []
 shim-integration = []
 shim-benchmark = []
 live-agent = []
+# Scenario-framework public test surface (ScenarioHooks + FakeShim).
+# Enabled by `cargo test` automatically (`#[cfg(test)]` side of the gate)
+# and by integration test binaries via
+# `cargo test --features scenario-test`. Off in release builds.
+scenario-test = []
 
 [dev-dependencies]
 tempfile = "3"
