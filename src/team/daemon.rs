@@ -319,7 +319,7 @@ impl TeamDaemon {
         self.record_orchestrator_action(format!("blocked recovery: {reason}"));
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[allow(dead_code)]
     pub(super) fn preserve_member_worktree(
         &mut self,
         member_name: &str,

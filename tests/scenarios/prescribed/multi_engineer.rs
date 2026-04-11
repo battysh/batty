@@ -11,7 +11,7 @@ fn multi_engineer_three_engineers_ten_tasks_walks_cleanly() {
         .with_engineers(3);
 
     for id in 1..=10u32 {
-        builder = builder.with_task(id, &format!("task #{id}"), "todo", None);
+        builder = builder.with_task(id, format!("task #{id}"), "todo", None);
     }
 
     let mut fixture = builder.build();

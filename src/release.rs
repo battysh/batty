@@ -164,6 +164,7 @@ pub fn latest_record(project_root: &Path) -> Result<Option<ReleaseRecord>> {
     Ok(Some(record))
 }
 
+#[allow(clippy::result_large_err)]
 fn run_release_with_verifier(
     project_root: &Path,
     requested_tag: Option<&str>,

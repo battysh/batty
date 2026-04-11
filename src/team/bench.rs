@@ -254,11 +254,10 @@ roles:
         bench_engineer(tmp.path(), "eng-1-1", Some("pause")).unwrap();
         assert!(unbench_engineer(tmp.path(), "eng-1-1").unwrap());
         assert!(
-            load_bench_state(tmp.path())
+            !load_bench_state(tmp.path())
                 .unwrap()
                 .benched
-                .get("eng-1-1")
-                .is_none()
+                .contains_key("eng-1-1")
         );
     }
 

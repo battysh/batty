@@ -124,7 +124,7 @@ impl StateMachineTest for FuzzTest {
             };
             builder = builder.with_task(
                 *id,
-                &format!("fuzz task {id}"),
+                format!("fuzz task {id}"),
                 status,
                 task.claimed_by.as_deref(),
             );

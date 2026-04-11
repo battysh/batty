@@ -837,7 +837,7 @@ fn healthy_manager_dispatch_gap_does_not_fallback_dispatch() {
     daemon.maybe_intervene_manager_dispatch_gap().unwrap();
 
     assert_eq!(daemon.active_task_id("eng-2"), None);
-    assert!(harness.pending_inbox_messages("lead").unwrap().len() >= 1);
+    assert!(!harness.pending_inbox_messages("lead").unwrap().is_empty());
     assert!(
         child.recv::<crate::shim::protocol::Command>().is_err(),
         "healthy manager path should not bypass into direct dispatch"
