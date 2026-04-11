@@ -757,19 +757,8 @@ fn friendly_event_description(event: &TeamEvent) -> String {
             if body.is_empty() {
                 format!("**{engineer}** picked up:\n**{title}**")
             } else {
-                // Truncate body for spoiler at 1500 chars (Discord embed limit ~4096)
-                let body_preview = if body.len() > 1500 {
-                    let end = body
-                        .char_indices()
-                        .take_while(|&(i, _)| i < 1500)
-                        .last()
-                        .map(|(i, c)| i + c.len_utf8())
-                        .unwrap_or(1500);
-                    format!("{}...", &body[..end])
-                } else {
-                    body.to_string()
-                };
-                format!("**{engineer}** picked up:\n**{title}**\n||{body_preview}||")
+                let body_preview = truncate_with_suffix(body, 3800, "\n[…truncated in Discord]");
+                format!("**{engineer}** picked up:\n**{title}**\n{body_preview}")
             }
         }
         "task_escalated" => {
@@ -898,6 +887,19 @@ fn friendly_event_description(event: &TeamEvent) -> String {
             sentence
         }
     }
+}
+
+fn truncate_with_suffix(input: &str, limit: usize, suffix: &str) -> String {
+    let input_len = input.chars().count();
+    if input_len <= limit {
+        return input.to_string();
+    }
+
+    let suffix_len = suffix.chars().count();
+    let head_len = limit.saturating_sub(suffix_len);
+    let mut out: String = input.chars().take(head_len).collect();
+    out.push_str(suffix);
+    out
 }
 
 fn event_color(event: &TeamEvent) -> u32 {
@@ -1106,6 +1108,39 @@ mod tests {
 
         let board_event = TeamEvent::task_assigned("eng-1", "Task #42");
         assert_eq!(event_channel_id(&config, &board_event), Some("events"));
+    }
+
+    #[test]
+    fn task_assigned_description_uses_plain_text_without_spoilers() {
+        let mut event = TeamEvent::task_assigned(
+            "eng-1",
+            "Task #42: fix Discord body preview\nFirst line of body\nSecond line of body",
+        );
+        event.to = Some("eng-1".into());
+
+        let description = friendly_event_description(&event);
+
+        assert!(description.contains("**eng-1** picked up:"));
+        assert!(description.contains("First line of body"));
+        assert!(description.contains("Second line of body"));
+        assert!(!description.contains("||"));
+    }
+
+    #[test]
+    fn task_assigned_description_uses_expand_marker_when_truncated() {
+        let long_body = "a".repeat(4000);
+        let mut event = TeamEvent::task_assigned(
+            "eng-1",
+            &format!("Task #42: fix Discord body preview\n{long_body}"),
+        );
+        event.to = Some("eng-1".into());
+
+        let description = friendly_event_description(&event);
+
+        assert!(description.contains("[…truncated in Discord]"));
+        assert!(!description.contains("||"));
+        assert!(description.chars().count() > 3800);
+        assert!(description.chars().count() < 3950);
     }
 
     #[test]

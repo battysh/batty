@@ -30,9 +30,7 @@ impl TeamDaemon {
             ensure_git_ready(&self.config.project_root)?;
             ensure_worktree_operations(&self.config.project_root)?;
         } else {
-            info!(
-                "skipping git preflight: no engineer members use worktrees (use_worktrees=true)"
-            );
+            info!("skipping git preflight: no engineer members use worktrees (use_worktrees=true)");
         }
 
         ensure_telemetry_writable(&self.config.project_root)?;
