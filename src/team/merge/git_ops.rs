@@ -19,6 +19,7 @@ pub(crate) fn run_git_with_context(
     std::process::Command::new("git")
         .args(args)
         .current_dir(repo_dir)
+        .env("GIT_EDITOR", "true")
         .output()
         .with_context(|| {
             format!(
