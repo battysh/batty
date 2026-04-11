@@ -93,6 +93,43 @@ impl<'a> ScenarioHooks<'a> {
         self.daemon.shim_handles.remove(name).is_some()
     }
 
+    /// Send a message through an existing shim handle as if the daemon
+    /// had dispatched it. Mirrors `AgentHandle::send_message` and returns
+    /// an error if no handle is registered for `name`.
+    pub fn send_to_shim(&mut self, name: &str, from: &str, body: &str) -> anyhow::Result<()> {
+        let handle = self
+            .daemon
+            .shim_handles
+            .get_mut(name)
+            .ok_or_else(|| anyhow::anyhow!("no shim handle registered for '{name}'"))?;
+        handle.send_message(from, body)
+    }
+
+    /// Mark a shim handle as ready (Idle) and record an initial Pong. New
+    /// handles start in `Starting` state; health checks require Pong +
+    /// Idle before they count as ready for dispatch.
+    pub fn mark_shim_ready(&mut self, name: &str) {
+        if let Some(handle) = self.daemon.shim_handles.get_mut(name) {
+            handle.record_pong();
+            handle.apply_state_change(ShimState::Idle);
+        }
+    }
+
+    /// Set the active task for a member. Scenarios that drive the shim
+    /// completion path directly (without going through the full
+    /// auto-dispatch pipeline) use this to pre-seed the daemon's
+    /// in-memory `active_tasks` map so completion handlers fire.
+    pub fn set_active_task(&mut self, member: &str, task_id: u32) {
+        self.daemon.active_tasks.insert(member.to_string(), task_id);
+    }
+
+    /// Override the daemon's in-memory `MemberState` for `member`. Used
+    /// by scenarios that want to bypass watcher-driven state detection
+    /// (which is absent in fake-shim setups).
+    pub fn set_member_state(&mut self, member: &str, state: MemberState) {
+        self.daemon.states.insert(member.to_string(), state);
+    }
+
     // -----------------------------------------------------------------
     // Time warp
     // -----------------------------------------------------------------
@@ -264,6 +301,90 @@ mod tests {
         // force_stall_timeout is a shortcut — just verify it didn't panic
         // and the handle still exists.
         assert_eq!(hooks.shim_handle_count(), 1);
+    }
+
+    #[test]
+    fn scenario_hooks_send_to_shim_round_trips_via_socketpair() {
+        use crate::shim::protocol::Command;
+
+        let tmp = tempfile::tempdir().unwrap();
+        bootstrap_board(tmp.path());
+        let mut daemon = TestDaemonBuilder::new(tmp.path()).build();
+
+        let (parent, child) = protocol::socketpair().unwrap();
+        let mut child_channel = Channel::new(child);
+
+        let mut hooks = daemon.scenario_hooks();
+        hooks.insert_fake_shim(
+            "eng-1",
+            Channel::new(parent),
+            1,
+            "claude",
+            "claude",
+            PathBuf::from("/tmp"),
+        );
+
+        hooks.send_to_shim("eng-1", "manager", "do it").unwrap();
+
+        let received: Command = child_channel
+            .recv()
+            .expect("recv")
+            .expect("command on channel");
+        match received {
+            Command::SendMessage { from, body, .. } => {
+                assert_eq!(from, "manager");
+                assert_eq!(body, "do it");
+            }
+            other => panic!("unexpected command: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn scenario_hooks_send_to_shim_errors_on_missing_handle() {
+        let tmp = tempfile::tempdir().unwrap();
+        bootstrap_board(tmp.path());
+        let mut daemon = TestDaemonBuilder::new(tmp.path()).build();
+
+        let result = daemon
+            .scenario_hooks()
+            .send_to_shim("eng-nonexistent", "manager", "hi");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn scenario_hooks_mark_shim_ready_transitions_to_idle() {
+        let tmp = tempfile::tempdir().unwrap();
+        bootstrap_board(tmp.path());
+        let mut daemon = TestDaemonBuilder::new(tmp.path()).build();
+
+        let (parent, _child) = protocol::socketpair().unwrap();
+        let mut hooks = daemon.scenario_hooks();
+        hooks.insert_fake_shim(
+            "eng-1",
+            Channel::new(parent),
+            1,
+            "claude",
+            "claude",
+            PathBuf::from("/tmp"),
+        );
+        assert_eq!(hooks.inspect_shim_state("eng-1"), Some(ShimState::Starting));
+
+        hooks.mark_shim_ready("eng-1");
+        assert_eq!(hooks.inspect_shim_state("eng-1"), Some(ShimState::Idle));
+    }
+
+    #[test]
+    fn scenario_hooks_set_active_task_and_member_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        bootstrap_board(tmp.path());
+        let mut daemon = TestDaemonBuilder::new(tmp.path()).build();
+
+        let mut hooks = daemon.scenario_hooks();
+        hooks.set_active_task("eng-1", 42);
+        hooks.set_member_state("eng-1", MemberState::Working);
+
+        assert_eq!(hooks.active_task_for("eng-1"), Some(42));
+        assert_eq!(hooks.member_state("eng-1"), Some(MemberState::Working));
     }
 
     #[test]

@@ -6,12 +6,16 @@
 //! inspection. Later tickets extend it with fake-shim command scripting,
 //! worktree corruption helpers, and time-warp primitives.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 
+use batty_cli::shim::fake::FakeShim;
+use batty_cli::shim::protocol::Event;
 use batty_cli::task;
 use batty_cli::team::daemon::TeamDaemon;
 use batty_cli::team::daemon::tick_report::TickReport;
 use batty_cli::team::harness::{TestHarness, engineer_member, manager_member};
+use batty_cli::team::standup::MemberState;
 
 /// Default upper bound for `tick_until` so runaway scenarios fail fast
 /// instead of spinning. 200 ≈ 200 poll cycles in model time; real
@@ -46,6 +50,7 @@ pub struct ScenarioFixture {
     harness: TestHarness,
     daemon: TeamDaemon,
     engineers: Vec<String>,
+    fakes: HashMap<String, FakeShim>,
 }
 
 #[allow(dead_code)]
@@ -127,6 +132,72 @@ impl ScenarioFixture {
     /// `ScenarioFixture` first.
     pub fn daemon_mut(&mut self) -> &mut TeamDaemon {
         &mut self.daemon
+    }
+
+    // -----------------------------------------------------------------
+    // Fake shim wiring
+    // -----------------------------------------------------------------
+
+    /// Install a fresh [`FakeShim`] for `member`, registering the parent
+    /// side of the socketpair as a daemon shim handle and marking it as
+    /// Ready (Idle with a recorded Pong). The fake is owned by the
+    /// fixture and accessible via [`Self::shim`].
+    pub fn insert_fake_shim(&mut self, member: &str) {
+        let (fake, parent_channel) =
+            FakeShim::new_pair(member).expect("FakeShim::new_pair succeeds on test sockets");
+        self.daemon.scenario_hooks().insert_fake_shim(
+            member,
+            parent_channel,
+            0,
+            "claude",
+            "claude",
+            self.harness.project_root().to_path_buf(),
+        );
+        // Fresh handles start in `Starting`. Scenarios nearly always
+        // want the handle ready for dispatch immediately, so flip it.
+        self.daemon.scenario_hooks().mark_shim_ready(member);
+        self.fakes.insert(member.to_string(), fake);
+    }
+
+    /// Mutable access to a previously-installed fake shim.
+    pub fn shim(&mut self, member: &str) -> &mut FakeShim {
+        self.fakes
+            .get_mut(member)
+            .unwrap_or_else(|| panic!("no fake shim registered for '{member}'"))
+    }
+
+    /// Send a message to `member` through their registered shim handle.
+    /// Scenarios use this to inject a synthetic dispatch without going
+    /// through the full auto-dispatch pipeline.
+    pub fn send_to_shim(&mut self, member: &str, from: &str, body: &str) {
+        self.daemon
+            .scenario_hooks()
+            .send_to_shim(member, from, body)
+            .expect("send_to_shim");
+    }
+
+    /// Let `member`'s fake shim drain pending commands and emit its
+    /// scripted response events. Returns the emitted event sequence.
+    pub fn process_shim(&mut self, member: &str) -> Vec<Event> {
+        let worktree = self.harness.project_root().to_path_buf();
+        self.fakes
+            .get_mut(member)
+            .unwrap_or_else(|| panic!("no fake shim registered for '{member}'"))
+            .process_inbound(&worktree)
+            .expect("process_inbound")
+    }
+
+    /// Pre-seed the daemon's `active_tasks` map so completion handlers
+    /// downstream of fake shims can route into the merge pipeline.
+    pub fn set_active_task(&mut self, member: &str, task_id: u32) {
+        self.daemon
+            .scenario_hooks()
+            .set_active_task(member, task_id);
+    }
+
+    /// Override the daemon's in-memory [`MemberState`] for `member`.
+    pub fn set_member_state(&mut self, member: &str, state: MemberState) {
+        self.daemon.scenario_hooks().set_member_state(member, state);
     }
 }
 
@@ -225,6 +296,7 @@ impl ScenarioFixtureBuilder {
             harness,
             daemon,
             engineers,
+            fakes: HashMap::new(),
         }
     }
 }
