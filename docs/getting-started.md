@@ -161,11 +161,11 @@ up runnable work through the daemon-managed board loop.
 In v0.10.0, the intended steady state is:
 
 1. Architect defines the objective.
-2. Manager turns it into board tasks.
-3. Idle engineers receive work via auto-dispatch.
-4. Engineers execute inside isolated worktrees.
-5. Verification runs on completion.
-6. Small, safe diffs auto-merge; larger ones route to review.
+1. Manager turns it into board tasks.
+1. Idle engineers receive work via auto-dispatch.
+1. Engineers execute inside isolated worktrees.
+1. Verification runs on completion.
+1. Small, safe diffs auto-merge; larger ones route to review.
 
 Watch that flow with:
 
@@ -245,9 +245,9 @@ Discord gives you three dedicated channels for monitoring your team from your ph
 
 1. Create a Discord bot at https://discord.com/developers/applications and invite it to your server with Send Messages permission.
 
-2. Create three channels: `#batty-commands`, `#batty-events`, `#batty-agents`.
+1. Create three channels: `#batty-commands`, `#batty-events`, `#batty-agents`.
 
-3. Run the setup wizard:
+1. Run the setup wizard:
 
 ```sh
 batty discord

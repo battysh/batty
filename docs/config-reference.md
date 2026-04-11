@@ -155,18 +155,18 @@ roles:
 
 ## Top-Level Fields
 
-| Key | Purpose |
-| --- | --- |
-| `name` | Team/session name |
-| `agent` | Team-wide default backend when a role does not override it |
-| `workflow_mode` | `legacy`, `hybrid`, or `workflow_first` |
-| `use_shim` | Run members through the managed shim runtime |
-| `use_sdk_mode` | Prefer structured protocols over PTY parsing |
-| `auto_respawn_on_crash` | Restart crashed agents automatically |
-| `orchestrator_pane` / `orchestrator_position` | Show the orchestration surface in tmux |
-| `external_senders` | Allow non-team sources to message roles |
-| `shim_*` and `pending_queue_max_age_secs` | Runtime health and delivery tuning |
-| `event_log_max_bytes` / `retro_min_duration_secs` | Log and retrospective limits |
+| Key                                               | Purpose                                                    |
+| ------------------------------------------------- | ---------------------------------------------------------- |
+| `name`                                            | Team/session name                                          |
+| `agent`                                           | Team-wide default backend when a role does not override it |
+| `workflow_mode`                                   | `legacy`, `hybrid`, or `workflow_first`                    |
+| `use_shim`                                        | Run members through the managed shim runtime               |
+| `use_sdk_mode`                                    | Prefer structured protocols over PTY parsing               |
+| `auto_respawn_on_crash`                           | Restart crashed agents automatically                       |
+| `orchestrator_pane` / `orchestrator_position`     | Show the orchestration surface in tmux                     |
+| `external_senders`                                | Allow non-team sources to message roles                    |
+| `shim_*` and `pending_queue_max_age_secs`         | Runtime health and delivery tuning                         |
+| `event_log_max_bytes` / `retro_min_duration_secs` | Log and retrospective limits                               |
 
 ## `board`
 

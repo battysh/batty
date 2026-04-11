@@ -11,12 +11,12 @@ These provisioning files add four stall-detection alerts under `grafana/provisio
 
 Default windows and thresholds:
 
-| Alert | Lookback | Trigger | `for` |
-| --- | --- | --- | --- |
-| Zero Activity | 30m | no events | 5m |
-| Dispatch Stall | 20m | todo work exists and no dispatches | 2m |
-| Agent Crash Spike | 10m | count `> 3` | 2m |
-| Review Queue Backup | 30m | count `> 0` | 5m |
+| Alert               | Lookback | Trigger                            | `for` |
+| ------------------- | -------- | ---------------------------------- | ----- |
+| Zero Activity       | 30m      | no events                          | 5m    |
+| Dispatch Stall      | 20m      | todo work exists and no dispatches | 2m    |
+| Agent Crash Spike   | 10m      | count `> 3`                        | 2m    |
+| Review Queue Backup | 30m      | count `> 0`                        | 5m    |
 
 ## Customization
 
