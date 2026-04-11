@@ -36,7 +36,7 @@ pub fn check_all(sut: &FuzzSut, model: &ModelBoard) {
 /// a tick; the model is the source of truth).
 pub fn claim_exclusivity(sut: &FuzzSut, model: &ModelBoard) {
     let mut seen: HashSet<u32> = HashSet::new();
-    for (_engineer_name, eng) in &model.engineers {
+    for eng in model.engineers.values() {
         if let Some(task_id) = eng.active_task {
             assert!(
                 seen.insert(task_id),

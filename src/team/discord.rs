@@ -379,9 +379,9 @@ pub fn setup_discord(project_root: &Path) -> Result<()> {
     );
     send_setup_test_messages(
         &bot,
-        &commands_channel,
-        &events_channel,
-        &agents_channel,
+        commands_channel,
+        events_channel,
+        agents_channel,
         &guild.name,
     )?;
     println!("Test messages sent to all selected channels.\n");
@@ -811,9 +811,9 @@ fn update_team_yaml_for_discord(
         let mapping = channel_config
             .as_mapping_mut()
             .ok_or_else(|| anyhow!("channel_config must be a mapping"))?;
-        mapping.remove(&serde_yaml::Value::String("target".into()));
-        mapping.remove(&serde_yaml::Value::String("provider".into()));
-        mapping.remove(&serde_yaml::Value::String("bot_token".into()));
+        mapping.remove(serde_yaml::Value::String("target".into()));
+        mapping.remove(serde_yaml::Value::String("provider".into()));
+        mapping.remove(serde_yaml::Value::String("bot_token".into()));
         mapping.insert(
             "commands_channel_id".into(),
             serde_yaml::Value::String(commands_channel_id.into()),

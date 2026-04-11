@@ -387,10 +387,10 @@ fn rotate_old_files(dir: &Path, max_age: Duration) -> Result<usize> {
             continue;
         }
         let modified = meta.modified().unwrap_or(now);
-        if now.duration_since(modified).unwrap_or(Duration::ZERO) > max_age {
-            if std::fs::remove_file(entry.path()).is_ok() {
-                count += 1;
-            }
+        if now.duration_since(modified).unwrap_or(Duration::ZERO) > max_age
+            && std::fs::remove_file(entry.path()).is_ok()
+        {
+            count += 1;
         }
     }
     Ok(count)

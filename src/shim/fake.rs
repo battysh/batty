@@ -244,7 +244,7 @@ impl FakeShim {
     fn apply_behavior(
         &mut self,
         behavior: ShimBehavior,
-        command: &Command,
+        _command: &Command,
         worktree_dir: &Path,
     ) -> Result<Vec<Event>> {
         match behavior {
@@ -318,7 +318,7 @@ impl FakeShim {
                     ShimBehavior::NarrationOnly {
                         response: "narration-first".to_string(),
                     },
-                    command,
+                    _command,
                     worktree_dir,
                 )
             }
@@ -345,7 +345,7 @@ impl FakeShim {
             }
             ShimBehavior::Silent => Ok(Vec::new()),
             ShimBehavior::Script(events) => Ok(events),
-            ShimBehavior::Once(inner) => self.apply_behavior(*inner, command, worktree_dir),
+            ShimBehavior::Once(inner) => self.apply_behavior(*inner, _command, worktree_dir),
         }
     }
 

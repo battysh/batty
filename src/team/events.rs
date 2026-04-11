@@ -1610,7 +1610,7 @@ mod tests {
         assert_eq!(parsed["version"].as_str().unwrap(), "0.10.0");
         assert_eq!(parsed["git_ref"].as_str().unwrap(), "abc123");
         assert_eq!(parsed["task"].as_str().unwrap(), "v0.10.0");
-        assert_eq!(parsed["success"].as_bool().unwrap(), true);
+        assert!(parsed["success"].as_bool().unwrap());
     }
 
     #[test]
@@ -1630,7 +1630,7 @@ mod tests {
         assert_eq!(parsed["task"].as_str().unwrap(), "v0.10.0");
         assert_eq!(parsed["reason"].as_str().unwrap(), "verification_failed");
         assert_eq!(parsed["details"].as_str().unwrap(), "suite::it_breaks");
-        assert_eq!(parsed["success"].as_bool().unwrap(), false);
+        assert!(!parsed["success"].as_bool().unwrap());
     }
 
     #[test]

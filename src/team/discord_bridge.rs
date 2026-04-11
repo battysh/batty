@@ -823,7 +823,7 @@ fn friendly_event_description(event: &TeamEvent) -> String {
             if !role.is_empty() && !task.is_empty() {
                 format!("Fixed **{role}**'s task **#{task}**: {action}")
             } else {
-                format!("{action}")
+                action.to_string()
             }
         }
         "dispatch_overlap_skipped" => {
