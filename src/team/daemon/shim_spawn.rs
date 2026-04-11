@@ -215,6 +215,14 @@ pub(in crate::team) fn spawn_shim(
     parent_channel
         .set_read_timeout(Some(std::time::Duration::from_millis(25)))
         .context("failed to set shim parent channel read timeout")?;
+    // Bound writes so a wedged shim that stops draining its receive buffer
+    // cannot freeze the daemon event loop inside `write_all`. 2s is long
+    // enough to absorb a kernel-buffer backup on a busy but healthy shim,
+    // and short enough that a truly dead shim surfaces as a send error
+    // within one or two ping_pong cycles instead of hanging indefinitely.
+    parent_channel
+        .set_write_timeout(Some(std::time::Duration::from_secs(2)))
+        .context("failed to set shim parent channel write timeout")?;
     let handle = AgentHandle::new(
         member_name.to_string(),
         parent_channel,

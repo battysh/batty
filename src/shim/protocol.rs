@@ -233,6 +233,25 @@ impl Channel {
         Ok(())
     }
 
+    /// Set a write timeout on the underlying socket.
+    ///
+    /// Without this, `send()` calls `write_all()` which blocks indefinitely
+    /// when the peer stops draining its receive buffer — e.g. a wedged shim
+    /// that stopped reading. A blocking `write_all` inside the daemon's
+    /// `poll_shim_handles` / ping_pong tick wedges the ENTIRE daemon event
+    /// loop on a single stuck handle, which matches the documented "daemon
+    /// freezes after 10-15 min productive window" failure mode. Setting a
+    /// bounded write timeout turns that hard-hang into a regular `send()`
+    /// error that the caller can classify as a stale / dead handle and
+    /// escalate via the usual respawn / crash paths.
+    pub fn set_write_timeout(
+        &mut self,
+        timeout: Option<std::time::Duration>,
+    ) -> anyhow::Result<()> {
+        self.stream.set_write_timeout(timeout)?;
+        Ok(())
+    }
+
     /// Clone the underlying fd for use in a second thread.
     pub fn try_clone(&self) -> anyhow::Result<Self> {
         Ok(Self {
@@ -769,5 +788,66 @@ mod tests {
         ch_a.send(&Command::Ping).unwrap();
         let msg: Command = ch_b.recv().unwrap().unwrap();
         assert!(matches!(msg, Command::Ping));
+    }
+
+    #[test]
+    fn send_times_out_when_peer_stops_reading() {
+        // Regression test for the documented "daemon freezes after 10-15 min
+        // productive window" pattern. Without a write timeout, a wedged shim
+        // that stops draining its socket buffer will cause the daemon's next
+        // `send()` to block inside `write_all` indefinitely, wedging the
+        // entire event loop on a single stuck handle.
+        //
+        // We simulate the wedge by filling the peer's receive buffer beyond
+        // capacity and never calling `recv()` on the other side. With a
+        // short write timeout set, `send()` must return an error within a
+        // bounded window instead of hanging forever.
+        let (a, _b) = socketpair().unwrap();
+        let mut sender = Channel::new(a);
+        sender
+            .set_write_timeout(Some(std::time::Duration::from_millis(50)))
+            .unwrap();
+
+        // Build a large but legal payload and blast it across the pipe
+        // until the kernel refuses more bytes. On Linux the default per-pipe
+        // buffer is a few hundred KB; on macOS it's ~8 KB. Either way, a
+        // bounded retry loop must eventually hit the write timeout instead
+        // of blocking forever.
+        let big_body = "x".repeat(256 * 1024);
+        let cmd = Command::SendMessage {
+            from: "daemon".into(),
+            body: big_body,
+            message_id: None,
+        };
+
+        let start = std::time::Instant::now();
+        let mut attempts = 0;
+        let mut last_err = None;
+        while start.elapsed() < std::time::Duration::from_secs(5) {
+            attempts += 1;
+            match sender.send(&cmd) {
+                Ok(()) => continue,
+                Err(error) => {
+                    last_err = Some(error);
+                    break;
+                }
+            }
+        }
+        let error = last_err.expect("send should have timed out within 5s");
+        let io_error = error
+            .downcast_ref::<std::io::Error>()
+            .expect("write timeout should surface as an io::Error");
+        assert!(
+            matches!(
+                io_error.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+            ),
+            "expected WouldBlock/TimedOut error, got {:?}",
+            io_error.kind()
+        );
+        assert!(
+            attempts >= 1,
+            "sanity check: send loop should have attempted at least once"
+        );
     }
 }
