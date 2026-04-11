@@ -2,6 +2,31 @@
 
 All notable changes to Batty are documented here.
 
+## 0.10.9 — 2026-04-10
+
+Clean up the last three compile-time warnings so the release build ships
+zero warnings. No behavior change — all cleanup is annotation or import
+scope.
+
+- **`auto_commit_before_reset`** — the wrapper for the common-case reset
+  preservation flow is kept as a stable API and exercised via its own
+  tests, but production code uses `preserve_worktree_with_commit` directly
+  with custom messages. Added `#[cfg_attr(not(test), allow(dead_code))]`
+  so the helper stays available for tests without triggering
+  `dead_code` on release builds. (`src/team/task_loop.rs`)
+- **`TeamDaemon::preserve_member_worktree`** — same pattern: the helper
+  has no production callers in the current session-resume flow but is
+  still exercised by its tests. The previous
+  `#[cfg_attr(test, allow(dead_code))]` was inverted (it allowed the
+  warning in tests, not in prod); corrected to
+  `#[cfg_attr(not(test), allow(dead_code))]`. (`src/team/daemon.rs`)
+- **`WorkflowMetadata` / `write_workflow_metadata` imports** — only
+  referenced by short name inside a test helper. Gated the import with
+  `#[cfg(test)]` since production code already uses the full path
+  `crate::team::board::write_workflow_metadata` on line 177. Removes
+  the "unused imports" warning from release builds.
+  (`src/team/merge/completion.rs`)
+
 ## 0.10.8 — 2026-04-10
 
 Fix a regression from 0.10.7: the blocked-task frontmatter repair was

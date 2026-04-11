@@ -1117,6 +1117,12 @@ fn auto_clean_worktree(worktree_dir: &Path) -> Result<()> {
 /// Auto-commit uncommitted changes before a worktree reset to avoid stash
 /// accumulation. Returns `true` if changes were successfully committed or
 /// there was nothing to commit.
+///
+/// Kept as a stable wrapper for the common-case reset flow; production code
+/// currently uses `preserve_worktree_with_commit` directly with custom
+/// messages. Test-only `dead_code` allow keeps the wrapper exercised via
+/// its tests without generating a build warning.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn auto_commit_before_reset(worktree_dir: &Path) -> bool {
     let branch = retry_git(|| git_cmd::rev_parse_branch(worktree_dir)).unwrap_or_default();
     let msg = format!("wip: auto-save before worktree reset [{}]", branch);
