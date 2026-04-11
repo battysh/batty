@@ -19,3 +19,4 @@
 
 pub mod model;
 pub mod reference_sm;
+pub mod sut;
