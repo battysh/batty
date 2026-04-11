@@ -32,6 +32,14 @@ pub struct RestartContext {
     pub worktree_path: Option<String>,
     pub restart_count: u32,
     pub reason: String,
+    #[serde(default)]
+    pub output_bytes: Option<u64>,
+    #[serde(default)]
+    pub last_commit: Option<String>,
+    #[serde(default)]
+    pub created_at_epoch_secs: Option<u64>,
+    #[serde(default)]
+    pub handoff_consumed: bool,
 }
 
 /// Returns the progress directory path: `<project_root>/.batty/progress/`.
@@ -493,6 +501,10 @@ mod tests {
             worktree_path: Some("/tmp/worktrees/eng-1-1".to_string()),
             restart_count: 2,
             reason: "context_exhausted".to_string(),
+            output_bytes: Some(512_000),
+            last_commit: Some("abc1234 fix widget".to_string()),
+            created_at_epoch_secs: Some(1_234_567_890),
+            handoff_consumed: false,
         };
 
         write_restart_context(&worktree_dir, &context).unwrap();
@@ -514,6 +526,10 @@ mod tests {
             worktree_path: None,
             restart_count: 1,
             reason: "stalled".to_string(),
+            output_bytes: None,
+            last_commit: None,
+            created_at_epoch_secs: None,
+            handoff_consumed: false,
         };
 
         write_restart_context(&worktree_dir, &context).unwrap();

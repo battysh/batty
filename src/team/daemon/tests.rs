@@ -3133,6 +3133,45 @@ fn prepare_member_launch_injects_handoff_for_active_task() {
         "# Carry-Forward Summary\n## Progress Summary\nalready fixed parser edge cases\n",
     )
     .unwrap();
+    crate::team::context_management::stage_restart_context(
+        tmp.path(),
+        "eng-1",
+        &crate::task::Task {
+            id: 42,
+            title: "resume-task".to_string(),
+            status: "in-progress".to_string(),
+            priority: "high".to_string(),
+            claimed_by: Some("eng-1".to_string()),
+            claimed_at: None,
+            claim_ttl_secs: None,
+            claim_expires_at: None,
+            last_progress_at: None,
+            claim_warning_sent_at: None,
+            claim_extensions: None,
+            last_output_bytes: None,
+            blocked: None,
+            tags: Vec::new(),
+            depends_on: Vec::new(),
+            review_owner: None,
+            blocked_on: None,
+            worktree_path: None,
+            branch: None,
+            commit: None,
+            artifacts: Vec::new(),
+            next_action: None,
+            scheduled_for: None,
+            cron_schedule: None,
+            cron_last_run: None,
+            completed: None,
+            description: "Resume task body.".to_string(),
+            batty_config: None,
+            source_path: tmp.path().join("task-42.md"),
+        },
+        "context_pressure",
+        1,
+        Some(420_000),
+    )
+    .unwrap();
 
     let previous_launch_state = HashMap::new();
     let duplicate_claude_session_ids =
@@ -3174,6 +3213,62 @@ fn prepare_member_launch_injects_handoff_for_active_task() {
         !handoff_path.exists(),
         "launch should consume the handoff file"
     );
+    let resume_context = crate::team::checkpoint::read_restart_context(tmp.path()).unwrap();
+    assert!(resume_context.handoff_consumed);
+}
+
+#[test]
+fn clear_active_task_removes_restart_context_guard() {
+    let tmp = tempfile::tempdir().unwrap();
+    let task = crate::task::Task {
+        id: 42,
+        title: "resume-task".to_string(),
+        status: "in-progress".to_string(),
+        priority: "high".to_string(),
+        claimed_by: Some("eng-1".to_string()),
+        claimed_at: None,
+        claim_ttl_secs: None,
+        claim_expires_at: None,
+        last_progress_at: None,
+        claim_warning_sent_at: None,
+        claim_extensions: None,
+        last_output_bytes: None,
+        blocked: None,
+        tags: Vec::new(),
+        depends_on: Vec::new(),
+        review_owner: None,
+        blocked_on: None,
+        worktree_path: None,
+        branch: None,
+        commit: None,
+        artifacts: Vec::new(),
+        next_action: None,
+        scheduled_for: None,
+        cron_schedule: None,
+        cron_last_run: None,
+        completed: None,
+        description: "Resume task body.".to_string(),
+        batty_config: None,
+        source_path: tmp.path().join("task-42.md"),
+    };
+    crate::team::context_management::stage_restart_context(
+        tmp.path(),
+        "eng-1",
+        &task,
+        "context_pressure",
+        1,
+        Some(420_000),
+    )
+    .unwrap();
+    let mut daemon = make_test_daemon(
+        tmp.path(),
+        vec![engineer_member("eng-1", Some("manager"), false)],
+    );
+    daemon.active_tasks.insert("eng-1".to_string(), 42);
+
+    daemon.clear_active_task("eng-1");
+
+    assert!(crate::team::checkpoint::read_restart_context(tmp.path()).is_none());
 }
 
 #[test]
