@@ -17,6 +17,10 @@ use anyhow::{Context, Result};
 use maildir::Maildir;
 use serde::{Deserialize, Serialize};
 
+use crate::team::supervisory_notice::{
+    SupervisoryPressure, classify_supervisory_pressure_normalized, extract_task_id, normalized_body,
+};
+
 /// A message stored in a member's inbox.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InboxMessage {
@@ -421,7 +425,7 @@ pub enum MessageCategory {
 
 /// Classify a message body into a category.
 pub fn classify_message(msg: &InboxMessage) -> MessageCategory {
-    let body = msg.body.trim().to_ascii_lowercase();
+    let body = normalized_body(&msg.body);
 
     // Escalation detection
     if body.contains("escalat")
@@ -431,14 +435,18 @@ pub fn classify_message(msg: &InboxMessage) -> MessageCategory {
         return MessageCategory::Escalation;
     }
 
-    // Nudge detection (before blocker — nudges that mention "blocker" as instructions
-    // are still nudges)
-    if body.contains("idle nudge:")
-        || body.starts_with("review nudge:")
-        || body.contains("if you are idle, take action now")
-        || body.contains("you have been idle past your configured timeout")
-    {
-        return MessageCategory::Nudge;
+    if let Some(pressure) = classify_supervisory_pressure_normalized(&body) {
+        match pressure {
+            SupervisoryPressure::ReviewNudge | SupervisoryPressure::IdleNudge => {
+                return MessageCategory::Nudge;
+            }
+            SupervisoryPressure::ReviewBacklog => return MessageCategory::ReviewRequest,
+            SupervisoryPressure::DispatchRecovery
+            | SupervisoryPressure::UtilizationRecovery
+            | SupervisoryPressure::TriageBacklog => return MessageCategory::Blocker,
+            SupervisoryPressure::RecoveryUpdate => {}
+            SupervisoryPressure::StatusUpdate => return MessageCategory::Status,
+        }
     }
 
     // Blocker detection
@@ -458,16 +466,6 @@ pub fn classify_message(msg: &InboxMessage) -> MessageCategory {
         return MessageCategory::ReviewRequest;
     }
 
-    // Dispatch / triage / utilization alerts should sort above routine chatter.
-    if body.starts_with("dispatch recovery needed:")
-        || body.starts_with("triage backlog detected:")
-        || body.contains("utilization recovery")
-        || body.starts_with("utilization gap detected:")
-        || body.starts_with("architect utilization")
-    {
-        return MessageCategory::Blocker;
-    }
-
     // Status update detection
     if body.contains("status update")
         || body.contains("progress update")
@@ -479,33 +477,6 @@ pub fn classify_message(msg: &InboxMessage) -> MessageCategory {
 
     // Default: treat as status (middle priority)
     MessageCategory::Status
-}
-
-/// Extract a task ID reference from a message body, if present.
-/// Looks for patterns like "#42", "Task #42", "task_id: 42".
-fn extract_task_id(body: &str) -> Option<String> {
-    // Try "#N" pattern
-    let body_lower = body.to_ascii_lowercase();
-    if let Some(pos) = body_lower.find('#') {
-        let after = &body[pos + 1..];
-        let digits: String = after.chars().take_while(|c| c.is_ascii_digit()).collect();
-        if !digits.is_empty() {
-            return Some(digits);
-        }
-    }
-    // Try "task_id: N" or "task_id\":N"
-    if let Some(pos) = body_lower.find("task_id") {
-        let after = &body[pos + 7..];
-        let digits: String = after
-            .chars()
-            .skip_while(|c| !c.is_ascii_digit())
-            .take_while(|c| c.is_ascii_digit())
-            .collect();
-        if !digits.is_empty() {
-            return Some(digits);
-        }
-    }
-    None
 }
 
 /// A single entry in the digested inbox view.
@@ -1055,6 +1026,17 @@ mod tests {
     }
 
     #[test]
+    fn classify_review_backlog_notice_as_review_request() {
+        let msg = make_msg(
+            "daemon",
+            "manager",
+            "Review backlog detected: direct-report work is waiting for your review on Task #42.",
+            100,
+        );
+        assert_eq!(classify_message(&msg), MessageCategory::ReviewRequest);
+    }
+
+    #[test]
     fn classify_status_update() {
         let msg = make_msg(
             "eng-1",
@@ -1304,6 +1286,17 @@ mod tests {
 
         assert_eq!(classify_message(&dispatch), MessageCategory::Blocker);
         assert_eq!(classify_message(&utilization), MessageCategory::Blocker);
+    }
+
+    #[test]
+    fn classify_recovery_update_keeps_existing_status_bucket() {
+        let recovery = InboxMessage::new_send(
+            "manager",
+            "architect",
+            "Recovery: lane blocked while waiting on upstream review ownership.",
+        );
+
+        assert_eq!(classify_message(&recovery), MessageCategory::Status);
     }
 
     #[test]

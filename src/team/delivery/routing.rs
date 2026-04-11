@@ -12,6 +12,10 @@ use crate::team::inbox;
 use crate::team::message;
 use crate::team::standup::MemberState;
 use crate::team::status;
+use crate::team::supervisory_notice::{
+    SupervisoryPressure, classify_supervisory_pressure_normalized, extract_task_id, is_idle_nudge,
+    is_review_nudge, is_status_update_normalized, normalized_body,
+};
 
 /// Extract a task ID from assignment body text like "Task #42: ..." or "Task #42 ...".
 fn extract_task_id_from_body(body: &str) -> Option<u32> {
@@ -134,18 +138,6 @@ struct SupervisoryDigest {
     duplicates_suppressed: usize,
 }
 
-fn normalized_body(body: &str) -> String {
-    body.trim().to_ascii_lowercase()
-}
-
-fn is_idle_nudge(body: &str) -> bool {
-    normalized_body(body).contains("idle nudge:")
-}
-
-fn is_review_nudge(body: &str) -> bool {
-    normalized_body(body).starts_with("review nudge:")
-}
-
 fn is_status_query(body: &str) -> bool {
     let body = normalized_body(body);
     body == "status"
@@ -173,28 +165,19 @@ fn classify_manager_notice(body: &str) -> ManagerNoticeClass {
         ManagerNoticeClass::Completion
     } else if is_manager_escalation_notice(&body) {
         ManagerNoticeClass::Escalation
-    } else if is_review_nudge(&body) {
-        ManagerNoticeClass::Review
-    } else if body.starts_with("review backlog detected:") {
-        ManagerNoticeClass::Review
-    } else if body.starts_with("dispatch recovery needed:") {
-        ManagerNoticeClass::Dispatch
-    } else if body.contains("utilization recovery")
-        || body.starts_with("utilization gap detected:")
-        || body.starts_with("architect utilization")
-    {
-        ManagerNoticeClass::Utilization
-    } else if body.starts_with("triage backlog detected:") {
-        ManagerNoticeClass::Triage
-    } else if is_idle_nudge(&body) {
-        ManagerNoticeClass::Recovery
-    } else if body.starts_with("recovery:")
-        || body.contains("lane blocked")
-        || body.contains("stuck-task escalation")
-    {
-        ManagerNoticeClass::Recovery
-    } else if is_manager_status_update(&body) {
-        ManagerNoticeClass::Status
+    } else if let Some(pressure) = classify_supervisory_pressure_normalized(&body) {
+        match pressure {
+            SupervisoryPressure::ReviewNudge | SupervisoryPressure::ReviewBacklog => {
+                ManagerNoticeClass::Review
+            }
+            SupervisoryPressure::DispatchRecovery => ManagerNoticeClass::Dispatch,
+            SupervisoryPressure::UtilizationRecovery => ManagerNoticeClass::Utilization,
+            SupervisoryPressure::TriageBacklog => ManagerNoticeClass::Triage,
+            SupervisoryPressure::IdleNudge | SupervisoryPressure::RecoveryUpdate => {
+                ManagerNoticeClass::Recovery
+            }
+            SupervisoryPressure::StatusUpdate => ManagerNoticeClass::Status,
+        }
     } else {
         ManagerNoticeClass::Immediate
     }
@@ -237,7 +220,7 @@ fn is_structured_completion_packet(body: &str) -> bool {
 }
 
 fn is_manager_status_update(body: &str) -> bool {
-    body.starts_with("rollup:") || body.contains("status update")
+    is_status_update_normalized(body)
 }
 
 fn is_manager_escalation_notice(body: &str) -> bool {
@@ -262,36 +245,8 @@ fn manager_notice_preview(body: &str) -> String {
     preview
 }
 
-fn extract_task_id_from_notice_body(body: &str) -> Option<String> {
-    let lower = body.to_ascii_lowercase();
-
-    if let Some(pos) = lower.find("task_id") {
-        let after = &body[pos + 7..];
-        let digits: String = after
-            .chars()
-            .skip_while(|ch| !ch.is_ascii_digit())
-            .take_while(|ch| ch.is_ascii_digit())
-            .collect();
-        if !digits.is_empty() {
-            return Some(digits);
-        }
-    }
-
-    if let Some(pos) = body.find('#') {
-        let digits: String = body[pos + 1..]
-            .chars()
-            .take_while(|ch| ch.is_ascii_digit())
-            .collect();
-        if !digits.is_empty() {
-            return Some(digits);
-        }
-    }
-
-    None
-}
-
 fn manager_notice_digest_key(message: &inbox::InboxMessage, class: ManagerNoticeClass) -> String {
-    let task_scope = extract_task_id_from_notice_body(&message.body)
+    let task_scope = extract_task_id(&message.body)
         .map(|task_id| format!("task#{task_id}"))
         .unwrap_or_else(|| format!("from:{}", message.from));
 
