@@ -154,24 +154,25 @@ fn query_tmux_pane_size(pane_id: &str) -> Option<(u16, u16)> {
 mod tests {
     use super::super::super::*;
     use crate::shim::protocol::{self, Channel, Command, ShimState};
-    use crate::team::daemon::agent_handle::AgentHandle;
     use crate::team::test_support::TestDaemonBuilder;
     use std::path::PathBuf;
     use std::time::{Duration, Instant};
 
+    /// Canonical fake-shim injection path for ping/pong tests. Routes
+    /// through [`ScenarioHooks::insert_fake_shim`] so every test uses the
+    /// same seam as the scenario framework (ticket #637).
     fn insert_handle_with_channel(daemon: &mut TeamDaemon, name: &str) -> Channel {
         let (parent, child) = protocol::socketpair().unwrap();
         let parent_channel = Channel::new(parent);
         let child_channel = Channel::new(child);
-        let handle = AgentHandle::new(
-            name.into(),
+        daemon.scenario_hooks().insert_fake_shim(
+            name,
             parent_channel,
             999,
-            "claude".into(),
-            "claude".into(),
+            "claude",
+            "claude",
             PathBuf::from("/tmp/test"),
         );
-        daemon.shim_handles.insert(name.to_string(), handle);
         child_channel
     }
 

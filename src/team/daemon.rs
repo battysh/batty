@@ -87,6 +87,9 @@ mod merge_queue;
 mod poll;
 #[path = "daemon/reconcile.rs"]
 mod reconcile;
+#[cfg(any(test, feature = "scenario-test"))]
+#[path = "daemon/scenario_api.rs"]
+pub mod scenario_api;
 #[path = "daemon/shim_spawn.rs"]
 mod shim_spawn;
 #[path = "daemon/shim_state.rs"]
@@ -247,6 +250,18 @@ pub struct TeamDaemon {
     pub(super) last_shim_health_check: Instant,
     /// Serial daemon-owned merge queue for auto-merge execution.
     pub(super) merge_queue: MergeQueue,
+}
+
+#[cfg(any(test, feature = "scenario-test"))]
+impl TeamDaemon {
+    /// Acquire the scenario framework's test-API hooks. Gated by
+    /// `#[cfg(any(test, feature = "scenario-test"))]` so it does not
+    /// exist in release builds. See
+    /// [`scenario_api::ScenarioHooks`](crate::team::daemon::scenario_api::ScenarioHooks)
+    /// for the list of supported operations.
+    pub fn scenario_hooks(&mut self) -> scenario_api::ScenarioHooks<'_> {
+        scenario_api::ScenarioHooks::new(self)
+    }
 }
 
 impl TeamDaemon {
