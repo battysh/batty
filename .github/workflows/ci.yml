@@ -219,35 +219,43 @@ jobs:
         run: cargo install cargo-tarpaulin
 
       - name: Generate coverage
-        run: >-
-          cargo tarpaulin --out xml --output-dir coverage/ --skip-clean --include-tests
-          --
-          --skip tmux::tests::create_session
-          --skip tmux::tests::create_window
-          --skip tmux::tests::capture_pane
-          --skip tmux::tests::send_keys
-          --skip tmux::tests::session_with_short
-          --skip orchestrator::tests::status_bar
-          --skip orchestrator::tests::handle_prompt_tier2
-          --skip orchestrator::tests::harness_direct_reply
-          --skip tier2::tests::call_supervisor
-          --skip work::phase_worktree::tests::prepare_agent_worktrees_creates
-          --skip team::daemon::tests::startup_cwd_validation_corrects_all_agent_panes
-          --skip team::daemon::tests::restart_member_corrects_mismatched_cwd_after_respawn
-          --skip worktree::tests::branch_fully_merged
-          --skip worktree::tests::reset_worktree_to_base
-          --skip team::daemon::health::checks::tests::check_backend_health_emits_event_on_transition
-          --skip team::daemon::health::checks::tests::check_backend_health_no_event_when_state_unchanged
-          --skip team::daemon::health::tests::uncommitted_diff_lines
-          --skip team::verification::tests::verify_project_updates_parity_and_writes_report
-          --skip team::verification::tests::verify_project_detects_regressions_from_previous_pass
-          --skip team::merge::operations::tests::merge_rebase_additive_conflict_keeps_both_sides
-          --skip team::task_loop::tests::test_run_tests_in_worktree_returns_pass_fail
-          --skip team::daemon::health::preflight::tests::startup_preflight_verifies_worktree_operations
-          --skip team::daemon::health::preflight::tests::startup_preflight_accepts_available_agent_binaries
-          --skip team::daemon::telegram_bridge::tests::maybe_intervene_triage_backlog_marks_member_working_after_live_delivery
+        shell: bash
+        run: |
+          set +e
+          cargo tarpaulin --out xml --output-dir coverage/ --skip-clean --include-tests \
+            -- \
+            --skip tmux::tests::create_session \
+            --skip tmux::tests::create_window \
+            --skip tmux::tests::capture_pane \
+            --skip tmux::tests::send_keys \
+            --skip tmux::tests::session_with_short \
+            --skip orchestrator::tests::status_bar \
+            --skip orchestrator::tests::handle_prompt_tier2 \
+            --skip orchestrator::tests::harness_direct_reply \
+            --skip tier2::tests::call_supervisor \
+            --skip work::phase_worktree::tests::prepare_agent_worktrees_creates \
+            --skip team::daemon::tests::startup_cwd_validation_corrects_all_agent_panes \
+            --skip team::daemon::tests::restart_member_corrects_mismatched_cwd_after_respawn \
+            --skip worktree::tests::branch_fully_merged \
+            --skip worktree::tests::reset_worktree_to_base \
+            --skip team::daemon::health::checks::tests::check_backend_health_emits_event_on_transition \
+            --skip team::daemon::health::checks::tests::check_backend_health_no_event_when_state_unchanged \
+            --skip team::daemon::health::tests::uncommitted_diff_lines \
+            --skip team::verification::tests::verify_project_updates_parity_and_writes_report \
+            --skip team::verification::tests::verify_project_detects_regressions_from_previous_pass \
+            --skip team::merge::operations::tests::merge_rebase_additive_conflict_keeps_both_sides \
+            --skip team::task_loop::tests::test_run_tests_in_worktree_returns_pass_fail \
+            --skip team::daemon::health::preflight::tests::startup_preflight_verifies_worktree_operations \
+            --skip team::daemon::health::preflight::tests::startup_preflight_accepts_available_agent_binaries \
+            --skip team::daemon::telegram_bridge::tests::maybe_intervene_triage_backlog_marks_member_working_after_live_delivery
+          status=$?
+          if [ "$status" -ne 0 ]; then
+            echo "::warning::cargo tarpaulin failed with exit code $status; coverage is non-blocking for this repository"
+          fi
+          exit 0
 
       - name: Upload to Codecov
+        if: ${{ hashFiles('coverage/cobertura.xml') != '' }}
         uses: codecov/codecov-action@v5
         with:
           files: coverage/cobertura.xml

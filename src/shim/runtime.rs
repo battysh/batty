@@ -2315,12 +2315,17 @@ plain output\n";
     #[test]
     fn preserve_work_before_kill_times_out() {
         let tmp = tempfile::tempdir().unwrap();
-        let preserved =
-            preserve_work_before_kill_with(tmp.path(), Duration::from_millis(10), true, |_path| {
-                std::thread::sleep(Duration::from_millis(50));
+        let (_tx, rx) = std::sync::mpsc::channel::<()>();
+        let preserved = preserve_work_before_kill_with(
+            tmp.path(),
+            Duration::from_millis(10),
+            true,
+            move |_path| {
+                let _ = rx.recv_timeout(Duration::from_millis(100));
                 Ok(true)
-            })
-            .unwrap();
+            },
+        )
+        .unwrap();
 
         assert!(!preserved);
     }
