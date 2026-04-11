@@ -5,6 +5,8 @@
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use crate::agent::{self, BackendHealth, KNOWN_AGENT_NAMES};
     use crate::cli::{Cli, Command, GrafanaCommand};
     use crate::team::config::{GrafanaConfig, TeamConfig};
@@ -205,6 +207,50 @@ roles:
         telemetry_db::insert_event(&conn, &TeamEvent::task_completed("eng-1", Some("1"))).unwrap();
         let summaries = telemetry_db::query_session_summaries(&conn).unwrap();
         assert!(summaries.is_empty(), "no session should exist");
+    }
+
+    #[test]
+    fn legacy_telemetry_db_repairs_once_and_replays_new_events() {
+        let tmp = tempfile::tempdir().unwrap();
+        let batty_dir = tmp.path().join(".batty");
+        fs::create_dir_all(&batty_dir).unwrap();
+        let legacy = rusqlite::Connection::open(batty_dir.join("telemetry.db")).unwrap();
+        telemetry_db::install_legacy_schema_for_tests(&legacy).unwrap();
+        drop(legacy);
+
+        let conn = telemetry_db::open(tmp.path()).unwrap();
+        telemetry_db::insert_event(&conn, &TeamEvent::daemon_started()).unwrap();
+        telemetry_db::insert_event(&conn, &TeamEvent::narration_rejection("eng-1", 42, 1)).unwrap();
+        telemetry_db::insert_event(
+            &conn,
+            &TeamEvent::merge_confidence_scored(&crate::team::events::MergeConfidenceInfo {
+                engineer: "eng-1",
+                task: "42",
+                confidence: 0.91,
+                files_changed: 2,
+                lines_changed: 20,
+                has_migrations: false,
+                has_config_changes: false,
+                rename_count: 0,
+            }),
+        )
+        .unwrap();
+        drop(conn);
+
+        let conn = telemetry_db::open(tmp.path()).unwrap();
+        let tasks = telemetry_db::query_task_metrics(&conn).unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].narration_rejections, 1);
+        assert_eq!(tasks[0].confidence_score, Some(0.91));
+
+        let repairs: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM events WHERE event_type = 'telemetry_schema_repaired'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(repairs, 1);
     }
 
     // -----------------------------------------------------------------------

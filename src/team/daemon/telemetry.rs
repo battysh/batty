@@ -1032,6 +1032,45 @@ mod tests {
     }
 
     #[test]
+    fn emit_event_repairs_legacy_telemetry_db_before_new_column_writes() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tmp.path().join(".batty")).unwrap();
+        let legacy =
+            rusqlite::Connection::open(tmp.path().join(".batty").join("telemetry.db")).unwrap();
+        crate::team::telemetry_db::install_legacy_schema_for_tests(&legacy).unwrap();
+        drop(legacy);
+
+        let mut daemon = daemon_for_orchestrator_logging(tmp.path(), WorkflowMode::Hybrid, true);
+        daemon.record_narration_rejection("eng-1", 42, 1);
+        daemon.record_merge_confidence_scored(&crate::team::events::MergeConfidenceInfo {
+            engineer: "eng-1",
+            task: "42",
+            confidence: 0.87,
+            files_changed: 3,
+            lines_changed: 24,
+            has_migrations: false,
+            has_config_changes: false,
+            rename_count: 0,
+        });
+
+        let events = read_events(&crate::team::team_events_path(tmp.path())).unwrap();
+        assert!(
+            !events.iter().any(|event| {
+                event.event == "loop_step_error"
+                    && event.reason.as_deref() == Some("telemetry_emit_event")
+            }),
+            "legacy telemetry repair should prevent loop_step_error emission"
+        );
+
+        let conn = crate::team::telemetry_db::open(tmp.path()).unwrap();
+        let tasks = crate::team::telemetry_db::query_task_metrics(&conn).unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].task_id, "42");
+        assert_eq!(tasks[0].narration_rejections, 1);
+        assert_eq!(tasks[0].confidence_score, Some(0.87));
+    }
+
+    #[test]
     fn maybe_notify_failure_patterns_routes_severe_patterns_to_manager_and_architect() {
         let tmp = tempfile::tempdir().unwrap();
         let roles = vec![
