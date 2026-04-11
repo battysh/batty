@@ -11,7 +11,9 @@ use super::telegram_bridge::TelegramCommand;
 use super::*;
 use crate::task::{Task, load_tasks_from_dir};
 use crate::team::config::{ChannelConfig, RoleType, TeamConfig};
-use crate::team::discord::{DiscordBot, color_for_role};
+use crate::team::discord::{
+    DiscordBot, EmbedField, RichEmbed, Severity, role_author_label, severity_for_event,
+};
 use crate::team::events::{TeamEvent, read_events};
 use crate::team::inbox;
 
@@ -181,10 +183,8 @@ impl TeamDaemon {
             return Ok(());
         };
 
-        let title = friendly_event_title(event);
-        let description = friendly_event_description(event);
-        let color = event_color(event);
-        bot.send_embed(&channel_id, &title, &description, color)?;
+        let embed = build_event_embed(event);
+        bot.send_rich_embed(&channel_id, &embed)?;
         self.record_discord_event_sent(&channel_id, &event.event);
         Ok(())
     }
@@ -652,12 +652,21 @@ fn discord_channel_config(team_config: &TeamConfig) -> Option<&ChannelConfig> {
 }
 
 fn event_channel_id<'a>(config: &'a ChannelConfig, event: &TeamEvent) -> Option<&'a str> {
-    if is_attention_event(event) {
-        config
-            .commands_channel_id
-            .as_deref()
-            .or(config.events_channel_id.as_deref())
-    } else if is_agent_event(event) {
+    // Route by event kind:
+    //  - Agent lifecycle (spawned / started / stalled / context exhausted /
+    //    pattern detected) → agents channel. These are "what are the
+    //    members doing right now?" signals.
+    //  - Everything else (task lifecycle, escalations, merges, verification,
+    //    auto-doctor) → events channel. Yes, this includes alerts: the
+    //    events channel is the main timeline and users filter by embed
+    //    color. The commands channel is reserved for user-typed command
+    //    responses so it stays scannable as a chat with the bot.
+    //
+    //  Prior routing sent "attention events" (escalations, errors) to the
+    //  commands channel, which mixed alerts into command responses and
+    //  broke the "this channel is my chat with the bot" model. Restored to
+    //  events-channel routing as part of the Discord formatting overhaul.
+    if is_agent_event(event) {
         config
             .agents_channel_id
             .as_deref()
@@ -683,17 +692,6 @@ fn is_noise_event(event: &TeamEvent) -> bool {
     )
 }
 
-fn is_attention_event(event: &TeamEvent) -> bool {
-    let name = event.event.as_str();
-    name.contains("error")
-        || name.contains("failed")
-        || name.contains("panic")
-        || name.contains("escalat")
-        || name.contains("blocked")
-        || name == "stall_detected"
-        || name == "backend_quota_exhausted"
-}
-
 fn is_agent_event(event: &TeamEvent) -> bool {
     matches!(
         event.event.as_str(),
@@ -708,210 +706,399 @@ fn is_agent_event(event: &TeamEvent) -> bool {
     )
 }
 
-/// Human-readable title with emoji — makes Discord scannable.
-fn friendly_event_title(event: &TeamEvent) -> String {
-    let role_prefix = event
-        .role
-        .as_deref()
-        .or(event.from.as_deref())
-        .map(|r| match r {
-            "architect" => "🏗️ Architect",
-            "manager" => "📋 Manager",
-            r if r.starts_with("eng") => "🔧 Engineer",
-            _ => "⚙️ System",
-        })
-        .unwrap_or("⚙️ System");
+/// Build a fully-structured [`RichEmbed`] for a `TeamEvent`.
+///
+/// This is the new canonical entrypoint — it replaces the old
+/// title/description/color triple with an author block, severity-based
+/// color, structured fields per event type, an embed-level timestamp,
+/// and a provenance footer. Each event kind is handled in its own arm
+/// so field layout can be tuned per type.
+fn build_event_embed(event: &TeamEvent) -> RichEmbed {
+    let severity = severity_for_event(&event.event);
+    let color = severity.color();
+    let title = event_title(event);
+    let description = event_summary_line(event);
+    let mut embed = RichEmbed::new(title, color).with_timestamp(event_timestamp_rfc3339(event));
 
-    let action = match event.event.as_str() {
-        "task_assigned" => "📌 Task Assigned",
-        "task_claim_created" => "✋ Task Claimed",
-        "task_escalated" => "🚨 Task Escalated",
-        "task_stale" => "⏰ Task Stale",
-        "verification_phase_changed" => "🔍 Verification Update",
-        "verification_evidence_collected" => "✅ Tests Passed",
-        "agent_spawned" => "🚀 Agent Started",
-        "daemon_started" => "🟢 Batty Started",
-        "daemon_stopped" => "🔴 Batty Stopped",
-        "stall_detected" => "🚧 Agent Stalled",
-        "context_exhausted" => "💾 Context Exhausted",
-        "narration_rejection" => "🚫 Narration Rejected",
-        "backend_quota_exhausted" => "💳 Quota Exhausted",
-        "auto_doctor_action" => "🩺 Auto-Doctor",
-        "pattern_detected" => "📊 Pattern Detected",
-        other => return format!("{role_prefix} — {}", other.replace('_', " ")),
-    };
+    if let Some(description) = description {
+        embed = embed.with_description(description);
+    }
 
-    format!("{role_prefix} — {action}")
+    if let Some(author) = event_author_label(event) {
+        embed = embed.with_author(author);
+    }
+
+    for field in event_fields(event) {
+        embed = embed.push_field(field);
+    }
+
+    embed = embed.with_footer(event_footer(event, severity));
+
+    embed
 }
 
-/// Rich description with the actual content people want to read.
-fn friendly_event_description(event: &TeamEvent) -> String {
+/// Short, scannable title for an event embed. The old formatter
+/// crammed `⚙️ System — 📌 Task Assigned` into every title; the new
+/// format moves the role attribution into the author block and keeps
+/// the title focused on "what happened". One leading emoji, a short
+/// verb phrase, plus a task id when relevant.
+fn event_title(event: &TeamEvent) -> String {
+    let action = event_action_label(&event.event);
+    if let Some(task) = event
+        .task
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        // task may be "409" or "409\nTask title\n..." — show just the id.
+        let task_id = task.split_whitespace().next().unwrap_or(task);
+        // Strip leading '#' if present so we don't render '##409'.
+        let task_id = task_id.trim_start_matches('#');
+        format!("{action} — #{task_id}")
+    } else {
+        action.to_string()
+    }
+}
+
+/// Canonical `emoji + verb` action label for an event kind. Does NOT
+/// include any role prefix — those live in the author block now.
+fn event_action_label(event: &str) -> String {
+    match event {
+        "task_assigned" => "📌 Task Assigned".into(),
+        "task_claim_created" => "✋ Task Claimed".into(),
+        "task_escalated" => "🚨 Task Escalated".into(),
+        "task_stale" => "⏰ Task Stale".into(),
+        "task_auto_merged" | "task_manual_merged" | "merge_success" => "✅ Task Merged".into(),
+        "verification_phase_changed" => "🔍 Verification".into(),
+        "verification_evidence_collected" => "🧪 Tests Passed".into(),
+        "verification_failed" => "❌ Verification Failed".into(),
+        "agent_spawned" => "🚀 Agent Started".into(),
+        "daemon_started" => "🟢 Batty Started".into(),
+        "daemon_stopped" => "🔴 Batty Stopped".into(),
+        "stall_detected" => "🐌 Agent Stalled".into(),
+        "context_exhausted" => "🧠 Context Exhausted".into(),
+        "narration_rejection" => "🚫 Narration Rejected".into(),
+        "backend_quota_exhausted" => "💳 Quota Exhausted".into(),
+        "auto_doctor_action" => "🩺 Auto-Doctor".into(),
+        "pattern_detected" => "📊 Pattern Detected".into(),
+        "dispatch_overlap_skipped" => "⏸️ Dispatch Skipped".into(),
+        "scope_fence_violation" => "⛔ Scope Violation".into(),
+        "shim_crash" | "pane_death" => "💥 Agent Crashed".into(),
+        other => other.replace('_', " "),
+    }
+}
+
+/// One- or two-sentence narrative description. Optional — not every
+/// event has something useful to say beyond its structured fields.
+fn event_summary_line(event: &TeamEvent) -> Option<String> {
     match event.event.as_str() {
         "task_assigned" => {
-            let engineer = event.to.as_deref().unwrap_or("?");
-            let task = event.task.as_deref().unwrap_or("unknown task");
-            // Extract title (first line) and body (rest)
-            let (title, body) = task.split_once('\n').unwrap_or((task, ""));
-            let title = title.trim();
-            let body = body.trim();
-            if body.is_empty() {
-                format!("**{engineer}** picked up:\n**{title}**")
-            } else {
-                let body_preview = truncate_with_suffix(body, 3800, "\n[…truncated in Discord]");
-                format!("**{engineer}** picked up:\n**{title}**\n{body_preview}")
-            }
+            let engineer = event_actor_label(event);
+            let title = event
+                .task
+                .as_deref()
+                .and_then(|t| t.split_once('\n').map(|(first, _)| first).or(Some(t)))
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .unwrap_or("new task");
+            let title = truncate_plain(title, 120);
+            Some(format!("**{engineer}** picked up **{title}**."))
         }
         "task_escalated" => {
-            let from = event.from.as_deref().unwrap_or("?");
+            let from = event_actor_label(event);
             let reason = event.reason.as_deref().unwrap_or("no reason given");
-            let task = event.task.as_deref().unwrap_or("?");
-            format!("**{from}** escalated **#{task}**\n> {reason}")
+            Some(format!("Escalated by **{from}** — {reason}."))
         }
         "task_stale" => {
-            let role = event.role.as_deref().unwrap_or("?");
-            let task = event.task.as_deref().unwrap_or("?");
-            let reason = event.reason.as_deref().unwrap_or("no progress");
-            format!("**{role}** on **#{task}** — {reason}")
+            let role = event_actor_label(event);
+            let reason = event.reason.as_deref().unwrap_or("no progress detected");
+            Some(format!("**{role}** is stuck — {reason}."))
         }
         "agent_spawned" => {
-            let role = event.role.as_deref().unwrap_or("?");
-            format!("**{role}** is online and ready for work")
+            let role = event_actor_label(event);
+            Some(format!("**{role}** is online and ready for work."))
         }
         "daemon_started" => {
             let uptime = event
                 .uptime_secs
-                .map(|s| format!(" (uptime: {s}s)"))
+                .map(|s| format!(" (uptime {s}s)"))
                 .unwrap_or_default();
-            format!("Team is running{uptime}")
+            Some(format!("Team is running{uptime}."))
         }
-        "daemon_stopped" => "Team session ended".to_string(),
+        "daemon_stopped" => Some("Team session ended.".into()),
         "stall_detected" => {
-            let role = event.role.as_deref().unwrap_or("?");
+            let role = event_actor_label(event);
             let reason = event.reason.as_deref().unwrap_or("unresponsive");
-            format!("**{role}** appears stuck — {reason}")
+            Some(format!("**{role}** appears stuck — {reason}."))
         }
         "context_exhausted" => {
-            let role = event.role.as_deref().unwrap_or("?");
-            format!("**{role}** hit context limit — restarting with handoff")
+            let role = event_actor_label(event);
+            Some(format!(
+                "**{role}** hit the context limit. Restarting with handoff."
+            ))
         }
         "narration_rejection" => {
-            let role = event.role.as_deref().unwrap_or("?");
-            format!("**{role}** tried to narrate instead of code — rejected, retrying")
+            let role = event_actor_label(event);
+            Some(format!(
+                "**{role}** tried to narrate instead of code. Retrying."
+            ))
         }
         "backend_quota_exhausted" => {
-            let role = event.role.as_deref().unwrap_or("?");
+            let role = event_actor_label(event);
             let reason = event.reason.as_deref().unwrap_or("credits exhausted");
-            format!(
-                "**{role}** hit backend quota limit — agent paused\n> {reason}\n\nAdd credits or switch to a different backend in team.yaml"
-            )
+            Some(format!(
+                "**{role}** hit backend quota. Agent paused — {reason}."
+            ))
         }
-        "auto_doctor_action" => {
-            let action = event.details.as_deref().unwrap_or("board maintenance");
-            let role = event.role.as_deref().unwrap_or("");
-            let task = event.task.as_deref().unwrap_or("");
-            if !role.is_empty() && !task.is_empty() {
-                format!("Fixed **{role}**'s task **#{task}**: {action}")
-            } else {
-                action.to_string()
-            }
+        "pattern_detected" => {
+            let pattern = event
+                .details
+                .as_deref()
+                .or(event.reason.as_deref())
+                .unwrap_or("rolling-window threshold tripped");
+            Some(truncate_plain(pattern, 240))
         }
-        "dispatch_overlap_skipped" => {
-            let task = event.task.as_deref().unwrap_or("?");
-            let blocking = event.reason.as_deref().unwrap_or("another task");
-            let files = event.details.as_deref().unwrap_or("shared files");
-            format!(
-                "Task **#{task}** can't be assigned yet — it touches the same files as in-progress **#{blocking}**\nConflicting: `{files}`"
-            )
-        }
-        "task_claim_created" => {
-            let role = event.role.as_deref().unwrap_or("?");
-            let task = event.task.as_deref().unwrap_or("?");
-            format!("**{role}** claimed task **#{task}**")
+        "task_auto_merged" | "task_manual_merged" | "merge_success" => {
+            let role = event_actor_label(event);
+            Some(format!("**{role}** landed the change on main."))
         }
         "verification_phase_changed" => {
-            let task = event.task.as_deref().unwrap_or("?");
-            let step = event.step.as_deref().unwrap_or("?");
-            let role = event.role.as_deref().unwrap_or("?");
-            match step {
-                "testing" => format!("**{role}** is running tests for task **#{task}**"),
-                "passed" | "verification_passed" => {
-                    format!("Task **#{task}** passed verification — ready for merge")
-                }
-                "failed" => {
-                    format!("Task **#{task}** failed verification — will retry or escalate")
-                }
-                "retrying" => format!("Task **#{task}** retrying after test failure"),
-                _ => format!("Task **#{task}** → **{step}**"),
-            }
+            let step = event.step.as_deref().unwrap_or("state change");
+            Some(format!("Phase → **{step}**."))
         }
-        "verification_evidence_collected" => {
-            let task = event.task.as_deref().unwrap_or("?");
-            let details = event.details.as_deref().unwrap_or("evidence collected");
-            format!("Task **#{task}** — {details}")
+        "verification_evidence_collected" => Some(
+            event
+                .details
+                .clone()
+                .unwrap_or_else(|| "Tests passed.".into()),
+        ),
+        "dispatch_overlap_skipped" => {
+            let blocking = event.reason.as_deref().unwrap_or("another in-flight task");
+            Some(format!("Skipped — conflicts with {blocking}."))
         }
-        _ => {
-            // Fallback: construct a human-readable sentence from available fields.
-            // Every event that reaches Discord should answer: "what happened and why should I care?"
-            let verb = event.event.replace('_', " ");
-            let mut sentence = String::new();
-
-            // Who
-            if let Some(role) = event.role.as_deref().or(event.from.as_deref()) {
-                sentence.push_str(&format!("**{role}**"));
-            }
-
-            // What
-            if sentence.is_empty() {
-                sentence.push_str(&verb);
-            } else {
-                sentence.push_str(&format!(": {verb}"));
-            }
-
-            // Task context
-            if let Some(task) = &event.task {
-                sentence.push_str(&format!(" on **#{task}**"));
-            }
-
-            // Why / details
-            if let Some(details) = &event.details {
-                sentence.push_str(&format!("\n> {details}"));
-            } else if let Some(reason) = &event.reason {
-                sentence.push_str(&format!("\n> {reason}"));
-            }
-
-            // Error context
-            if let Some(error) = &event.error {
-                sentence.push_str(&format!("\n⚠️ {error}"));
-            }
-
-            sentence
-        }
+        "auto_doctor_action" => event.details.clone(),
+        _ => None,
     }
 }
 
-fn truncate_with_suffix(input: &str, limit: usize, suffix: &str) -> String {
-    let input_len = input.chars().count();
-    if input_len <= limit {
-        return input.to_string();
+/// Structured fields per event type. This is where the bulk of the
+/// useful information lives — one labelled inline field per key piece
+/// of context.
+fn event_fields(event: &TeamEvent) -> Vec<EmbedField> {
+    let mut fields = Vec::new();
+
+    match event.event.as_str() {
+        "task_assigned" => {
+            if let Some(task_id) = event.task.as_deref().and_then(extract_task_id) {
+                fields.push(EmbedField::inline("Task", format!("#{task_id}")));
+            }
+            if let Some(engineer) = event.to.as_deref().or(event.recipient.as_deref()) {
+                fields.push(EmbedField::inline("Engineer", engineer.to_string()));
+            }
+            if let Some(from) = event.from.as_deref() {
+                fields.push(EmbedField::inline("Assigned By", from.to_string()));
+            }
+            if let Some(body) = task_body_preview(event) {
+                fields.push(EmbedField::new("Task Body", body));
+            }
+        }
+        "task_escalated" => {
+            if let Some(task_id) = event.task.as_deref().and_then(extract_task_id) {
+                fields.push(EmbedField::inline("Task", format!("#{task_id}")));
+            }
+            if let Some(from) = event.from.as_deref() {
+                fields.push(EmbedField::inline("From", from.to_string()));
+            }
+            if let Some(to) = event.to.as_deref() {
+                fields.push(EmbedField::inline("To", to.to_string()));
+            }
+            if let Some(reason) = event.reason.as_deref() {
+                fields.push(EmbedField::new("Reason", format!("> {reason}")));
+            }
+        }
+        "verification_phase_changed" => {
+            if let Some(task_id) = event.task.as_deref().and_then(extract_task_id) {
+                fields.push(EmbedField::inline("Task", format!("#{task_id}")));
+            }
+            if let Some(role) = event.role.as_deref() {
+                fields.push(EmbedField::inline("Engineer", role.to_string()));
+            }
+            if let Some(step) = event.step.as_deref() {
+                fields.push(EmbedField::inline("Phase", step.to_string()));
+            }
+        }
+        "agent_spawned" | "daemon_started" | "daemon_stopped" => {
+            if let Some(backend) = event.backend.as_deref() {
+                fields.push(EmbedField::inline("Backend", backend.to_string()));
+            }
+            if let Some(restart) = event.restart {
+                fields.push(EmbedField::inline(
+                    "Restart",
+                    if restart { "yes" } else { "no" }.to_string(),
+                ));
+            }
+            if let Some(uptime) = event.uptime_secs {
+                fields.push(EmbedField::inline("Uptime", format!("{uptime}s")));
+            }
+        }
+        "stall_detected" | "context_exhausted" | "narration_rejection" => {
+            if let Some(role) = event.role.as_deref() {
+                fields.push(EmbedField::inline("Agent", role.to_string()));
+            }
+            if let Some(task_id) = event.task.as_deref().and_then(extract_task_id) {
+                fields.push(EmbedField::inline("Task", format!("#{task_id}")));
+            }
+            if let Some(reason) = event.reason.as_deref() {
+                fields.push(EmbedField::new("Details", format!("> {reason}")));
+            }
+        }
+        "pattern_detected" => {
+            if let Some(pattern) = event.reason.as_deref().or(event.details.as_deref()) {
+                fields.push(EmbedField::new("Pattern", pattern.to_string()));
+            }
+            if let Some(role) = event.role.as_deref() {
+                fields.push(EmbedField::inline("Agent", role.to_string()));
+            }
+            if let Some(task_id) = event.task.as_deref().and_then(extract_task_id) {
+                fields.push(EmbedField::inline("Task", format!("#{task_id}")));
+            }
+        }
+        "backend_quota_exhausted" => {
+            if let Some(role) = event.role.as_deref() {
+                fields.push(EmbedField::inline("Agent", role.to_string()));
+            }
+            if let Some(backend) = event.backend.as_deref() {
+                fields.push(EmbedField::inline("Backend", backend.to_string()));
+            }
+            if let Some(reason) = event.reason.as_deref() {
+                fields.push(EmbedField::new("Reason", format!("> {reason}")));
+            }
+        }
+        "task_auto_merged" | "task_manual_merged" | "merge_success" => {
+            if let Some(task_id) = event.task.as_deref().and_then(extract_task_id) {
+                fields.push(EmbedField::inline("Task", format!("#{task_id}")));
+            }
+            if let Some(role) = event.role.as_deref() {
+                fields.push(EmbedField::inline("Engineer", role.to_string()));
+            }
+            if let Some(mode) = event.merge_mode.as_deref() {
+                fields.push(EmbedField::inline("Mode", mode.to_string()));
+            }
+        }
+        "auto_doctor_action" => {
+            if let Some(task_id) = event.task.as_deref().and_then(extract_task_id) {
+                fields.push(EmbedField::inline("Task", format!("#{task_id}")));
+            }
+            if let Some(role) = event.role.as_deref() {
+                fields.push(EmbedField::inline("Target", role.to_string()));
+            }
+            if let Some(details) = event.details.as_deref() {
+                fields.push(EmbedField::new("Action", details.to_string()));
+            }
+        }
+        _ => {
+            if let Some(task_id) = event.task.as_deref().and_then(extract_task_id) {
+                fields.push(EmbedField::inline("Task", format!("#{task_id}")));
+            }
+            if let Some(role) = event.role.as_deref() {
+                fields.push(EmbedField::inline("Member", role.to_string()));
+            }
+            if let Some(reason) = event.reason.as_deref() {
+                fields.push(EmbedField::new("Reason", format!("> {reason}")));
+            }
+            if let Some(error) = event.error.as_deref() {
+                fields.push(EmbedField::new("Error", format!("⚠️ {error}")));
+            }
+        }
     }
 
-    let suffix_len = suffix.chars().count();
-    let head_len = limit.saturating_sub(suffix_len);
-    let mut out: String = input.chars().take(head_len).collect();
-    out.push_str(suffix);
+    fields
+}
+
+/// Author label shown in the embed author block. Maps to role with a
+/// consistent emoji prefix.
+fn event_author_label(event: &TeamEvent) -> Option<String> {
+    event
+        .role
+        .as_deref()
+        .or(event.from.as_deref())
+        .or(event.to.as_deref())
+        .map(role_author_label)
+}
+
+/// Short label for the actor in narrative sentences — prefers the
+/// most specific source available. Never returns `?`.
+fn event_actor_label(event: &TeamEvent) -> String {
+    event
+        .to
+        .as_deref()
+        .or(event.role.as_deref())
+        .or(event.from.as_deref())
+        .map(|r| r.to_string())
+        .unwrap_or_else(|| "system".into())
+}
+
+/// Extract a clean `\d+` task id from the `task` field, which is often
+/// `"409"` but sometimes `"409\nTitle..."` or `"#409"`.
+fn extract_task_id(raw: &str) -> Option<String> {
+    let token = raw.split_whitespace().next()?.trim_start_matches('#');
+    let digits: String = token.chars().take_while(|c| c.is_ascii_digit()).collect();
+    if digits.is_empty() {
+        None
+    } else {
+        Some(digits)
+    }
+}
+
+/// Extract a short preview of the task body (the part after the first
+/// line) for an embed field. Truncates to 900 chars so the field
+/// stays well inside Discord's 1024-char field value limit.
+fn task_body_preview(event: &TeamEvent) -> Option<String> {
+    let task = event.task.as_deref()?;
+    let (_, body) = task.split_once('\n')?;
+    let trimmed = body.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(truncate_plain(trimmed, 900))
+}
+
+/// UTF-8-safe truncation with an ellipsis suffix when we cut.
+fn truncate_plain(input: &str, limit: usize) -> String {
+    if input.chars().count() <= limit {
+        return input.to_string();
+    }
+    let mut out: String = input.chars().take(limit.saturating_sub(1)).collect();
+    out.push('…');
     out
 }
 
-fn event_color(event: &TeamEvent) -> u32 {
-    if is_attention_event(event) {
-        0xDC2626
-    } else if let Some(role) = event.role.as_deref() {
-        color_for_role(role)
-    } else if let Some(from) = event.from.as_deref() {
-        color_for_role(from)
-    } else {
-        color_for_role("system")
-    }
+/// Convert the event's unix-epoch `ts` to an ISO 8601 RFC 3339 string
+/// so Discord can render it client-local next to the footer.
+fn event_timestamp_rfc3339(event: &TeamEvent) -> String {
+    DateTime::<Utc>::from_timestamp(event.ts as i64, 0)
+        .unwrap_or_else(Utc::now)
+        .to_rfc3339()
+}
+
+/// Consistent footer: provenance + severity tag. Users scanning the
+/// channel can tell "which service wrote this" without reading the
+/// author line.
+fn event_footer(event: &TeamEvent, severity: Severity) -> String {
+    let tag = match severity {
+        Severity::Success => "SUCCESS",
+        Severity::Info => "INFO",
+        Severity::Warn => "WARN",
+        Severity::Error => "ERROR",
+        Severity::Critical => "CRIT",
+        Severity::Neutral => "INFO",
+    };
+    format!(
+        "batty v{} · {} · {}",
+        env!("CARGO_PKG_VERSION"),
+        tag,
+        event.event
+    )
 }
 
 fn latest_test_health(tasks: &[Task]) -> String {
@@ -1087,7 +1274,12 @@ mod tests {
     }
 
     #[test]
-    fn event_channel_id_routes_attention_and_agent_events() {
+    fn event_channel_id_routes_agent_lifecycle_to_agents_and_everything_else_to_events() {
+        // Regression test for the channel-routing fix: attention / error
+        // events used to land in the commands channel, which mixed alerts
+        // into user command responses. New rule is strictly two-way —
+        // agent lifecycle → agents channel, everything else → events
+        // channel. Commands channel is reserved for user command replies.
         let config = crate::team::config::ChannelConfig {
             target: String::new(),
             provider: String::new(),
@@ -1099,48 +1291,140 @@ mod tests {
             board_channel_id: Some("board".into()),
         };
 
+        // Error / escalation events belong on the main events timeline,
+        // NOT on the user-command channel.
         let mut error_event = TeamEvent::loop_step_error("poll", "boom");
         error_event.role = Some("manager".into());
-        assert_eq!(event_channel_id(&config, &error_event), Some("commands"));
+        assert_eq!(event_channel_id(&config, &error_event), Some("events"));
 
+        // Agent lifecycle events belong on the agents channel.
         let agent_event = TeamEvent::daemon_started();
         assert_eq!(event_channel_id(&config, &agent_event), Some("agents"));
 
+        // Routine task events belong on the events channel.
         let board_event = TeamEvent::task_assigned("eng-1", "Task #42");
         assert_eq!(event_channel_id(&config, &board_event), Some("events"));
+
+        // Task escalations are alerts — used to go to commands, must now
+        // land on events so the commands channel stays as a chat surface.
+        let escalation = TeamEvent::task_escalated("manager", "42", Some("stuck_task"));
+        assert_eq!(event_channel_id(&config, &escalation), Some("events"));
     }
 
     #[test]
-    fn task_assigned_description_uses_plain_text_without_spoilers() {
+    fn build_event_embed_promotes_role_to_author_and_uses_fields() {
+        // Regression test for the "wall of text" embed bug: task_assigned
+        // embeds used to be title + 3800-char description with no
+        // structure, so readers scrolled past a single mega-post per
+        // task. The new builder moves the role to `author`, keeps the
+        // description to a single short sentence, and exposes the task
+        // id / engineer / body in structured fields.
         let mut event = TeamEvent::task_assigned(
-            "eng-1",
-            "Task #42: fix Discord body preview\nFirst line of body\nSecond line of body",
+            "alex-dev-1",
+            "409\nBuild routing fixtures for the marketing pipeline\nThis task prepares the fixture tree used by the router tests.",
         );
-        event.to = Some("eng-1".into());
+        event.to = Some("alex-dev-1".into());
+        event.from = Some("jordan-pm".into());
 
-        let description = friendly_event_description(&event);
+        let embed = build_event_embed(&event);
 
-        assert!(description.contains("**eng-1** picked up:"));
-        assert!(description.contains("First line of body"));
-        assert!(description.contains("Second line of body"));
-        assert!(!description.contains("||"));
+        // Severity maps to Info for task_assigned → Discord Blurple.
+        assert_eq!(embed.color, Severity::Info.color());
+
+        // Title should NOT carry the role prefix anymore; it only
+        // describes the action + task id.
+        assert!(embed.title.starts_with("📌 Task Assigned"));
+        assert!(embed.title.contains("#409"));
+        assert!(!embed.title.contains("System"));
+
+        // Author block should carry the role attribution.
+        let author = embed.author_name.as_deref().unwrap_or_default();
+        assert!(
+            author.contains("alex-dev-1") || author.contains("jordan-pm"),
+            "author block should attribute the event, got {author:?}"
+        );
+
+        // Description should be a single short narrative sentence, not a
+        // 3800-char dump of the task body.
+        let description = embed.description.as_deref().unwrap_or_default();
+        assert!(
+            description.len() < 200,
+            "description too long: {description:?}"
+        );
+        assert!(description.contains("alex-dev-1"));
+        assert!(!description.contains("**?**"));
+
+        // Fields should carry the structured data.
+        let field_names: Vec<&str> = embed.fields.iter().map(|f| f.name.as_str()).collect();
+        assert!(field_names.contains(&"Task"));
+        assert!(field_names.contains(&"Engineer"));
+        assert!(field_names.contains(&"Assigned By"));
+        assert!(field_names.contains(&"Task Body"));
+
+        // Footer should include version + severity tag + event kind.
+        let footer = embed.footer.as_deref().unwrap_or_default();
+        assert!(footer.contains("batty v"));
+        assert!(footer.contains("INFO"));
+        assert!(footer.contains("task_assigned"));
+
+        // Embed must have an ISO 8601 timestamp so Discord renders it
+        // in the viewer's local timezone.
+        let timestamp = embed.timestamp.as_deref().unwrap_or_default();
+        assert!(
+            timestamp.contains('T'),
+            "timestamp should be RFC3339: {timestamp:?}"
+        );
     }
 
     #[test]
-    fn task_assigned_description_uses_expand_marker_when_truncated() {
-        let long_body = "a".repeat(4000);
-        let mut event = TeamEvent::task_assigned(
-            "eng-1",
-            &format!("Task #42: fix Discord body preview\n{long_body}"),
+    fn build_event_embed_task_escalated_uses_error_color_and_reason_field() {
+        // Regression test for the `**?**` bug and the color/severity
+        // taxonomy. task_escalated used to render red only because of a
+        // generic "contains escalat" regex — and produced a description
+        // that started with `**?** escalated **#NNN**` when the `from`
+        // field was the only actor source. The new builder picks up
+        // `from` explicitly, colors the embed with Severity::Error
+        // (0xED4245), and puts the reason in its own field.
+        let event = TeamEvent::task_escalated("jordan-pm", "256", Some("stuck_task"));
+
+        let embed = build_event_embed(&event);
+
+        assert_eq!(embed.color, Severity::Error.color());
+        assert_eq!(embed.color, 0xED4245);
+        assert!(embed.title.starts_with("🚨 Task Escalated"));
+        assert!(embed.title.contains("#256"));
+        let description = embed.description.as_deref().unwrap_or_default();
+        assert!(
+            !description.contains("**?**"),
+            "description still has ? placeholder"
         );
-        event.to = Some("eng-1".into());
+        assert!(description.contains("jordan-pm"));
 
-        let description = friendly_event_description(&event);
+        let reason_field = embed
+            .fields
+            .iter()
+            .find(|f| f.name == "Reason")
+            .expect("escalation embed should carry a Reason field");
+        assert!(reason_field.value.contains("stuck_task"));
 
-        assert!(description.contains("[…truncated in Discord]"));
-        assert!(!description.contains("||"));
-        assert!(description.chars().count() > 3800);
-        assert!(description.chars().count() < 3950);
+        let footer = embed.footer.as_deref().unwrap_or_default();
+        assert!(footer.contains("ERROR"));
+    }
+
+    #[test]
+    fn build_event_embed_pattern_detected_uses_warn_color_not_plain_error() {
+        // Pattern detection is advisory, not actionable — it should map
+        // to Severity::Warn (yellow) so it visually separates from true
+        // errors like task_escalated or stall_detected.
+        let mut event = TeamEvent::pattern_detected("escalation_cluster", 5);
+        event.role = Some("manager".into());
+
+        let embed = build_event_embed(&event);
+        assert_eq!(embed.color, Severity::Warn.color());
+        assert_eq!(embed.color, 0xFEE75C);
+        assert!(embed.title.starts_with("📊 Pattern Detected"));
+        let footer = embed.footer.as_deref().unwrap_or_default();
+        assert!(footer.contains("WARN"));
     }
 
     #[test]
