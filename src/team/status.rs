@@ -4570,6 +4570,54 @@ mod tests {
         assert_eq!(metrics.blocked_count, 1);
     }
 
+    /// Regression for #618: when a supervisor has actionable backlog
+    /// (`needs review` / `needs triage`), generic stall text must be
+    /// suppressed so operators see the actionable reason first.
+    #[test]
+    fn merge_status_signal_suppresses_generic_stall_when_actionable_backlog_present() {
+        let result = merge_status_signal(
+            None,
+            None,
+            Some("manager stall after 32m".to_string()),
+            0,
+            2, // review_backlog
+            0,
+        );
+        assert_eq!(
+            result,
+            Some("needs review (2)".to_string()),
+            "generic stall text should be suppressed when review backlog is non-zero"
+        );
+
+        let result = merge_status_signal(
+            None,
+            None,
+            Some("architect stall after 15m".to_string()),
+            3, // triage_backlog
+            0,
+            0,
+        );
+        assert_eq!(
+            result,
+            Some("needs triage (3)".to_string()),
+            "generic stall text should be suppressed when triage backlog is non-zero"
+        );
+
+        let result = merge_status_signal(
+            None,
+            None,
+            Some("manager stall after 42m".to_string()),
+            0,
+            0,
+            0,
+        );
+        assert_eq!(
+            result,
+            Some("manager stall after 42m".to_string()),
+            "generic stall text should remain when no actionable backlog is present"
+        );
+    }
+
     #[test]
     fn format_metrics_unchanged_with_db_source() {
         let conn = crate::team::telemetry_db::open_in_memory().unwrap();

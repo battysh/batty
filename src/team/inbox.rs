@@ -567,6 +567,82 @@ pub fn digest_messages(messages: &[(InboxMessage, bool)]) -> (Vec<DigestEntry>, 
     (entries, raw_count)
 }
 
+/// Extract `#NN` task references from a message body. Used by
+/// [`demote_stale_escalations`] (#612) to determine whether an
+/// escalation body is still actionable against the current board
+/// state.
+pub fn extract_task_ids_from_body(body: &str) -> Vec<u32> {
+    let bytes = body.as_bytes();
+    let mut ids = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'#' && i + 1 < bytes.len() && bytes[i + 1].is_ascii_digit() {
+            let start = i + 1;
+            let mut end = start;
+            while end < bytes.len() && bytes[end].is_ascii_digit() {
+                end += 1;
+            }
+            if let Ok(num) = std::str::from_utf8(&bytes[start..end])
+                && let Ok(value) = num.parse::<u32>()
+            {
+                ids.push(value);
+            }
+            i = end;
+        } else {
+            i += 1;
+        }
+    }
+    ids.sort_unstable();
+    ids.dedup();
+    ids
+}
+
+/// Demote digest entries whose referenced tasks are already `done`,
+/// `archived`, or otherwise cleared on the board. Escalations for
+/// cleared tasks are re-categorised as [`MessageCategory::Status`]
+/// so they no longer occupy the top of the inbox digest (#612).
+///
+/// Entries without an extractable task reference are left alone.
+/// Entries whose referenced tasks are still active (todo/in-progress/
+/// review/blocked) are left alone.
+pub fn demote_stale_escalations(
+    entries: Vec<DigestEntry>,
+    board_dir: &std::path::Path,
+) -> Vec<DigestEntry> {
+    let Ok(tasks) = crate::task::load_tasks_from_dir(&board_dir.join("tasks")) else {
+        return entries;
+    };
+    let stale_ids: std::collections::HashSet<u32> = tasks
+        .iter()
+        .filter(|t| matches!(t.status.as_str(), "done" | "archived"))
+        .map(|t| t.id)
+        .collect();
+    if stale_ids.is_empty() {
+        return entries;
+    }
+
+    entries
+        .into_iter()
+        .map(|mut entry| {
+            if !matches!(
+                entry.category,
+                MessageCategory::Escalation | MessageCategory::Blocker
+            ) {
+                return entry;
+            }
+            let referenced = extract_task_ids_from_body(&entry.message.body);
+            if referenced.is_empty() {
+                return entry;
+            }
+            let all_stale = referenced.iter().all(|id| stale_ids.contains(id));
+            if all_stale {
+                entry.category = MessageCategory::Status;
+            }
+            entry
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1202,6 +1278,98 @@ mod tests {
 
         let (entries, _) = digest_messages(&msgs);
         assert_eq!(entries.len(), 2, "status for different tasks stay separate");
+    }
+
+    #[test]
+    fn extract_task_ids_from_body_pulls_multiple_refs() {
+        assert_eq!(extract_task_ids_from_body("Task #42 escalated"), vec![42]);
+        assert_eq!(
+            extract_task_ids_from_body("Blocker on #42 and #43 cascading into #44"),
+            vec![42, 43, 44]
+        );
+        assert_eq!(
+            extract_task_ids_from_body("no refs here"),
+            Vec::<u32>::new()
+        );
+        assert_eq!(
+            extract_task_ids_from_body("#1 #1 #2 — duplicates"),
+            vec![1, 2]
+        );
+    }
+
+    /// Regression for #612: escalations whose referenced tasks are
+    /// already `done` on the board should be demoted from Escalation
+    /// to Status so they no longer occupy the top of the digest.
+    #[test]
+    fn demote_stale_escalations_moves_done_task_escalations_off_top() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = tmp.path().join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+
+        // Done task #42 and live task #43
+        std::fs::write(
+            tasks_dir.join("042-done.md"),
+            "---\nid: 42\ntitle: done\nstatus: done\npriority: high\nclass: standard\n---\n",
+        )
+        .unwrap();
+        std::fs::write(
+            tasks_dir.join("043-live.md"),
+            "---\nid: 43\ntitle: live\nstatus: in-progress\npriority: high\nclass: standard\n---\n",
+        )
+        .unwrap();
+
+        let entries = vec![
+            DigestEntry {
+                message: make_msg("eng-1", "manager", "Task #42 escalated: old blocker", 100),
+                delivered: false,
+                category: MessageCategory::Escalation,
+                collapsed_count: 1,
+            },
+            DigestEntry {
+                message: make_msg("eng-2", "manager", "Task #43 escalated: real blocker", 200),
+                delivered: false,
+                category: MessageCategory::Escalation,
+                collapsed_count: 1,
+            },
+        ];
+
+        let filtered = demote_stale_escalations(entries, tmp.path());
+        assert_eq!(
+            filtered[0].category,
+            MessageCategory::Status,
+            "#42 is done, its escalation should be demoted"
+        );
+        assert_eq!(
+            filtered[1].category,
+            MessageCategory::Escalation,
+            "#43 is still live, its escalation should stay at top priority"
+        );
+    }
+
+    #[test]
+    fn demote_stale_escalations_preserves_entries_without_task_refs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = tmp.path().join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+        std::fs::write(
+            tasks_dir.join("042-done.md"),
+            "---\nid: 42\ntitle: done\nstatus: done\npriority: high\nclass: standard\n---\n",
+        )
+        .unwrap();
+
+        let entries = vec![DigestEntry {
+            message: make_msg("eng-1", "manager", "Generic escalation with no ID", 100),
+            delivered: false,
+            category: MessageCategory::Escalation,
+            collapsed_count: 1,
+        }];
+
+        let filtered = demote_stale_escalations(entries, tmp.path());
+        assert_eq!(
+            filtered[0].category,
+            MessageCategory::Escalation,
+            "entries without task refs should not be demoted"
+        );
     }
 
     #[test]

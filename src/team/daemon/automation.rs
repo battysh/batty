@@ -768,6 +768,22 @@ impl TeamDaemon {
                 engineer,
                 reason
             ));
+            // #630: if the task is done/archived but the engineer's
+            // worktree is still dirty on the old task branch,
+            // snapshot the dirty state into a preservation commit
+            // so the worktree can be freed for the next task. Without
+            // this call the engineer sits on a completed branch
+            // indefinitely until a human intervenes.
+            if reason == "task is done/archived" {
+                let worktree_dir = self.worktree_dir(&engineer);
+                if worktree_dir.exists() {
+                    self.preserve_worktree_before_restart(
+                        &engineer,
+                        &worktree_dir,
+                        "post_approval_dirty_lane_recovery",
+                    );
+                }
+            }
             self.clear_active_task(&engineer);
         }
         if released_claims {
@@ -3300,6 +3316,48 @@ thread 'tmux::tests::split_window_horizontal_creates_new_pane' panicked at src/t
     }
 
     // ── reconcile_active_tasks ──────────────────────────────────────
+
+    /// Regression for #630: when a task is already done/approved on
+    /// the board but the engineer worktree is still tracked in the
+    /// daemon's active_tasks map (the "post-approval dirty lane"
+    /// case), reconcile must clear the engineer so a fresh dispatch
+    /// can run. Without this, completed lanes stay parked forever
+    /// waiting on a human intervention.
+    #[test]
+    fn reconcile_active_tasks_recovers_post_approval_dirty_lane() {
+        let tmp = tempfile::tempdir().unwrap();
+        let engineer = MemberInstance {
+            name: "eng-1".to_string(),
+            role_name: "eng".to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("codex".to_string()),
+            prompt: None,
+            reports_to: None,
+            use_worktrees: false,
+            ..Default::default()
+        };
+        let mut daemon = make_test_daemon(tmp.path(), vec![engineer]);
+        daemon.active_tasks.insert("eng-1".to_string(), 628);
+
+        // Task #628 is done on the board — the engineer's active_task
+        // is pointing at completed work.
+        write_board_task_file(
+            tmp.path(),
+            628,
+            "completed-task",
+            "done",
+            Some("eng-1"),
+            &[],
+            None,
+        );
+
+        daemon.reconcile_active_tasks().unwrap();
+
+        assert!(
+            !daemon.active_tasks.contains_key("eng-1"),
+            "engineer must be freed from the post-approval dirty lane"
+        );
+    }
 
     #[test]
     fn reconcile_active_tasks_clears_done_tasks() {

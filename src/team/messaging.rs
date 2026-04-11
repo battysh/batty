@@ -210,21 +210,47 @@ pub fn list_inbox(
     if raw {
         print!("{}", format_inbox_listing(&member, &messages, limit));
     } else {
-        print!("{}", format_inbox_digest(&member, &messages, limit));
+        let board_dir = board_dir_for(project_root);
+        print!(
+            "{}",
+            format_inbox_digest(&member, &messages, limit, Some(&board_dir))
+        );
     }
     Ok(())
+}
+
+fn board_dir_for(project_root: &Path) -> std::path::PathBuf {
+    project_root
+        .join(".batty")
+        .join("team_config")
+        .join("board")
 }
 
 fn format_inbox_digest(
     member: &str,
     messages: &[(inbox::InboxMessage, bool)],
     limit: Option<usize>,
+    board_dir: Option<&std::path::Path>,
 ) -> String {
     if messages.is_empty() {
         return format!("No messages for {member}.\n");
     }
 
-    let (entries, raw_count) = inbox::digest_messages(messages);
+    let (mut entries, raw_count) = inbox::digest_messages(messages);
+    // Demote escalations whose referenced tasks are already done on
+    // the board so stale-task spam stops inflating the top of the
+    // digest (#612). Raw view is always lossless — this filter only
+    // applies to the digest view.
+    if let Some(board_dir) = board_dir {
+        entries = inbox::demote_stale_escalations(entries, board_dir);
+        // Re-sort after demotion so promoted/demoted categories land
+        // in the right position.
+        entries.sort_by(|a, b| {
+            a.category
+                .cmp(&b.category)
+                .then_with(|| b.message.timestamp.cmp(&a.message.timestamp))
+        });
+    }
     let digest_count = entries.len();
 
     let shown = match limit {
@@ -919,7 +945,7 @@ roles:
 
     #[test]
     fn format_inbox_digest_empty_inbox() {
-        let rendered = format_inbox_digest("manager", &[], None);
+        let rendered = format_inbox_digest("manager", &[], None, None);
         assert_eq!(rendered, "No messages for manager.\n");
     }
 
@@ -936,7 +962,7 @@ roles:
             },
             false,
         )];
-        let rendered = format_inbox_digest("manager", &messages, None);
+        let rendered = format_inbox_digest("manager", &messages, None, None);
         assert!(rendered.contains("CATEGORY"));
         assert!(rendered.contains("ESCALATION"));
     }
@@ -959,7 +985,7 @@ roles:
             })
             .collect();
 
-        let rendered = format_inbox_digest("eng-1", &messages, None);
+        let rendered = format_inbox_digest("eng-1", &messages, None, None);
         assert!(rendered.contains("x3"), "should show collapsed count x3");
         assert!(rendered.contains("nudge"));
     }
@@ -982,7 +1008,7 @@ roles:
             })
             .collect();
 
-        let rendered = format_inbox_digest("eng-1", &messages, None);
+        let rendered = format_inbox_digest("eng-1", &messages, None, None);
         assert!(rendered.contains("Digest: 1 entries from 5 messages"));
         assert!(rendered.contains("4 collapsed"));
         assert!(rendered.contains("--raw"));
@@ -1026,7 +1052,7 @@ roles:
             ),
         ];
 
-        let rendered = format_inbox_digest("manager", &messages, Some(2));
+        let rendered = format_inbox_digest("manager", &messages, Some(2), None);
         // 3 distinct entries (all different categories), limit 2 shows the
         // highest-signal entries first.
         assert!(rendered.contains("Showing 2 of 3 entries"));
@@ -1063,7 +1089,7 @@ roles:
             ),
         ];
 
-        let rendered = format_inbox_digest("manager", &messages, Some(1));
+        let rendered = format_inbox_digest("manager", &messages, Some(1), None);
         assert!(rendered.contains("REVIEW"));
         assert!(rendered.contains("requires manual review"));
         assert!(!rendered.contains("Status update: triage queue is unchanged."));
