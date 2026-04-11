@@ -11,7 +11,10 @@ use tracing::info;
 
 use super::errors::BoardError;
 use super::test_results::TestResults;
-use crate::task::{Task, load_tasks_from_dir};
+use crate::task::{
+    Task, load_tasks_from_dir, parse_frontmatter_timestamp as parse_task_frontmatter_timestamp,
+    parse_frontmatter_timestamp_compat,
+};
 
 /// Workflow metadata stored in task frontmatter.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -479,11 +482,11 @@ fn parse_cutoff_date(date_str: &str) -> Result<DateTime<FixedOffset>> {
 }
 
 fn parse_completed_date(completed_str: &str) -> Option<DateTime<FixedOffset>> {
-    DateTime::parse_from_rfc3339(completed_str).ok()
+    parse_task_frontmatter_timestamp(completed_str)
 }
 
 fn parse_frontmatter_timestamp(value: &str) -> Option<DateTime<FixedOffset>> {
-    DateTime::parse_from_rfc3339(value).ok()
+    parse_task_frontmatter_timestamp(value)
 }
 
 /// Update the `status` field in a task file's YAML frontmatter.
@@ -655,9 +658,7 @@ fn task_age_from_frontmatter(task: &Task, now: DateTime<Utc>, anchor: AgeAnchor)
 }
 
 fn parse_task_timestamp(value: &str) -> Option<DateTime<Utc>> {
-    chrono::DateTime::parse_from_rfc3339(value)
-        .ok()
-        .map(|value| value.with_timezone(&Utc))
+    parse_frontmatter_timestamp_compat(value)
 }
 
 fn commits_ahead_of_main(project_root: &Path, task: &Task) -> Result<u32> {
@@ -842,6 +843,27 @@ mod tests {
             "2026-04-05T11:00:00-04:00"
         );
         assert!(timestamps.completed.is_none());
+    }
+
+    #[test]
+    fn read_task_lifecycle_timestamps_accepts_legacy_offset_values() {
+        let tmp = tempfile::tempdir().unwrap();
+        let task_path = tmp.path().join("623-legacy-offset.md");
+        std::fs::write(
+            &task_path,
+            "---\nid: 623\ntitle: lifecycle\nstatus: review\npriority: high\ncreated: 2026-04-10T16:31:02.743151-04:00\nstarted: 2026-04-10T17:00:00-0400\ncompleted: 2026-04-10T19:26:40-0400\n---\n\nBody.\n",
+        )
+        .unwrap();
+
+        let timestamps = read_task_lifecycle_timestamps(&task_path).unwrap();
+        assert_eq!(
+            timestamps.started.unwrap().to_rfc3339(),
+            "2026-04-10T17:00:00-04:00"
+        );
+        assert_eq!(
+            timestamps.completed.unwrap().to_rfc3339(),
+            "2026-04-10T19:26:40-04:00"
+        );
     }
 
     #[test]

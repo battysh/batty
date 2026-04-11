@@ -583,14 +583,23 @@ fn load_board_tasks_for_status(board_dir: &Path, context: &str) -> Result<Vec<ta
 
     let repairs = crate::team::task_cmd::repair_board_frontmatter_compat(board_dir)?;
     if !repairs.is_empty() {
-        let repaired_task_ids = repairs
+        let repaired_tasks = repairs
             .iter()
-            .filter_map(|repair| repair.task_id)
+            .map(|repair| {
+                let task_label = repair
+                    .task_id
+                    .map(|task_id| format!("#{task_id}"))
+                    .unwrap_or_else(|| repair.path.display().to_string());
+                match repair.reason.as_deref() {
+                    Some(reason) => format!("{task_label} ({reason})"),
+                    None => task_label,
+                }
+            })
             .collect::<Vec<_>>();
         warn!(
             context = context,
             repaired_count = repairs.len(),
-            repaired_task_ids = ?repaired_task_ids,
+            repaired_tasks = ?repaired_tasks,
             "repaired malformed board task frontmatter during status scan"
         );
     }
@@ -3539,6 +3548,33 @@ mod tests {
         assert!(content.contains("blocked: true"));
         assert!(content.contains("block_reason: waiting on reviewer"));
         assert!(content.contains("blocked_on: waiting on reviewer"));
+    }
+
+    #[test]
+    fn board_status_task_queues_repairs_legacy_timestamp_frontmatter() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = crate::team::test_support::init_git_repo(&tmp, "status-repair-timestamp");
+        let tasks_dir = repo
+            .join(".batty")
+            .join("team_config")
+            .join("board")
+            .join("tasks");
+        fs::create_dir_all(&tasks_dir).unwrap();
+        let task_path = tasks_dir.join("623-stale-review.md");
+        fs::write(
+            &task_path,
+            "---\nid: 623\ntitle: stale review\nstatus: review\npriority: high\nclaimed_by: eng-1\ncreated: 2026-04-10T16:31:02.743151-04:00\nupdated: 2026-04-10T19:26:40-0400\nreview_owner: manager\nclass: standard\n---\n\nTask body.\n",
+        )
+        .unwrap();
+
+        let (active_tasks, review_queue) = board_status_task_queues(&repo).unwrap();
+
+        assert!(active_tasks.is_empty());
+        assert_eq!(review_queue.len(), 1);
+        assert_eq!(review_queue[0].id, 623);
+        let content = fs::read_to_string(&task_path).unwrap();
+        assert!(content.contains("updated: 2026-04-10T19:26:40-04:00"));
+        assert!(content.ends_with("\n\nTask body.\n"));
     }
 
     #[test]

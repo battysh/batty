@@ -302,9 +302,11 @@ pub(crate) fn run_board_with_program(
     match super::task_cmd::repair_board_frontmatter_compat(board_dir) {
         Ok(repairs) => {
             for repair in repairs {
+                let reason = repair.reason.as_deref().unwrap_or("unknown repair");
                 info!(
                     task_id = ?repair.task_id,
                     status = repair.status.as_deref().unwrap_or("unknown"),
+                    reason = reason,
                     path = %repair.path.display(),
                     "repaired malformed task frontmatter before board command"
                 );
@@ -631,6 +633,35 @@ mod tests {
         let content = fs::read_to_string(&task_path).unwrap();
         assert!(content.contains("blocked: true"));
         assert!(content.contains("block_reason: legacy reason string"));
+    }
+
+    #[test]
+    fn run_board_repairs_legacy_timestamp_frontmatter_before_list_invocation() {
+        let temp = TempDir::new().unwrap();
+        let board_dir = temp.path().join("board");
+        let tasks_dir = board_dir.join("tasks");
+        fs::create_dir_all(&tasks_dir).unwrap();
+        let task_path = tasks_dir.join("623-stale-review.md");
+        fs::write(
+            &task_path,
+            "---\nid: 623\ntitle: stale review\nstatus: review\npriority: high\ncreated: 2026-04-10T16:31:02.743151-04:00\nupdated: 2026-04-10T19:26:40-0400\nclass: standard\n---\n\nTask body.\n",
+        )
+        .unwrap();
+
+        let script_path = temp.path().join("fake-kanban.sh");
+        fs::write(&script_path, "#!/bin/sh\nexit 0\n").unwrap();
+        #[cfg(unix)]
+        {
+            let mut permissions = fs::metadata(&script_path).unwrap().permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(&script_path, permissions).unwrap();
+        }
+
+        run_board_with_program(script_path.to_str().unwrap(), &board_dir, &["list"]).unwrap();
+
+        let content = fs::read_to_string(&task_path).unwrap();
+        assert!(content.contains("updated: 2026-04-10T19:26:40-04:00"));
+        assert!(content.ends_with("\n\nTask body.\n"));
     }
 
     #[test]

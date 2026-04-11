@@ -605,21 +605,39 @@ pub(crate) struct TaskFrontmatterRepair {
     pub(crate) task_id: Option<u32>,
     pub(crate) status: Option<String>,
     pub(crate) reason: Option<String>,
+    pub(crate) repaired_fields: Vec<String>,
     pub(crate) path: PathBuf,
 }
 
 pub(crate) fn normalize_blocked_frontmatter(
     task_path: &Path,
 ) -> Result<Option<TaskFrontmatterRepair>> {
-    if !crate::task::normalize_blocked_frontmatter(task_path)? {
+    let Some(repair) = crate::task::repair_task_frontmatter_compat(task_path)? else {
         return Ok(None);
-    }
-
+    };
     let task = Task::from_file(task_path)?;
+    let reason = if repair
+        .repaired_fields
+        .iter()
+        .any(|field| matches!(field.as_str(), "blocked" | "block_reason" | "blocked_on"))
+    {
+        repair
+            .blocked_reason
+            .clone()
+            .or_else(|| Some("normalized blocked frontmatter".to_string()))
+    } else if repair.repaired_fields.is_empty() {
+        None
+    } else {
+        Some(format!(
+            "normalized timestamp fields: {}",
+            repair.repaired_fields.join(", ")
+        ))
+    };
     Ok(Some(TaskFrontmatterRepair {
         task_id: Some(task.id),
         status: Some(task.status),
-        reason: task.blocked,
+        reason,
+        repaired_fields: repair.repaired_fields,
         path: task_path.to_path_buf(),
     }))
 }
@@ -906,6 +924,41 @@ Body.\n",
         );
         assert!(second.is_none());
         assert!(third.is_none());
+    }
+
+    #[test]
+    fn repair_board_frontmatter_compat_repairs_legacy_timestamp_offsets_idempotently() {
+        let tmp = tempfile::tempdir().unwrap();
+        let board_dir = tmp.path();
+        let task_path = write_task_file(board_dir, 623, "review");
+        std::fs::write(
+            &task_path,
+            "---\nid: 623\ntitle: stale review\nstatus: review\npriority: high\ncreated: 2026-04-10T16:31:02.743151-04:00\nupdated: 2026-04-10T19:26:40-0400\nartifacts:\n  - .batty/reports/verification/completion/task-623-eng-1-1-attempt-1.json\nreview_disposition: approved\nreviewed_by: architect\nreviewed_at: 2026-04-10T23:26:40+00:00\nclass: standard\n---\n\nTask body.\n",
+        )
+        .unwrap();
+
+        let first = repair_board_frontmatter_compat(board_dir).unwrap();
+        let second = repair_board_frontmatter_compat(board_dir).unwrap();
+
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].task_id, Some(623));
+        assert_eq!(
+            first[0].reason.as_deref(),
+            Some("normalized timestamp fields: updated")
+        );
+        assert_eq!(first[0].repaired_fields, vec!["updated".to_string()]);
+        assert!(second.is_empty(), "timestamp repair must be idempotent");
+
+        let content = std::fs::read_to_string(&task_path).unwrap();
+        assert!(content.contains("updated: 2026-04-10T19:26:40-04:00"));
+        assert!(content.contains("reviewed_by: architect"));
+        assert!(content.contains("review_disposition: approved"));
+        assert!(
+            content.contains(
+                "- .batty/reports/verification/completion/task-623-eng-1-1-attempt-1.json"
+            )
+        );
+        assert!(content.ends_with("\n\nTask body.\n"));
     }
 
     #[test]

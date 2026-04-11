@@ -4986,6 +4986,39 @@ fn daemon_frontmatter_repair_helper_repairs_hidden_task_and_emits_event() {
 }
 
 #[test]
+fn daemon_frontmatter_repair_helper_repairs_legacy_timestamp_and_emits_event() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = init_git_repo(&tmp, "daemon-frontmatter-timestamp-repair");
+    let tasks_dir = repo
+        .join(".batty")
+        .join("team_config")
+        .join("board")
+        .join("tasks");
+    std::fs::create_dir_all(&tasks_dir).unwrap();
+    let task_path = tasks_dir.join("623-stale-review.md");
+    std::fs::write(
+        &task_path,
+        "---\nid: 623\ntitle: Stale review\nstatus: review\npriority: high\ncreated: 2026-04-10T16:31:02.743151-04:00\nupdated: 2026-04-10T19:26:40-0400\nreview_owner: manager\nclass: standard\n---\n\nTask body.\n",
+    )
+    .unwrap();
+
+    let mut daemon = TestDaemonBuilder::new(&repo).build();
+
+    daemon.repair_malformed_board_frontmatter().unwrap();
+
+    let repaired = std::fs::read_to_string(&task_path).unwrap();
+    assert!(repaired.contains("updated: 2026-04-10T19:26:40-04:00"));
+    assert!(repaired.ends_with("\n\nTask body.\n"));
+
+    let events =
+        std::fs::read_to_string(repo.join(".batty").join("team_config").join("events.jsonl"))
+            .unwrap_or_default();
+    assert!(events.contains("\"event\":\"state_reconciliation\""));
+    assert!(events.contains("\"reason\":\"task_frontmatter_repair\""));
+    assert!(events.contains("\"task\":\"623\""));
+}
+
+#[test]
 fn load_dispatch_queue_graceful_when_no_state() {
     let tmp = tempfile::tempdir().unwrap();
     let queue = load_dispatch_queue_snapshot(tmp.path());

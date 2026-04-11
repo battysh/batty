@@ -205,6 +205,33 @@ mod tests {
     }
 
     #[test]
+    fn startup_preflight_repairs_legacy_timestamp_frontmatter() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "startup_board_timestamp_repair");
+        let task_path = board_dir(&repo).join("tasks").join("623-stale-review.md");
+        std::fs::create_dir_all(task_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &task_path,
+            "---\nid: 623\ntitle: Stale review\nstatus: review\npriority: high\ncreated: 2026-04-10T16:31:02.743151-04:00\nupdated: 2026-04-10T19:26:40-0400\nreview_owner: manager\nclass: standard\n---\n\nTask body.\n",
+        )
+        .unwrap();
+
+        let mut daemon = TestDaemonBuilder::new(&repo).build();
+
+        daemon.repair_malformed_board_frontmatter().unwrap();
+
+        let content = std::fs::read_to_string(&task_path).unwrap();
+        assert!(content.contains("updated: 2026-04-10T19:26:40-04:00"));
+        assert!(content.ends_with("\n\nTask body.\n"));
+
+        let events_path = repo.join(".batty").join("team_config").join("events.jsonl");
+        let events = std::fs::read_to_string(events_path).unwrap_or_default();
+        assert!(events.contains("\"event\":\"state_reconciliation\""));
+        assert!(events.contains("\"reason\":\"task_frontmatter_repair\""));
+        assert!(events.contains("\"task\":\"623\""));
+    }
+
+    #[test]
     fn startup_preflight_reports_missing_git_identity() {
         let _path_guard = PATH_LOCK.lock().unwrap_or_else(|error| error.into_inner());
         let tmp = tempfile::tempdir().unwrap();
