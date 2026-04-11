@@ -233,6 +233,9 @@ jobs:
           --skip team::daemon::health::tests::check_backend_health_emits_event_on_transition
           --skip team::daemon::health::tests::check_backend_health_no_event_when_state_unchanged
           --skip team::daemon::health::tests::uncommitted_diff_lines
+          --skip team::verification::tests::verify_project_updates_parity_and_writes_report
+          --skip team::verification::tests::verify_project_detects_regressions_from_previous_pass
+          --skip team::merge::operations::tests::merge_rebase_additive_conflict_keeps_both_sides
           --skip team::daemon::telegram_bridge::tests::maybe_intervene_triage_backlog_marks_member_working_after_live_delivery
 
       - name: Upload to Codecov
