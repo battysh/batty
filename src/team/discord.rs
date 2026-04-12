@@ -786,6 +786,8 @@ pub(super) fn role_author_label(role: &str) -> String {
         format!("🏗️ {role}")
     } else if role_lc.contains("manager") {
         format!("📋 {role}")
+    } else if role_lc.contains("design") {
+        format!("🎨 {role}")
     } else if role_lc.starts_with("eng") || role_lc.contains("engineer") {
         format!("🔧 {role}")
     } else if role_lc.contains("human") || role_lc.contains("user") {
@@ -1389,5 +1391,99 @@ roles:
         let result = setup_discord(tmp.path());
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("batty init"));
+    }
+
+    #[test]
+    fn rich_embed_to_json_serializes_optional_sections_and_limits_fields() {
+        let mut embed = RichEmbed::new("Title", Severity::Info.color())
+            .with_description("Description")
+            .with_author("Author")
+            .with_footer("Footer")
+            .with_timestamp("2026-04-11T20:00:00Z")
+            .with_url("https://example.com");
+        embed.author_icon_url = Some("https://example.com/author.png".into());
+        embed.author_url = Some("https://example.com/author".into());
+        embed.footer_icon_url = Some("https://example.com/footer.png".into());
+        embed.thumbnail_url = Some("https://example.com/thumb.png".into());
+        for i in 0..30 {
+            embed = embed.push_field(EmbedField::inline(
+                format!("Field {i}"),
+                format!("Value {i}"),
+            ));
+        }
+
+        let json = embed.to_json();
+        assert_eq!(json["title"].as_str(), Some("Title"));
+        assert_eq!(json["description"].as_str(), Some("Description"));
+        assert_eq!(json["author"]["name"].as_str(), Some("Author"));
+        assert_eq!(
+            json["author"]["icon_url"].as_str(),
+            Some("https://example.com/author.png")
+        );
+        assert_eq!(
+            json["author"]["url"].as_str(),
+            Some("https://example.com/author")
+        );
+        assert_eq!(json["footer"]["text"].as_str(), Some("Footer"));
+        assert_eq!(
+            json["footer"]["icon_url"].as_str(),
+            Some("https://example.com/footer.png")
+        );
+        assert_eq!(json["timestamp"].as_str(), Some("2026-04-11T20:00:00Z"));
+        assert_eq!(json["url"].as_str(), Some("https://example.com"));
+        assert_eq!(
+            json["thumbnail"]["url"].as_str(),
+            Some("https://example.com/thumb.png")
+        );
+        assert_eq!(json["fields"].as_array().map(Vec::len), Some(25));
+        assert_eq!(json["fields"][0]["inline"].as_bool(), Some(true));
+    }
+
+    #[test]
+    fn rich_embed_to_json_truncates_long_sections() {
+        let long = "x".repeat(5000);
+        let field_name = "n".repeat(400);
+        let field_value = "v".repeat(2000);
+        let embed = RichEmbed::new("T".repeat(400), Severity::Warn.color())
+            .with_description(long.clone())
+            .with_author("A".repeat(400))
+            .with_footer("F".repeat(3000))
+            .push_field(EmbedField::new(field_name, field_value));
+
+        let json = embed.to_json();
+        assert_eq!(json["title"].as_str().unwrap().chars().count(), 256);
+        assert_eq!(json["description"].as_str().unwrap().chars().count(), 4000);
+        assert_eq!(
+            json["author"]["name"].as_str().unwrap().chars().count(),
+            256
+        );
+        assert_eq!(
+            json["footer"]["text"].as_str().unwrap().chars().count(),
+            2048
+        );
+        assert_eq!(
+            json["fields"][0]["name"].as_str().unwrap().chars().count(),
+            256
+        );
+        assert_eq!(
+            json["fields"][0]["value"].as_str().unwrap().chars().count(),
+            1024
+        );
+    }
+
+    #[test]
+    fn severity_and_role_author_label_cover_key_variants() {
+        assert_eq!(severity_for_event("task_auto_merged"), Severity::Success);
+        assert_eq!(severity_for_event("task_assigned"), Severity::Info);
+        assert_eq!(severity_for_event("pattern_detected"), Severity::Warn);
+        assert_eq!(severity_for_event("task_escalated"), Severity::Error);
+        assert_eq!(severity_for_event("daemon_stopped"), Severity::Critical);
+        assert_eq!(severity_for_event("totally_new_event"), Severity::Neutral);
+
+        assert!(role_author_label("architect").contains("🏗️"));
+        assert!(role_author_label("manager").contains("📋"));
+        assert!(role_author_label("eng-1-1").contains("🔧"));
+        assert!(role_author_label("sam-designer-1").contains("🎨"));
+        assert_eq!(role_author_label("unknown-role"), "unknown-role");
     }
 }

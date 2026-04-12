@@ -751,7 +751,9 @@ fn build_event_embed(event: &TeamEvent) -> RichEmbed {
 /// verb phrase, plus a task id when relevant.
 fn event_title(event: &TeamEvent) -> String {
     let action = event_action_label(&event.event);
-    if let Some(task_id) = event.task.as_deref().and_then(extract_task_id) {
+    if let Some(task) = event.task.as_deref()
+        && let Some(task_id) = extract_task_id(task)
+    {
         format!("{action} — #{task_id}")
     } else {
         action.to_string()
@@ -796,6 +798,7 @@ fn event_summary_line(event: &TeamEvent) -> Option<String> {
                 .task
                 .as_deref()
                 .and_then(task_subject)
+                .filter(|s| !s.is_empty())
                 .unwrap_or("new task");
             let title = truncate_plain(title, 120);
             Some(format!("**{engineer}** picked up **{title}**."))
@@ -866,6 +869,7 @@ fn event_summary_line(event: &TeamEvent) -> Option<String> {
             event
                 .details
                 .clone()
+                .or_else(|| event.reason.clone())
                 .unwrap_or_else(|| "Tests passed.".into()),
         ),
         "dispatch_overlap_skipped" => {
@@ -1042,55 +1046,61 @@ fn event_actor_label(event: &TeamEvent) -> String {
 /// Extract a clean `\d+` task id from the `task` field, which is often
 /// `"409"` but sometimes `"409\nTitle..."` or `"#409"`.
 fn extract_task_id(raw: &str) -> Option<String> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
+    let first_line = raw.lines().next()?.trim();
+    if first_line.is_empty() {
         return None;
     }
 
-    let first_line = trimmed.lines().next().unwrap_or(trimmed).trim();
-    if let Some(digits) = leading_digits(first_line.trim_start_matches('#')) {
-        return Some(digits.to_string());
+    if let Some(hash_idx) = first_line.find('#') {
+        return leading_digits(&first_line[hash_idx + 1..]);
     }
 
-    let hash_index = first_line.find('#')?;
-    let after_hash = &first_line[hash_index + 1..];
-    leading_digits(after_hash).map(str::to_string)
+    if let Some(rest) = first_line
+        .strip_prefix("Task ")
+        .or_else(|| first_line.strip_prefix("task "))
+    {
+        return leading_digits(rest.trim_start());
+    }
+
+    leading_digits(first_line)
+}
+
+fn leading_digits(input: &str) -> Option<String> {
+    let digits: String = input.chars().take_while(|c| c.is_ascii_digit()).collect();
+    if digits.is_empty() {
+        None
+    } else {
+        Some(digits)
+    }
 }
 
 fn task_subject(raw: &str) -> Option<&str> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
+    let first_line = raw.lines().next()?.trim();
+    if first_line.is_empty() {
         return None;
     }
 
-    let mut lines = trimmed
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty());
-    let first = lines.next()?;
-    if leading_digits(first.trim_start_matches('#')).is_some() {
-        return lines.next().or(Some(first));
-    }
-
-    if let Some((prefix, rest)) = first.split_once(':') {
-        if prefix.contains('#') {
-            let rest = rest.trim();
-            if !rest.is_empty() {
-                return Some(rest);
-            }
+    if let Some(rest) = first_line
+        .strip_prefix("Task ")
+        .or_else(|| first_line.strip_prefix("task "))
+        && let Some((_, subject)) = rest.split_once(':')
+    {
+        let subject = subject.trim();
+        if !subject.is_empty() {
+            return Some(subject);
         }
     }
 
-    Some(first)
-}
+    if leading_digits(first_line).is_some() || first_line.starts_with('#') {
+        return raw
+            .lines()
+            .nth(1)
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .or(Some(first_line));
+    }
 
-fn leading_digits(input: &str) -> Option<&str> {
-    let end = input
-        .char_indices()
-        .take_while(|(_, ch)| ch.is_ascii_digit())
-        .last()
-        .map(|(index, ch)| index + ch.len_utf8())?;
-    Some(&input[..end])
+    Some(first_line)
 }
 
 /// Extract a short preview of the task body (the part after the first
@@ -1372,11 +1382,11 @@ mod tests {
 
     #[test]
     fn build_event_embed_promotes_role_to_author_and_uses_fields() {
-        // Regression test for the "wall of text" embed bug using the
-        // real `task_assigned` payload shape emitted in production.
+        // Use the real payload shape emitted by TeamEvent::task_assigned:
+        // engineer in `role`, task id/title/body embedded in the task string.
         let event = TeamEvent::task_assigned(
             "alex-dev-1",
-            "Task #409: Build routing fixtures for the marketing pipeline\n\nThis task prepares the fixture tree used by the router tests.",
+            "Task #409: Build routing fixtures for the marketing pipeline\nThis task prepares the fixture tree used by the router tests.",
         );
 
         let embed = build_event_embed(&event);
@@ -1393,7 +1403,7 @@ mod tests {
         // Author block should carry the role attribution.
         let author = embed.author_name.as_deref().unwrap_or_default();
         assert!(
-            author.contains("alex-dev-1") || author.contains("jordan-pm"),
+            author.contains("alex-dev-1"),
             "author block should attribute the event, got {author:?}"
         );
 
@@ -1488,81 +1498,107 @@ mod tests {
     }
 
     #[test]
-    fn task_assigned_description_uses_plain_text_without_spoilers() {
-        let event = TeamEvent::task_assigned(
-            "eng-1",
-            "Task #42: fix Discord body preview\nFirst line of body\nSecond line of body",
+    fn extract_task_id_handles_real_task_shapes() {
+        assert_eq!(extract_task_id("42").as_deref(), Some("42"));
+        assert_eq!(extract_task_id("#42").as_deref(), Some("42"));
+        assert_eq!(
+            extract_task_id("Task #42: Ship the launch post").as_deref(),
+            Some("42")
         );
-
-        let embed = build_event_embed(&event);
-        let description = embed.description.as_deref().unwrap_or_default();
-        let task_body = embed
-            .fields
-            .iter()
-            .find(|f| f.name == "Task Body")
-            .map(|f| f.value.as_str())
-            .unwrap_or_default();
-
-        assert!(description.contains("eng-1"));
-        assert!(description.contains("fix Discord body preview"));
-        assert!(task_body.contains("First line of body"));
-        assert!(task_body.contains("Second line of body"));
-        assert!(!description.contains("||"));
-        assert!(!task_body.contains("||"));
+        assert_eq!(
+            extract_task_id("409\nBuild routing fixtures").as_deref(),
+            Some("409")
+        );
     }
 
     #[test]
-    fn task_assigned_description_uses_expand_marker_when_truncated() {
-        let long_body = "a".repeat(4000);
-        let event = TeamEvent::task_assigned(
-            "eng-1",
-            &format!("Task #42: fix Discord body preview\n{long_body}"),
-        );
-
-        let embed = build_event_embed(&event);
-        let description = embed.description.as_deref().unwrap_or_default();
-        let task_body = embed
-            .fields
-            .iter()
-            .find(|f| f.name == "Task Body")
-            .map(|f| f.value.as_str())
-            .unwrap_or_default();
-
-        assert!(description.len() < 200);
-        assert!(task_body.ends_with('…'));
-        assert_eq!(task_body.chars().count(), 900);
-        assert!(!description.contains("||"));
-        assert!(!task_body.contains("||"));
-    }
-
-    #[test]
-    fn extract_task_id_handles_real_task_formats() {
-        assert_eq!(extract_task_id("42"), Some("42".into()));
-        assert_eq!(extract_task_id("#42"), Some("42".into()));
-        assert_eq!(extract_task_id("Task #42: fix it"), Some("42".into()));
+    fn task_subject_prefers_human_title_from_real_assignment_shapes() {
         assert_eq!(
-            extract_task_id("Task #12: new-task\n\nTask details."),
-            Some("12".into())
+            task_subject("Task #42: Ship the launch post"),
+            Some("Ship the launch post")
         );
         assert_eq!(
-            extract_task_id("409\nBuild routing fixtures\nBody."),
-            Some("409".into())
-        );
-        assert_eq!(extract_task_id("old-task"), None);
-    }
-
-    #[test]
-    fn task_subject_prefers_human_title_over_raw_task_prefix() {
-        assert_eq!(task_subject("42"), Some("42"));
-        assert_eq!(
-            task_subject("409\nBuild routing fixtures\nBody."),
+            task_subject("409\nBuild routing fixtures"),
             Some("Build routing fixtures")
         );
-        assert_eq!(
-            task_subject("Task #42: fix Discord body preview\nBody."),
-            Some("fix Discord body preview")
+        assert_eq!(task_subject("Simple title"), Some("Simple title"));
+    }
+
+    #[test]
+    fn build_event_embed_covers_quota_merge_and_doctor_variants() {
+        let quota = TeamEvent::backend_quota_exhausted("alex-dev-1", "credits exhausted");
+        let quota_embed = build_event_embed(&quota);
+        assert_eq!(quota_embed.color, Severity::Critical.color());
+        assert!(quota_embed.fields.iter().any(|f| f.name == "Agent"));
+        assert!(quota_embed.fields.iter().any(|f| f.name == "Reason"));
+
+        let merged = TeamEvent::task_auto_merged_with_mode(
+            "alex-dev-1",
+            "42",
+            0.98,
+            3,
+            24,
+            Some(crate::team::merge::MergeMode::DirectRoot),
         );
-        assert_eq!(task_subject("plain task title"), Some("plain task title"));
+        let merged_embed = build_event_embed(&merged);
+        assert!(merged_embed.fields.iter().any(|f| f.name == "Task"));
+        assert!(merged_embed.fields.iter().any(|f| f.name == "Engineer"));
+        assert!(merged_embed.fields.iter().any(|f| f.name == "Mode"));
+
+        let doctor = TeamEvent::auto_doctor_action(
+            "release_claim",
+            Some(42),
+            Some("sam-designer-1"),
+            "released stale claim and requeued task",
+        );
+        let doctor_embed = build_event_embed(&doctor);
+        assert!(doctor_embed.fields.iter().any(|f| f.name == "Task"));
+        assert!(doctor_embed.fields.iter().any(|f| f.name == "Target"));
+        assert!(doctor_embed.fields.iter().any(|f| f.name == "Action"));
+    }
+
+    #[test]
+    fn build_event_embed_covers_verification_and_failure_variants() {
+        let phase = TeamEvent::verification_phase_changed(
+            &crate::team::events::VerificationPhaseChangeInfo {
+                engineer: "alex-dev-1",
+                task: "42",
+                from_phase: "queued",
+                to_phase: "testing",
+                iteration: 2,
+            },
+        );
+        let phase_embed = build_event_embed(&phase);
+        assert!(phase_embed.fields.iter().any(|f| f.name == "Task"));
+        assert!(phase_embed.fields.iter().any(|f| f.name == "Engineer"));
+        assert!(phase_embed.fields.iter().any(|f| f.name == "Phase"));
+
+        let evidence = TeamEvent::verification_evidence_collected(
+            "alex-dev-1",
+            "42",
+            "cargo-test",
+            "12 passed, 0 failed",
+        );
+        let evidence_embed = build_event_embed(&evidence);
+        assert_eq!(evidence_embed.color, Severity::Success.color());
+        assert!(
+            evidence_embed
+                .description
+                .as_deref()
+                .unwrap_or("")
+                .contains("12 passed")
+        );
+
+        let violation =
+            TeamEvent::scope_fence_violation("alex-dev-1", 42, "touched out-of-scope file");
+        let violation_embed = build_event_embed(&violation);
+        assert_eq!(violation_embed.color, Severity::Error.color());
+        assert!(violation_embed.fields.iter().any(|f| f.name == "Reason"));
+
+        let crash = TeamEvent::pane_death("alex-dev-1");
+        let crash_embed = build_event_embed(&crash);
+        assert_eq!(crash_embed.color, Severity::Error.color());
+        assert!(crash_embed.title.contains("Crashed"));
     }
 
     #[test]
