@@ -463,6 +463,21 @@ impl TeamDaemon {
                 continue;
             }
 
+            // Recover engineers stuck in Working with no active task.
+            // This happens when mark_member_working() fires but task
+            // delivery fails, leaving the state map inconsistent.
+            if self.states.get(&entry.engineer) == Some(&MemberState::Working)
+                && !self.active_tasks.contains_key(&entry.engineer)
+            {
+                info!(
+                    engineer = %entry.engineer,
+                    task_id = entry.task_id,
+                    "dispatch queue: recovering engineer stuck in Working with no active task"
+                );
+                self.states.insert(entry.engineer.clone(), MemberState::Idle);
+                self.update_automation_timers_for_state(&entry.engineer, MemberState::Idle);
+            }
+
             if self.states.get(&entry.engineer) != Some(&MemberState::Idle) {
                 retained.push(entry);
                 continue;
