@@ -2,6 +2,19 @@
 
 All notable changes to Batty are documented here.
 
+## 0.11.5 — 2026-04-13
+
+Critical dispatch pipeline fix.
+
+### Fixes
+
+- **Engineers no longer stall in Working state with no active task** —
+  When `mark_member_working()` fires but task delivery subsequently fails,
+  the engineer gets stuck in Working with no active_tasks entry, blocking
+  all future dispatch. The dispatch queue now detects this inconsistency
+  and force-transitions the engineer to Idle before the delivery gate.
+  (`src/team/dispatch/queue.rs`)
+
 ## 0.11.4 — 2026-04-13
 
 Critical stability fix for the auto-merge review pipeline.
