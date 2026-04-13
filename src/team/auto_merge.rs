@@ -261,14 +261,28 @@ fn is_migration_file(path: &str) -> bool {
 }
 
 /// Returns true if the path looks like a config file (not source code).
+///
+/// Generated data files (under `generated/`, `reference/`, test fixtures,
+/// or lockfiles) are excluded — they are outputs, not configuration.
 fn is_config_file(path: &str) -> bool {
     let lower = path.to_lowercase();
-    lower.ends_with(".yaml")
+    let has_config_ext = lower.ends_with(".yaml")
         || lower.ends_with(".yml")
         || lower.ends_with(".toml")
         || lower.ends_with(".json")
         || lower.ends_with(".env")
-        || lower.ends_with(".env.example")
+        || lower.ends_with(".env.example");
+    if !has_config_ext {
+        return false;
+    }
+    // Exclude generated/reference data, test fixtures, and lockfiles
+    let is_generated = lower.contains("generated/")
+        || lower.contains("reference/")
+        || lower.contains("fixtures/")
+        || lower.contains("tests/")
+        || lower.ends_with(".lock")
+        || lower.ends_with("lock.json");
+    has_config_ext && !is_generated
 }
 
 /// Compute merge confidence score (0.0-1.0) from a diff summary and policy.
@@ -408,9 +422,11 @@ pub fn evaluate_auto_merge_candidate(
         reasons.push("contains migration/schema changes".to_string());
     }
 
-    if summary.has_config_changes {
-        reasons.push("contains config file changes".to_string());
-    }
+    // Config changes are a soft signal — they already reduce confidence by
+    // 0.15 in compute_merge_confidence.  If that drops below threshold the
+    // confidence check above catches it.  Don't hard-block: the manager
+    // review path is unreliable for codex agents, so routing there just
+    // stalls the pipeline.
 
     if reasons.is_empty() {
         AutoMergeDecisionRecord::from_summary(
@@ -787,20 +803,17 @@ mod tests {
     }
 
     #[test]
-    fn config_changes_route_to_review() {
+    fn config_changes_auto_merge_when_confidence_above_threshold() {
+        // Config changes reduce confidence by 0.15 (1.0 → 0.85) but should
+        // still auto-merge since 0.85 > 0.80 threshold.  Config is a soft
+        // signal, not a hard blocker.
         let mut summary = make_summary(2, 30, 20, vec!["team"], vec![], false);
         summary.has_config_changes = true;
         let policy = enabled_policy();
         let decision = should_auto_merge(&summary, &policy, true);
         match decision {
-            AutoMergeDecision::ManualReview { reasons, .. } => {
-                assert!(
-                    reasons.iter().any(|r| r.contains("config")),
-                    "should mention config: {:?}",
-                    reasons
-                );
-            }
-            other => panic!("expected ManualReview, got {:?}", other),
+            AutoMergeDecision::AutoMerge { .. } => {} // expected
+            other => panic!("config-only change should auto-merge, got {:?}", other),
         }
     }
 

@@ -391,7 +391,8 @@ mod tests {
                 assert!(reasons.iter().any(|r| r.contains("migration")));
                 assert!(reasons.iter().any(|r| r.contains("unsafe")));
                 // modules gate relaxed (max=10), so 3 modules won't trigger
-                // but sensitive paths, config changes still should
+                // config changes are a soft signal (confidence penalty only)
+                // but sensitive paths, confidence, file/line limits still trigger
             }
             _ => panic!("should be ManualReview"),
         }
