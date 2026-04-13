@@ -164,11 +164,22 @@ pub struct SdkTokenUsage {
 }
 
 impl SdkTokenUsage {
+    /// Sum the usage fields into a single "context window footprint"
+    /// number suitable for the proactive context-pressure metric.
+    ///
+    /// `cached_input_tokens` (legacy) and `cache_read_input_tokens` (new)
+    /// are the SAME cached content reported under two field names — Claude
+    /// Code's stream-json keeps the legacy name for backwards compatibility
+    /// while also emitting the new one. Summing both double-counts cached
+    /// prompts against the context window and was producing 150-250%
+    /// reported usage for healthy 1M-context agents running against a
+    /// near-full cached prompt. Use `.max()` to de-dupe: whichever field is
+    /// larger captures the real cached footprint.
     pub fn total_tokens(&self) -> u64 {
+        let cached = self.cached_input_tokens.max(self.cache_read_input_tokens);
         self.input_tokens
-            + self.cached_input_tokens
+            + cached
             + self.cache_creation_input_tokens
-            + self.cache_read_input_tokens
             + self.output_tokens
             + self.reasoning_output_tokens
     }
