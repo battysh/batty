@@ -2,6 +2,25 @@
 
 All notable changes to Batty are documented here.
 
+## 0.11.4 — 2026-04-13
+
+Critical stability fix for the auto-merge review pipeline.
+
+### Fixes
+
+- **Config-only changes no longer stall the merge pipeline** —
+  `has_config_changes` was a hard blocker in `evaluate_auto_merge_candidate`,
+  routing any commit touching `.json`/`.yaml`/`.toml` files to manual review.
+  The manager agent review path is unreliable with codex agents, causing tasks
+  to pile up in review indefinitely. Config changes now reduce confidence
+  (-0.15) but no longer add a hard-blocking reason. If combined with other
+  risk factors that push confidence below threshold, the confidence gate still
+  catches it. (`src/team/auto_merge.rs`)
+- **Generated data files excluded from config detection** —
+  `is_config_file()` now excludes paths under `generated/`, `reference/`,
+  `fixtures/`, `tests/`, and lockfiles. These are outputs, not configuration.
+  (`src/team/auto_merge.rs`)
+
 ## 0.11.3 — 2026-04-11
 
 Patch release for four production regressions found during live monitoring
