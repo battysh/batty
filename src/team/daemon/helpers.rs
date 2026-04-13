@@ -8,6 +8,7 @@ use anyhow::{Context, Result, bail};
 use crate::agent::BackendHealth;
 use crate::team::board_cmd;
 use crate::team::config::RoleType;
+use crate::team::git_cmd;
 use crate::team::hierarchy::MemberInstance;
 use crate::tmux;
 
@@ -158,6 +159,29 @@ pub(super) fn ensure_git_ready(project_root: &Path) -> Result<()> {
     if !repo_check.status.success() || String::from_utf8_lossy(&repo_check.stdout).trim() != "true"
     {
         bail!("daemon startup pre-flight failed: project root is not a git repository");
+    }
+
+    let dirty_lines: Vec<String> = git_cmd::status_porcelain(project_root)
+        .context("daemon startup pre-flight failed while checking git dirty state")?
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .filter(|line| {
+            let path = line.get(3..).unwrap_or("").trim();
+            let path = path
+                .split(" -> ")
+                .last()
+                .unwrap_or(path)
+                .trim_matches('"');
+            !path.starts_with(".batty/")
+        })
+        .map(str::to_string)
+        .collect();
+    if !dirty_lines.is_empty() {
+        bail!(
+            "daemon startup pre-flight failed: git worktree is dirty:\n{}",
+            dirty_lines.join("\n")
+        );
     }
 
     for key in ["user.name", "user.email"] {

@@ -161,6 +161,29 @@ mod tests {
     use std::time::Duration;
 
     #[test]
+    fn ensure_git_ready_rejects_dirty_repo_outside_batty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "preflight-dirty-source");
+        let source_file = repo.join("src").join("main.rs");
+        std::fs::write(&source_file, "fn main() { println!(\"dirty\"); }\n").unwrap();
+
+        let err = ensure_git_ready(&repo).unwrap_err().to_string();
+        assert!(err.contains("git worktree is dirty"));
+        assert!(err.contains("src/main.rs"));
+    }
+
+    #[test]
+    fn ensure_git_ready_allows_dirty_batty_runtime_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "preflight-dirty-batty");
+        let runtime_file = repo.join(".batty").join("orchestrator.log");
+        std::fs::create_dir_all(runtime_file.parent().unwrap()).unwrap();
+        std::fs::write(&runtime_file, "runtime noise\n").unwrap();
+
+        ensure_git_ready(&repo).unwrap();
+    }
+
+    #[test]
     fn startup_preflight_reports_missing_kanban_binary() {
         let _path_guard = PATH_LOCK.lock().unwrap_or_else(|error| error.into_inner());
         let tmp = tempfile::tempdir().unwrap();
