@@ -1043,10 +1043,16 @@ mod tests {
         };
         write_persisted_engineer_profiles(tmp.path(), &persisted).unwrap();
 
+        // Use a recent completion date (relative to "now") so the test is not
+        // date-sensitive. Previously this was hardcoded to 2026-04-06 and
+        // started failing on any date more than 7 days later.
+        let recent_completed = (Utc::now() - Duration::days(1)).to_rfc3339();
         let task_path = tmp.path().join("042-profile.md");
         fs::write(
             &task_path,
-            "---\nid: 42\ntitle: profile\nstatus: done\npriority: high\nclaimed_by: eng-2\ntags:\n  - dispatch\nchanged_paths:\n  - src/team/dispatch/queue.rs\nclass: standard\ncompleted: 2026-04-06T03:00:00-04:00\n---\n\nTouch src/team/dispatch/mod.rs too.\n",
+            format!(
+                "---\nid: 42\ntitle: profile\nstatus: done\npriority: high\nclaimed_by: eng-2\ntags:\n  - dispatch\nchanged_paths:\n  - src/team/dispatch/queue.rs\nclass: standard\ncompleted: {recent_completed}\n---\n\nTouch src/team/dispatch/mod.rs too.\n"
+            ),
         )
         .unwrap();
 
