@@ -16,6 +16,8 @@ use super::*;
 const STATE_RECONCILIATION_AUDIT_KEY: &str = "state-reconciliation::audit";
 const CLAIM_PROGRESS_AUDIT_KEY_PREFIX: &str = "claim-progress::";
 const CLAIMED_BRANCH_MISMATCH_ALERT_KEY_PREFIX: &str = "claimed-branch-mismatch::";
+const ORPHAN_BRANCH_MISMATCH_RETRY_KEY_PREFIX: &str = "orphan-branch-mismatch::";
+const DEFAULT_ORPHAN_BRANCH_MISMATCH_MAX_ATTEMPTS: u32 = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ClaimedTaskBranchMismatch {
@@ -76,6 +78,14 @@ fn planning_prompt_context(project_root: &std::path::Path) -> (Vec<String>, Vec<
     .unwrap_or_default();
 
     (roadmap, goals)
+}
+
+fn orphan_branch_mismatch_max_attempts() -> u32 {
+    std::env::var("BATTY_ORPHAN_BRANCH_MISMATCH_MAX_ATTEMPTS")
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_ORPHAN_BRANCH_MISMATCH_MAX_ATTEMPTS)
 }
 
 fn claim_time_held_secs(task: &crate::task::Task, now: DateTime<Utc>) -> Option<u64> {
@@ -947,6 +957,7 @@ impl TeamDaemon {
                 let _ = crate::team::task_cmd::transition_task(&board_dir, task.id, "todo");
             }
         }
+
         Ok(())
     }
 
@@ -1122,10 +1133,15 @@ impl TeamDaemon {
             current_branch,
         };
         if mismatch.current_branch == mismatch.expected_branch {
+            self.retry_counts.remove(&format!(
+                "{ORPHAN_BRANCH_MISMATCH_RETRY_KEY_PREFIX}{engineer}::{}",
+                task.id
+            ));
             return Ok(());
         }
 
         if mismatch.current_branch == "HEAD" {
+            self.handle_orphan_branch_mismatch_failure(engineer, task, &mismatch)?;
             return self.alert_claimed_task_branch_mismatch(
                 engineer,
                 &mismatch,
@@ -1162,6 +1178,7 @@ impl TeamDaemon {
                     // nothing to save; fall through to checkout.
                 }
                 Err(error) => {
+                    self.handle_orphan_branch_mismatch_failure(engineer, task, &mismatch)?;
                     return self.alert_claimed_task_branch_mismatch(
                         engineer,
                         &mismatch,
@@ -1193,6 +1210,10 @@ impl TeamDaemon {
 
         match switch_result {
             Ok(()) => {
+                self.retry_counts.remove(&format!(
+                    "{ORPHAN_BRANCH_MISMATCH_RETRY_KEY_PREFIX}{engineer}::{}",
+                    task.id
+                ));
                 self.record_state_reconciliation(Some(engineer), Some(task.id), "branch_repair");
                 self.record_orchestrator_action(format!(
                     "state reconciliation: repaired {} from branch '{}' to '{}' for task #{}",
@@ -1200,12 +1221,60 @@ impl TeamDaemon {
                 ));
                 Ok(())
             }
-            Err(error) => self.alert_claimed_task_branch_mismatch(
-                engineer,
-                &mismatch,
-                Some(&format_branch_recovery_blocker(&error.to_string())),
-            ),
+            Err(error) => {
+                self.handle_orphan_branch_mismatch_failure(engineer, task, &mismatch)?;
+                self.alert_claimed_task_branch_mismatch(
+                    engineer,
+                    &mismatch,
+                    Some(&format_branch_recovery_blocker(&error.to_string())),
+                )
+            }
         }
+    }
+
+    fn handle_orphan_branch_mismatch_failure(
+        &mut self,
+        engineer: &str,
+        task: &crate::task::Task,
+        mismatch: &ClaimedTaskBranchMismatch,
+    ) -> Result<()> {
+        if task.status != "in-progress" {
+            return Ok(());
+        }
+
+        let retry_key = format!(
+            "{ORPHAN_BRANCH_MISMATCH_RETRY_KEY_PREFIX}{engineer}::{}",
+            task.id
+        );
+        let attempts = self.retry_counts.entry(retry_key.clone()).or_insert(0);
+        *attempts += 1;
+        let max_attempts = orphan_branch_mismatch_max_attempts();
+        if *attempts < max_attempts {
+            return Ok(());
+        }
+
+        warn!(
+            task_id = task.id,
+            engineer,
+            current_branch = %mismatch.current_branch,
+            expected_branch = %mismatch.expected_branch,
+            "persistent orphaned in-progress branch mismatch exceeded retry limit; moving task back to todo"
+        );
+        let board_dir = self.board_dir();
+        let _ = crate::team::task_cmd::transition_task(&board_dir, task.id, "todo");
+        let _ = crate::team::task_cmd::unclaim_task(&board_dir, task.id);
+        self.clear_active_task(engineer);
+        self.retry_counts.remove(&retry_key);
+        self.record_state_reconciliation(
+            Some(engineer),
+            Some(task.id),
+            "orphan_branch_mismatch_requeued",
+        );
+        self.record_orchestrator_action(format!(
+            "state reconciliation: requeued orphaned task #{} for {} after {} branch-mismatch recovery attempt(s)",
+            task.id, engineer, max_attempts
+        ));
+        Ok(())
     }
 
     pub(super) fn maybe_escalate_stale_reviews(&mut self) -> Result<()> {
@@ -4260,6 +4329,94 @@ thread 'tmux::tests::split_window_horizontal_creates_new_pane' panicked at src/t
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn reconcile_active_tasks_requeues_orphaned_branch_mismatch_after_retry_limit() {
+        let _path_lock = PATH_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "reconcile-orphan-branch-mismatch");
+        let manager = MemberInstance {
+            name: "manager".to_string(),
+            role_name: "manager".to_string(),
+            role_type: RoleType::Manager,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: None,
+            use_worktrees: false,
+            ..Default::default()
+        };
+        let engineer = MemberInstance {
+            name: "eng-1".to_string(),
+            role_name: "eng".to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("codex".to_string()),
+            prompt: None,
+            reports_to: Some("manager".to_string()),
+            use_worktrees: true,
+            ..Default::default()
+        };
+        let mut daemon = TestDaemonBuilder::new(repo.as_path())
+            .members(vec![manager, engineer])
+            .states(HashMap::from([("eng-1".to_string(), MemberState::Idle)]))
+            .build();
+
+        let team_config_dir = repo.join(".batty").join("team_config");
+        let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
+        let base_branch = engineer_base_branch_name("eng-1");
+        setup_engineer_worktree(&repo, &worktree_dir, &base_branch, &team_config_dir).unwrap();
+        git_ok(&worktree_dir, &["checkout", "-b", "eng-1/108"]);
+        std::fs::write(worktree_dir.join("scratch.txt"), "stale dirty work\n").unwrap();
+        git_ok(&worktree_dir, &["add", "scratch.txt"]);
+        let git_dir = PathBuf::from(git_stdout(&worktree_dir, &["rev-parse", "--git-dir"]));
+        let git_dir = if git_dir.is_absolute() {
+            git_dir
+        } else {
+            worktree_dir.join(git_dir)
+        };
+        std::fs::write(git_dir.join("index.lock"), "locked\n").unwrap();
+
+        write_owned_task_file_with_context(
+            &repo,
+            124,
+            "authoritative-task",
+            "in-progress",
+            "eng-1",
+            "eng-1/124",
+            ".batty/worktrees/eng-1",
+        );
+
+        let old = std::env::var("BATTY_ORPHAN_BRANCH_MISMATCH_MAX_ATTEMPTS").ok();
+        unsafe {
+            std::env::set_var("BATTY_ORPHAN_BRANCH_MISMATCH_MAX_ATTEMPTS", "1");
+        }
+        daemon.reconcile_active_tasks().unwrap();
+        match old {
+            Some(value) => unsafe {
+                std::env::set_var("BATTY_ORPHAN_BRANCH_MISMATCH_MAX_ATTEMPTS", value)
+            },
+            None => unsafe { std::env::remove_var("BATTY_ORPHAN_BRANCH_MISMATCH_MAX_ATTEMPTS") },
+        }
+
+        let task = crate::task::load_task_by_id(
+            &repo
+                .join(".batty")
+                .join("team_config")
+                .join("board")
+                .join("tasks"),
+            124,
+        )
+        .unwrap();
+        assert_eq!(task.status, "todo");
+        assert!(task.claimed_by.is_none());
+        let events =
+            crate::team::events::read_events(&crate::team::team_events_path(&repo)).unwrap();
+        assert!(events.iter().any(|event| {
+            event.event == "state_reconciliation"
+                && event.role.as_deref() == Some("eng-1")
+                && event.task.as_deref() == Some("124")
+                && event.reason.as_deref() == Some("orphan_branch_mismatch_requeued")
+        }));
     }
 
     #[test]
