@@ -747,6 +747,130 @@ fn main_smoke_detects_broken_main_and_recovers() {
 }
 
 #[test]
+fn zero_diff_completion_tracking_counts_consecutive_empty_diffs() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = init_git_repo(&tmp, "batty-zero-diff");
+    write_owned_task_file(&repo, 42, "zero-diff-task", "in-progress", "eng-1");
+
+    let team_config_dir = repo.join(".batty").join("team_config");
+    let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
+    crate::team::task_loop::prepare_engineer_assignment_worktree(
+        &repo,
+        &worktree_dir,
+        "eng-1",
+        "eng-1/42",
+        &team_config_dir,
+    )
+    .unwrap();
+
+    let mut daemon = TestDaemonBuilder::new(&repo)
+        .members(vec![
+            manager_member("manager", None),
+            engineer_member("eng-1", Some("manager"), true),
+        ])
+        .build();
+    daemon.set_active_task_for_test("eng-1", 42);
+
+    assert_eq!(
+        daemon.maybe_track_zero_diff_completion("eng-1").unwrap(),
+        Some((42, 1))
+    );
+    assert_eq!(
+        daemon.maybe_track_zero_diff_completion("eng-1").unwrap(),
+        Some((42, 2))
+    );
+}
+
+#[test]
+fn zero_diff_completion_tracking_resets_when_real_diff_appears() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = init_git_repo(&tmp, "batty-zero-diff-reset");
+    write_owned_task_file(&repo, 42, "zero-diff-task", "in-progress", "eng-1");
+
+    let team_config_dir = repo.join(".batty").join("team_config");
+    let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
+    crate::team::task_loop::prepare_engineer_assignment_worktree(
+        &repo,
+        &worktree_dir,
+        "eng-1",
+        "eng-1/42",
+        &team_config_dir,
+    )
+    .unwrap();
+
+    let mut daemon = TestDaemonBuilder::new(&repo)
+        .members(vec![
+            manager_member("manager", None),
+            engineer_member("eng-1", Some("manager"), true),
+        ])
+        .build();
+    daemon.set_active_task_for_test("eng-1", 42);
+
+    assert_eq!(
+        daemon.maybe_track_zero_diff_completion("eng-1").unwrap(),
+        Some((42, 1))
+    );
+
+    std::fs::write(
+        worktree_dir.join("src").join("lib.rs"),
+        "pub fn smoke() -> bool { false }\n",
+    )
+    .unwrap();
+    git_ok(&worktree_dir, &["add", "src/lib.rs"]);
+    git_ok(&worktree_dir, &["commit", "-m", "real diff"]);
+
+    assert_eq!(
+        daemon.maybe_track_zero_diff_completion("eng-1").unwrap(),
+        None
+    );
+}
+
+#[test]
+fn zero_diff_completion_recovery_escalates_after_threshold() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = init_git_repo(&tmp, "batty-zero-diff-recover");
+    write_owned_task_file(&repo, 42, "zero-diff-task", "in-progress", "eng-1");
+
+    let team_config_dir = repo.join(".batty").join("team_config");
+    let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
+    crate::team::task_loop::prepare_engineer_assignment_worktree(
+        &repo,
+        &worktree_dir,
+        "eng-1",
+        "eng-1/42",
+        &team_config_dir,
+    )
+    .unwrap();
+
+    let mut daemon = TestDaemonBuilder::new(&repo)
+        .members(vec![
+            manager_member("manager", None),
+            engineer_member("eng-1", Some("manager"), true),
+        ])
+        .build();
+    daemon.set_active_task_for_test("eng-1", 42);
+
+    daemon
+        .maybe_recover_zero_diff_completion_loop("eng-1", 42, 2)
+        .unwrap();
+
+    let manager_inbox =
+        crate::team::inbox::pending_messages(&crate::team::inbox::inboxes_root(&repo), "manager")
+            .unwrap();
+    assert_eq!(manager_inbox.len(), 1);
+    assert!(manager_inbox[0].body.contains("zero diff against main"));
+
+    let events = crate::team::events::read_events(
+        &repo.join(".batty").join("team_config").join("events.jsonl"),
+    )
+    .unwrap();
+    assert!(events.iter().any(|event| {
+        event.event == "task_escalated"
+            && event.reason.as_deref() == Some("zero_diff_completion_loop")
+    }));
+}
+
+#[test]
 #[serial]
 #[cfg_attr(not(feature = "integration"), ignore)]
 fn daemon_lifecycle_happy_path_exercises_decomposed_modules() {

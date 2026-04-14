@@ -20,6 +20,7 @@ use crate::team::{append_shim_event_log, shim_log_path};
 
 const SUPERVISORY_STALLED_REASON: &str = "supervisory_stalled";
 const SUPERVISORY_STALL_ESCALATED_REASON: &str = "supervisory_stall_escalated";
+const ZERO_DIFF_COMPLETION_RECOVERY_THRESHOLD: u32 = 2;
 
 #[derive(Debug, Clone)]
 struct ShimRespawnPlan {
@@ -376,6 +377,8 @@ impl TeamDaemon {
                     return Ok(());
                 }
 
+                let zero_diff_completion = self.maybe_track_zero_diff_completion(member_name)?;
+
                 // Trigger engineer completion flow if there's an active task
                 if self.active_task_id(member_name).is_some() {
                     if let Err(error) = merge::handle_engineer_completion(self, member_name) {
@@ -385,6 +388,9 @@ impl TeamDaemon {
                             "shim completion handling failed"
                         );
                     }
+                }
+                if let Some((task_id, count)) = zero_diff_completion {
+                    self.maybe_recover_zero_diff_completion_loop(member_name, task_id, count)?;
                 }
 
                 let _ = last_lines; // Available for logging if needed
@@ -966,6 +972,91 @@ impl TeamDaemon {
             "lifecycle: restarted shim for {member_name} with {} (reason={reason}, requeued_inflight={requeued})",
             disposition.reason()
         ));
+        Ok(())
+    }
+
+    pub(in super::super) fn maybe_track_zero_diff_completion(
+        &mut self,
+        member_name: &str,
+    ) -> Result<Option<(u32, u32)>> {
+        let Some(task_id) = self.active_task_id(member_name) else {
+            return Ok(None);
+        };
+        let Some(member) = self
+            .config
+            .members
+            .iter()
+            .find(|member| member.name == member_name)
+        else {
+            return Ok(None);
+        };
+        if member.role_type != RoleType::Engineer {
+            return Ok(None);
+        }
+
+        let work_dir = self.member_work_dir(member);
+        let output = std::process::Command::new("git")
+            .args(["diff", "--name-only", "main..HEAD"])
+            .current_dir(&work_dir)
+            .output()?;
+        if !output.status.success() {
+            warn!(
+                member = member_name,
+                task_id, "failed to inspect completion diff against main"
+            );
+            return Ok(None);
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let changed_paths = stdout
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .collect::<Vec<_>>();
+        if !changed_paths.is_empty() {
+            self.clear_zero_diff_completion(task_id);
+            return Ok(None);
+        }
+
+        let count = self.note_zero_diff_completion(task_id);
+        self.record_orchestrator_action(format!(
+            "quality: {member_name} reported completion for task #{task_id} with zero diff against main ({count}/{ZERO_DIFF_COMPLETION_RECOVERY_THRESHOLD})"
+        ));
+        Ok(Some((task_id, count)))
+    }
+
+    pub(in super::super) fn maybe_recover_zero_diff_completion_loop(
+        &mut self,
+        member_name: &str,
+        task_id: u32,
+        count: u32,
+    ) -> Result<()> {
+        if count < ZERO_DIFF_COMPLETION_RECOVERY_THRESHOLD {
+            return Ok(());
+        }
+        if self.active_task_id(member_name) != Some(task_id) {
+            self.clear_zero_diff_completion(task_id);
+            return Ok(());
+        }
+
+        let manager = self.assignment_sender(member_name);
+        let body = format!(
+            "Task #{task_id}: {member_name} reported completion {count} times with zero diff against main. Restarting the shim to break the completion loop and leaving the task assigned for manual recovery."
+        );
+        let _ = self.queue_daemon_message(member_name, &body);
+        let _ = self.queue_daemon_message(&manager, &body);
+        self.record_task_escalated(
+            member_name,
+            task_id.to_string(),
+            Some("zero_diff_completion_loop"),
+        );
+        self.record_orchestrator_action(format!(
+            "health: restarting {member_name} after {count} zero-diff completions on task #{task_id}"
+        ));
+        self.clear_zero_diff_completion(task_id);
+        if self.shim_handles.contains_key(member_name) {
+            self.handle_shim_cold_respawn(member_name, "zero_diff_completion_loop")?;
+        }
         Ok(())
     }
 
