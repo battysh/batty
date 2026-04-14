@@ -359,6 +359,12 @@ pub fn team_status(project_root: &Path, json: bool, detail: bool, health: bool) 
     let pending_inbox_counts = status::pending_inbox_counts(project_root, &members);
     let triage_backlog_counts = status::triage_backlog_counts(project_root, &members);
     let owned_task_buckets = status::owned_task_buckets(project_root, &members);
+    let supervisory_pressures = status::supervisory_status_pressure(
+        project_root,
+        &members,
+        session_running,
+        &runtime_statuses,
+    );
     let branch_mismatches = status::branch_mismatch_by_member(project_root, &members);
     let worktree_staleness = status::worktree_staleness_by_member(project_root, &members);
     let agent_health = status::agent_health_by_member(project_root, &members);
@@ -370,6 +376,7 @@ pub fn team_status(project_root: &Path, json: bool, detail: bool, health: bool) 
         &pending_inbox_counts,
         &triage_backlog_counts,
         &owned_task_buckets,
+        &supervisory_pressures,
         &branch_mismatches,
         &worktree_staleness,
         &agent_health,
@@ -941,6 +948,7 @@ roles:
             &Default::default(),
             &Default::default(),
             &Default::default(),
+            &Default::default(),
         );
         assert_eq!(rows[0].state, "stopped");
         assert_eq!(rows[0].pending_inbox, 3);
@@ -972,16 +980,14 @@ roles:
             &Default::default(),
             &Default::default(),
             &Default::default(),
+            &Default::default(),
         );
         assert_eq!(rows[0].state, "reviewing");
         assert_eq!(rows[0].pending_inbox, 3);
         assert_eq!(rows[0].triage_backlog, 2);
         assert_eq!(rows[0].active_owned_tasks, vec![191]);
         assert_eq!(rows[0].review_owned_tasks, vec![193]);
-        assert_eq!(
-            rows[0].signal.as_deref(),
-            Some("standup, needs triage (2), needs review (1)")
-        );
+        assert_eq!(rows[0].signal.as_deref(), Some("standup"));
         assert_eq!(rows[0].runtime_label.as_deref(), Some("idle standup 2:00"));
     }
 

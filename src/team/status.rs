@@ -17,6 +17,9 @@ use super::hierarchy::MemberInstance;
 use super::inbox;
 use super::review::ReviewQueueState;
 use super::standup::MemberState;
+use super::supervisory_notice::{
+    SupervisoryMemberActivity, SupervisoryPressureSnapshot, supervisory_pressure_snapshots,
+};
 use super::{
     TRIAGE_RESULT_FRESHNESS_SECONDS, daemon_state_path, now_unix, pause_marker_path,
     team_config_dir, team_config_path, team_events_path,
@@ -374,6 +377,7 @@ pub(crate) fn build_team_status_rows(
     pending_inbox_counts: &HashMap<String, usize>,
     triage_backlog_counts: &HashMap<String, usize>,
     owned_task_buckets: &HashMap<String, OwnedTaskBuckets>,
+    supervisory_pressures: &HashMap<String, SupervisoryPressureSnapshot>,
     branch_mismatches: &HashMap<String, String>,
     worktree_staleness: &HashMap<String, u32>,
     agent_health: &HashMap<String, AgentHealthSummary>,
@@ -407,6 +411,10 @@ pub(crate) fn build_team_status_rows(
 
             let review_backlog = owned_tasks.review.len();
             let stale_review_backlog = owned_tasks.stale_review.len();
+            let supervisory_pressure = supervisory_pressures
+                .get(&member.name)
+                .cloned()
+                .unwrap_or_default();
             let state = if session_running && state == "idle" && review_backlog > 0 {
                 "reviewing".to_string()
             } else if session_running && state == "idle" && triage_backlog > 0 {
@@ -420,12 +428,19 @@ pub(crate) fn build_team_status_rows(
                 signal,
                 branch_mismatches.get(&member.name).cloned(),
                 health.stall_summary.clone(),
-                triage_backlog,
-                review_backlog,
+                &supervisory_pressure,
                 stale_review_backlog,
             );
             let health_summary =
                 format_agent_health_summary_for_role(&health, Some(member.role_type));
+            let pending_inbox =
+                if matches!(member.role_type, RoleType::Architect | RoleType::Manager)
+                    && supervisory_pressure.actionable_count() > 0
+                {
+                    supervisory_pressure.actionable_count()
+                } else {
+                    pending_inbox
+                };
 
             TeamStatusRow {
                 name: member.name.clone(),
@@ -1164,15 +1179,12 @@ fn merge_status_signal(
     signal: Option<String>,
     branch_mismatch_signal: Option<String>,
     stall_signal: Option<String>,
-    triage_backlog: usize,
-    review_backlog: usize,
+    supervisory_pressure: &SupervisoryPressureSnapshot,
     stale_review_backlog: usize,
 ) -> Option<String> {
-    let triage_signal = (triage_backlog > 0).then(|| format!("needs triage ({triage_backlog})"));
-    let review_signal = (review_backlog > 0).then(|| format!("needs review ({review_backlog})"));
     let stale_review_signal =
         (stale_review_backlog > 0).then(|| format!("stale review ({stale_review_backlog})"));
-    let actionable_backlog_present = triage_signal.is_some() || review_signal.is_some();
+    let actionable_backlog_present = supervisory_pressure.actionable_count() > 0;
     let mut signals = Vec::new();
     if let Some(existing) = signal {
         signals.push(existing);
@@ -1183,11 +1195,8 @@ fn merge_status_signal(
     if !actionable_backlog_present && let Some(stall) = stall_signal {
         signals.push(stall);
     }
-    if let Some(triage) = triage_signal {
-        signals.push(triage);
-    }
-    if let Some(review) = review_signal {
-        signals.push(review);
+    if let Some(summary) = supervisory_pressure.status_summary() {
+        signals.push(summary);
     }
     if let Some(stale_review) = stale_review_signal {
         signals.push(stale_review);
@@ -1389,6 +1398,25 @@ pub(crate) fn pending_inbox_counts(
             Some((member.name.clone(), count))
         })
         .collect()
+}
+
+pub(crate) fn supervisory_status_pressure(
+    project_root: &Path,
+    members: &[MemberInstance],
+    session_running: bool,
+    runtime_statuses: &HashMap<String, RuntimeMemberStatus>,
+) -> HashMap<String, SupervisoryPressureSnapshot> {
+    let activity = members
+        .iter()
+        .map(|member| {
+            let idle = session_running
+                && runtime_statuses
+                    .get(&member.name)
+                    .is_some_and(|runtime| runtime.state == "idle");
+            (member.name.clone(), SupervisoryMemberActivity { idle })
+        })
+        .collect::<HashMap<_, _>>();
+    supervisory_pressure_snapshots(project_root, members, &activity)
 }
 
 fn classify_owned_task_status(status: &str) -> Option<bool> {
@@ -2679,6 +2707,7 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
+            &HashMap::new(),
         );
 
         assert_eq!(rows[0].state, "stopped");
@@ -2700,6 +2729,14 @@ mod tests {
             },
         )]);
         let triage_backlog_counts = HashMap::from([("manager".to_string(), 2usize)]);
+        let supervisory_pressure = HashMap::from([("manager".to_string(), {
+            let mut snapshot = SupervisoryPressureSnapshot::default();
+            snapshot.add_pressure(
+                crate::team::supervisory_notice::SupervisoryPressure::TriageBacklog,
+                2,
+            );
+            snapshot
+        })]);
 
         let rows = build_team_status_rows(
             &members,
@@ -2708,13 +2745,18 @@ mod tests {
             &HashMap::new(),
             &triage_backlog_counts,
             &HashMap::new(),
+            &supervisory_pressure,
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
         );
 
         assert_eq!(rows[0].state, "triaging");
-        assert_eq!(rows[0].signal.as_deref(), Some("needs triage (2)"));
+        assert_eq!(rows[0].pending_inbox, 1);
+        assert_eq!(
+            rows[0].signal.as_deref(),
+            Some("pressure 1: direct-report packets (2)")
+        );
     }
 
     #[test]
@@ -2789,6 +2831,14 @@ mod tests {
                 stale_review: Vec::new(),
             },
         )]);
+        let supervisory_pressure = HashMap::from([("manager".to_string(), {
+            let mut snapshot = SupervisoryPressureSnapshot::default();
+            snapshot.add_pressure(
+                crate::team::supervisory_notice::SupervisoryPressure::ReviewBacklog,
+                2,
+            );
+            snapshot
+        })]);
 
         let rows = build_team_status_rows(
             &members,
@@ -2797,6 +2847,7 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
             &owned_task_buckets,
+            &supervisory_pressure,
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
@@ -2805,7 +2856,7 @@ mod tests {
         assert_eq!(rows[0].state, "reviewing");
         assert_eq!(
             rows[0].signal.as_deref(),
-            Some("nudge paused, needs review (2)")
+            Some("nudge paused, pressure 1: review backlog (2)")
         );
     }
 
@@ -2828,6 +2879,14 @@ mod tests {
                 stale_review: vec![42],
             },
         )]);
+        let supervisory_pressure = HashMap::from([("manager".to_string(), {
+            let mut snapshot = SupervisoryPressureSnapshot::default();
+            snapshot.add_pressure(
+                crate::team::supervisory_notice::SupervisoryPressure::ReviewBacklog,
+                1,
+            );
+            snapshot
+        })]);
 
         let rows = build_team_status_rows(
             &members,
@@ -2836,6 +2895,7 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
             &owned_task_buckets,
+            &supervisory_pressure,
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
@@ -2844,7 +2904,7 @@ mod tests {
         assert_eq!(rows[0].state, "reviewing");
         assert_eq!(
             rows[0].signal.as_deref(),
-            Some("needs review (1), stale review (1)")
+            Some("pressure 1: review backlog (1), stale review (1)")
         );
     }
 
@@ -2906,6 +2966,7 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
+            &HashMap::new(),
             &agent_health,
         );
 
@@ -2927,6 +2988,7 @@ mod tests {
         let rows = build_team_status_rows(
             &members,
             true,
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
@@ -2971,6 +3033,7 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
             &owned_task_buckets,
+            &HashMap::new(),
             &branch_mismatches,
             &HashMap::new(),
             &HashMap::new(),
@@ -3594,22 +3657,33 @@ mod tests {
 
     #[test]
     fn merge_status_signal_combines_existing_triage_and_review_signals() {
+        let mut pressure = SupervisoryPressureSnapshot::default();
+        pressure.add_pressure(
+            crate::team::supervisory_notice::SupervisoryPressure::TriageBacklog,
+            2,
+        );
+        pressure.add_pressure(
+            crate::team::supervisory_notice::SupervisoryPressure::ReviewBacklog,
+            1,
+        );
         assert_eq!(
             merge_status_signal(
                 Some("nudged".to_string()),
                 None,
                 Some("manager (manager) stalled after 5m: no actionable progress".to_string()),
-                2,
-                1,
+                &pressure,
                 0,
             ),
-            Some("nudged, needs triage (2), needs review (1)".to_string())
+            Some("nudged, pressure 2: review backlog (1)".to_string())
         );
     }
 
     #[test]
     fn merge_status_signal_returns_none_when_no_signals_exist() {
-        assert_eq!(merge_status_signal(None, None, None, 0, 0, 0), None);
+        assert_eq!(
+            merge_status_signal(None, None, None, &SupervisoryPressureSnapshot::default(), 0,),
+            None
+        );
     }
 
     #[test]
@@ -4760,31 +4834,39 @@ mod tests {
     /// suppressed so operators see the actionable reason first.
     #[test]
     fn merge_status_signal_suppresses_generic_stall_when_actionable_backlog_present() {
+        let mut review_pressure = SupervisoryPressureSnapshot::default();
+        review_pressure.add_pressure(
+            crate::team::supervisory_notice::SupervisoryPressure::ReviewBacklog,
+            2,
+        );
         let result = merge_status_signal(
             None,
             None,
             Some("manager stall after 32m".to_string()),
-            0,
-            2, // review_backlog
+            &review_pressure,
             0,
         );
         assert_eq!(
             result,
-            Some("needs review (2)".to_string()),
+            Some("pressure 1: review backlog (2)".to_string()),
             "generic stall text should be suppressed when review backlog is non-zero"
         );
 
+        let mut triage_pressure = SupervisoryPressureSnapshot::default();
+        triage_pressure.add_pressure(
+            crate::team::supervisory_notice::SupervisoryPressure::TriageBacklog,
+            3,
+        );
         let result = merge_status_signal(
             None,
             None,
             Some("architect stall after 15m".to_string()),
-            3, // triage_backlog
-            0,
+            &triage_pressure,
             0,
         );
         assert_eq!(
             result,
-            Some("needs triage (3)".to_string()),
+            Some("pressure 1: direct-report packets (3)".to_string()),
             "generic stall text should be suppressed when triage backlog is non-zero"
         );
 
@@ -4792,8 +4874,7 @@ mod tests {
             None,
             None,
             Some("manager stall after 42m".to_string()),
-            0,
-            0,
+            &SupervisoryPressureSnapshot::default(),
             0,
         );
         assert_eq!(

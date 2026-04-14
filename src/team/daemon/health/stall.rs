@@ -7,6 +7,10 @@ use tracing::warn;
 
 use super::super::*;
 use super::{CONTEXT_RESTART_COOLDOWN, format_checkpoint_section};
+use crate::team::supervisory_notice::{
+    SupervisoryMemberActivity, SupervisoryPressure, supervisory_pending_pressure,
+    supervisory_pressure_snapshots,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in super::super) enum SupervisoryLane {
@@ -33,7 +37,7 @@ impl SupervisoryLane {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in super::super) enum SupervisoryProgress {
-    Actionable(&'static str),
+    Actionable(SupervisoryPressure),
     Expected(&'static str),
     Incidental(&'static str),
     None,
@@ -55,7 +59,7 @@ impl SupervisoryProgress {
 
     fn stall_reason_suffix(self) -> &'static str {
         match self {
-            Self::Actionable(_) => "actionable_progress",
+            Self::Actionable(pressure) => pressure.stall_reason_suffix(),
             Self::Expected("inbox_batching") => "inbox_batching",
             Self::Expected("supervisory_digest") => "digest_waiting",
             Self::Expected("fresh_supervisory_input") => "fresh_input",
@@ -68,7 +72,7 @@ impl SupervisoryProgress {
 
     pub(in super::super) fn short_label(&self) -> &'static str {
         match self {
-            Self::Actionable(_) => "actionable progress",
+            Self::Actionable(pressure) => pressure.short_label(),
             Self::Expected("inbox_batching") => "inbox batching",
             Self::Expected("supervisory_digest") => "digest review",
             Self::Expected("fresh_supervisory_input") => "fresh supervisory input",
@@ -121,52 +125,51 @@ impl TeamDaemon {
 
     fn supervisory_expected_progress(&self, member_name: &str) -> Option<SupervisoryProgress> {
         let inbox_root = crate::team::inbox::inboxes_root(&self.config.project_root);
+        let activity = self
+            .config
+            .members
+            .iter()
+            .map(|member| {
+                (
+                    member.name.clone(),
+                    SupervisoryMemberActivity {
+                        idle: self
+                            .watchers
+                            .get(&member.name)
+                            .map(|watcher| {
+                                matches!(watcher.state, WatcherState::Ready | WatcherState::Idle)
+                            })
+                            .unwrap_or(matches!(
+                                self.states.get(&member.name),
+                                Some(MemberState::Idle) | None
+                            )),
+                    },
+                )
+            })
+            .collect::<std::collections::HashMap<_, _>>();
+        let pressures = supervisory_pressure_snapshots(
+            &self.config.project_root,
+            &self.config.members,
+            &activity,
+        );
+        if let Some((pressure, _)) = pressures
+            .get(member_name)
+            .and_then(|snapshot| snapshot.top_actionable())
+        {
+            return Some(SupervisoryProgress::Actionable(pressure));
+        }
+
+        if supervisory_pending_pressure(&inbox_root, member_name)
+            .ok()
+            .is_some_and(|snapshot| snapshot.actionable_count() > 0)
+        {
+            return Some(SupervisoryProgress::Expected("inbox_batching"));
+        }
         if crate::team::inbox::pending_message_count(&inbox_root, member_name)
             .ok()
             .is_some_and(|count| count > 0)
         {
             return Some(SupervisoryProgress::Expected("inbox_batching"));
-        }
-
-        let direct_reports =
-            super::super::super::status::direct_reports_by_member(&self.config.members);
-        if let Some(reports) = direct_reports.get(member_name)
-            && let Ok(triage_state) =
-                super::super::super::status::delivered_direct_report_triage_state(
-                    &inbox_root,
-                    member_name,
-                    reports,
-                )
-            && triage_state.count > 0
-        {
-            return Some(SupervisoryProgress::Expected("inbox_batching"));
-        }
-
-        let tasks_dir = self
-            .config
-            .project_root
-            .join(".batty")
-            .join("team_config")
-            .join("board")
-            .join("tasks");
-        if let Ok(tasks) = crate::task::load_tasks_from_dir(&tasks_dir)
-            && tasks.iter().any(|task| {
-                if task.status != "review" {
-                    return false;
-                }
-
-                let Some(claimed_by) = task.claimed_by.as_deref() else {
-                    return false;
-                };
-                self.config
-                    .members
-                    .iter()
-                    .find(|member| member.name == claimed_by)
-                    .and_then(|member| member.reports_to.as_deref())
-                    == Some(member_name)
-            })
-        {
-            return Some(SupervisoryProgress::Expected("review_waiting"));
         }
 
         None
@@ -188,7 +191,7 @@ impl TeamDaemon {
 
             match event.event.as_str() {
                 "message_routed" if event.from.as_deref() == Some(member_name) => {
-                    Some(SupervisoryProgress::Actionable("message_routed"))
+                    Some(SupervisoryProgress::Expected("fresh_supervisory_input"))
                 }
                 "task_escalated"
                 | "task_unblocked"
@@ -198,7 +201,7 @@ impl TeamDaemon {
                 | "state_reconciliation"
                     if event.role.as_deref() == Some(member_name) =>
                 {
-                    Some(SupervisoryProgress::Actionable("team_event"))
+                    Some(SupervisoryProgress::Expected("fresh_supervisory_input"))
                 }
                 "supervisory_digest_emitted" if event.role.as_deref() == Some(member_name) => {
                     Some(SupervisoryProgress::Expected("supervisory_digest"))

@@ -441,11 +441,12 @@ pub fn classify_message(msg: &InboxMessage) -> MessageCategory {
                 return MessageCategory::Nudge;
             }
             SupervisoryPressure::ReviewBacklog => return MessageCategory::ReviewRequest,
-            SupervisoryPressure::DispatchRecovery
-            | SupervisoryPressure::UtilizationRecovery
-            | SupervisoryPressure::TriageBacklog => return MessageCategory::Blocker,
-            SupervisoryPressure::RecoveryUpdate => {}
-            SupervisoryPressure::StatusUpdate => return MessageCategory::Status,
+            SupervisoryPressure::TriageBacklog
+            | SupervisoryPressure::IdleActiveRecovery
+            | SupervisoryPressure::DispatchGap => return MessageCategory::Blocker,
+            SupervisoryPressure::RecoveryUpdate
+            | SupervisoryPressure::ResolvedUpdate
+            | SupervisoryPressure::StatusUpdate => return MessageCategory::Status,
         }
     }
 
