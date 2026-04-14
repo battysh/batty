@@ -456,10 +456,37 @@ fn find_claimed_task_for_worktree(
     tasks.retain(|task| task.claimed_by.as_deref() == Some(engineer));
     tasks.sort_by_key(task_scope_priority);
 
-    Ok(tasks.into_iter().find(|task| {
-        matches!(task.status.as_str(), "review" | "in-progress")
-            && task_matches_worktree(project_root, task, worktree_dir)
-    }))
+    let active_tasks: Vec<Task> = tasks
+        .into_iter()
+        .filter(|task| matches!(task.status.as_str(), "review" | "in-progress"))
+        .collect();
+    let current_branch = current_branch_name(worktree_dir).ok();
+
+    if let Some(branch) = current_branch.as_deref() {
+        let mut branch_matches = active_tasks
+            .iter()
+            .filter(|task| task_matches_branch(engineer, task, branch))
+            .map(|task| task.id);
+        if let Some(task_id) = branch_matches.next()
+            && branch_matches.next().is_none()
+        {
+            return Ok(active_tasks.into_iter().find(|task| task.id == task_id));
+        }
+    }
+
+    let mut worktree_matches = active_tasks
+        .iter()
+        .filter(|task| task_matches_worktree(project_root, task, worktree_dir))
+        .map(|task| task.id);
+    if let Some(task_id) = worktree_matches.next()
+        && worktree_matches.next().is_none()
+    {
+        return Ok(active_tasks.into_iter().find(|task| task.id == task_id));
+    }
+
+    Ok((active_tasks.len() == 1)
+        .then(|| active_tasks.into_iter().next())
+        .flatten())
 }
 
 fn task_scope_priority(task: &Task) -> (u8, u32) {
@@ -476,6 +503,13 @@ fn task_matches_worktree(project_root: &Path, task: &Task, worktree_dir: &Path) 
         .as_deref()
         .map(|path| resolve_worktree_path(project_root, path) == worktree_dir)
         .unwrap_or(true)
+}
+
+fn task_matches_branch(engineer: &str, task: &Task, branch: &str) -> bool {
+    task.branch
+        .as_deref()
+        .map(|task_branch| task_branch == branch)
+        .unwrap_or_else(|| format!("{engineer}/{}", task.id) == branch)
 }
 
 fn resolve_worktree_path(project_root: &Path, worktree_path: &str) -> PathBuf {
@@ -756,6 +790,55 @@ src/parser.rs:12: failure here\n";
             .unwrap()
             .expect("matching task should be found");
         assert_eq!(task.id, 11);
+    }
+
+    #[test]
+    fn find_claimed_task_for_worktree_prefers_unique_branch_match_over_review_priority() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = tmp
+            .path()
+            .join(".batty")
+            .join("team_config")
+            .join("board")
+            .join("tasks");
+        let worktree_dir = tmp.path().join(".batty").join("worktrees").join("eng-1-3");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+        std::fs::create_dir_all(worktree_dir.join("src")).unwrap();
+        std::fs::write(
+            tasks_dir.join("045-task.md"),
+            "---\nid: 45\ntitle: prior-review\nstatus: review\npriority: medium\nclaimed_by: eng-1-3\nbranch: eng-1-3/45\nworktree_path: .batty/worktrees/eng-1-3\n---\n\nTask body.\n",
+        )
+        .unwrap();
+        std::fs::write(
+            tasks_dir.join("046-task.md"),
+            "---\nid: 46\ntitle: current-task\nstatus: in-progress\npriority: medium\nclaimed_by: eng-1-3\nbranch: eng-1-3/46\nworktree_path: .batty/worktrees/eng-1-3\n---\n\nTask body.\n",
+        )
+        .unwrap();
+
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(&worktree_dir)
+                .output()
+                .unwrap()
+        };
+        assert!(git(&["init"]).status.success());
+        assert!(
+            git(&["config", "user.email", "test@example.com"])
+                .status
+                .success()
+        );
+        assert!(git(&["config", "user.name", "Test"]).status.success());
+        std::fs::write(worktree_dir.join("src/lib.rs"), "pub fn base() {}\n").unwrap();
+        assert!(git(&["add", "."]).status.success());
+        assert!(git(&["commit", "-m", "base"]).status.success());
+        assert!(git(&["branch", "-M", "main"]).status.success());
+        assert!(git(&["checkout", "-b", "eng-1-3/46"]).status.success());
+
+        let task = find_claimed_task_for_worktree(tmp.path(), "eng-1-3", &worktree_dir)
+            .unwrap()
+            .expect("branch-matched task should be found");
+        assert_eq!(task.id, 46);
     }
 
     #[test]

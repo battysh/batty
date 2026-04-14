@@ -159,6 +159,22 @@ pub(crate) fn refresh_task_claim_progress(
     Ok(())
 }
 
+pub(crate) fn set_task_assignment_context(
+    board_dir: &Path,
+    task_id: u32,
+    branch: Option<&str>,
+    worktree_path: Option<&str>,
+) -> Result<()> {
+    let task_path = find_task_path(board_dir, task_id)?;
+    let mut metadata = read_workflow_metadata(&task_path)?;
+    metadata.branch = branch.and_then(normalize_optional).map(str::to_string);
+    metadata.worktree_path = worktree_path
+        .and_then(normalize_optional)
+        .map(str::to_string);
+    write_workflow_metadata(&task_path, &metadata)?;
+    Ok(())
+}
+
 pub(crate) fn mark_task_claim_warning(
     board_dir: &Path,
     task_id: u32,
