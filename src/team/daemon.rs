@@ -1328,6 +1328,7 @@ impl TeamDaemon {
                 !line.is_empty()
                     && !line.starts_with("Compiling ")
                     && !line.starts_with("Checking ")
+                    && !line.starts_with("Blocking waiting for file lock")
                     && !line.starts_with("Finished ")
                     && !line.starts_with("Running ")
             })
