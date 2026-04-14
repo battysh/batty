@@ -641,14 +641,29 @@ impl TeamDaemon {
                             .current_dir(&worktree_dir)
                             .output();
                         if rebase_result.map(|o| o.status.success()).unwrap_or(false) {
-                            info!(
-                                engineer = %entry.engineer,
-                                "dispatch queue: rebase succeeded; retrying dispatch"
-                            );
-                            entry.validation_failures = 0;
-                            entry.last_failure = None;
-                            retained.push(entry);
-                            continue;
+                            match crate::team::task_loop::engineer_worktree_ready_for_dispatch(
+                                &self.config.project_root,
+                                &worktree_dir,
+                                &entry.engineer,
+                            ) {
+                                Ok(()) => {
+                                    info!(
+                                        engineer = %entry.engineer,
+                                        "dispatch queue: rebase succeeded; retrying dispatch"
+                                    );
+                                    entry.validation_failures = 0;
+                                    entry.last_failure = None;
+                                    retained.push(entry);
+                                    continue;
+                                }
+                                Err(error) => {
+                                    warn!(
+                                        engineer = %entry.engineer,
+                                        error = %error,
+                                        "dispatch queue: rebase succeeded but worktree is still not ready; falling through to reset"
+                                    );
+                                }
+                            }
                         }
                         // Rebase failed — abort and fall through to reset
                         let _ = std::process::Command::new("git")
