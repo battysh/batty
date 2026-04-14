@@ -21,6 +21,9 @@ use tracing::warn;
 
 use super::*;
 use crate::team::config::{PlanningDirectiveFile, load_planning_directive};
+use crate::team::supervisory_notice::{
+    SupervisoryPressure, classify_supervisory_pressure_normalized, normalized_body,
+};
 
 const DIRECTIVE_MAX_CHARS: usize = 2_000;
 
@@ -118,12 +121,42 @@ impl TeamDaemon {
     }
 
     fn member_has_pending_inbox(&self, inbox_root: &Path, member_name: &str) -> bool {
-        match inbox::pending_message_count(inbox_root, member_name) {
-            Ok(count) => count > 0,
-            Err(error) => {
-                warn!(member = %member_name, error = %error, "failed to count pending inbox before automation");
-                true
+        let role_type = self
+            .config
+            .members
+            .iter()
+            .find(|member| member.name == member_name)
+            .map(|member| member.role_type);
+        match role_type {
+            Some(RoleType::Architect | RoleType::Manager) => {
+                match inbox::pending_messages(inbox_root, member_name) {
+                    Ok(messages) => messages.into_iter().any(|message| {
+                        !matches!(
+                            classify_supervisory_pressure_normalized(&normalized_body(
+                                &message.body
+                            )),
+                            Some(
+                                SupervisoryPressure::StatusUpdate
+                                    | SupervisoryPressure::ResolvedUpdate
+                                    | SupervisoryPressure::RecoveryUpdate
+                                    | SupervisoryPressure::IdleNudge
+                                    | SupervisoryPressure::ReviewNudge
+                            )
+                        )
+                    }),
+                    Err(error) => {
+                        warn!(member = %member_name, error = %error, "failed to read supervisory inbox before automation");
+                        true
+                    }
+                }
             }
+            _ => match inbox::pending_message_count(inbox_root, member_name) {
+                Ok(count) => count > 0,
+                Err(error) => {
+                    warn!(member = %member_name, error = %error, "failed to count pending inbox before automation");
+                    true
+                }
+            },
         }
     }
 

@@ -2237,7 +2237,7 @@ fn supervisory_manager_stall_detection_skips_fresh_triage_backlog() {
         daemon
             .supervisory_progress_signal("lead", threshold)
             .short_label(),
-        "inbox batching"
+        "direct-report packets"
     );
     assert!(!daemon.is_supervisory_lane_stalled("lead", threshold));
 }
@@ -2297,9 +2297,78 @@ fn supervisory_manager_stall_detection_skips_review_waiting() {
         daemon
             .supervisory_progress_signal("lead", threshold)
             .short_label(),
-        "review waiting"
+        "review backlog"
     );
     assert!(!daemon.is_supervisory_lane_stalled("lead", threshold));
+}
+
+#[test]
+fn supervisory_manager_stall_detection_prioritizes_idle_active_lanes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut daemon = TestDaemonBuilder::new(tmp.path())
+        .members(vec![
+            architect_member("architect"),
+            manager_member("lead", Some("architect")),
+            engineer_member("eng-1", Some("lead"), false),
+        ])
+        .states(HashMap::from([
+            ("lead".to_string(), MemberState::Working),
+            ("eng-1".to_string(), MemberState::Idle),
+        ]))
+        .build();
+    let threshold = daemon
+        .config
+        .team_config
+        .workflow_policy
+        .stall_threshold_secs;
+    insert_working_shim_handle(&mut daemon, "lead", threshold + 10, threshold + 10);
+    write_owned_task_file(tmp.path(), 191, "active-task", "in-progress", "eng-1");
+
+    assert_eq!(
+        daemon
+            .supervisory_progress_signal("lead", threshold)
+            .short_label(),
+        "idle active lanes"
+    );
+    assert!(!daemon.is_supervisory_lane_stalled("lead", threshold));
+}
+
+#[test]
+fn supervisory_architect_pressure_ignores_manual_only_board() {
+    let tmp = tempfile::tempdir().unwrap();
+    crate::team::test_support::write_board_task_file(
+        tmp.path(),
+        198,
+        "manual-provider-blocked",
+        "todo",
+        None,
+        &[],
+        Some("manual provider-console token rotation"),
+    );
+    let mut daemon = TestDaemonBuilder::new(tmp.path())
+        .members(vec![
+            architect_member("architect"),
+            manager_member("lead", Some("architect")),
+            engineer_member("eng-1", Some("lead"), false),
+        ])
+        .states(HashMap::from([
+            ("architect".to_string(), MemberState::Working),
+            ("eng-1".to_string(), MemberState::Idle),
+        ]))
+        .build();
+    let threshold = daemon
+        .config
+        .team_config
+        .workflow_policy
+        .stall_threshold_secs;
+    insert_working_shim_handle(&mut daemon, "architect", threshold + 10, threshold + 10);
+
+    assert_eq!(
+        daemon
+            .supervisory_progress_signal("architect", threshold)
+            .short_label(),
+        "no actionable progress"
+    );
 }
 
 #[test]

@@ -1057,6 +1057,12 @@ fn load_project_status_report(
         crate::team::status::triage_backlog_counts(&project.project_root, &members);
     let owned_task_buckets =
         crate::team::status::owned_task_buckets(&project.project_root, &members);
+    let supervisory_pressures = crate::team::status::supervisory_status_pressure(
+        &project.project_root,
+        &members,
+        session_running,
+        &runtime_statuses,
+    );
     let branch_mismatches =
         crate::team::status::branch_mismatch_by_member(&project.project_root, &members);
     let worktree_staleness =
@@ -1070,6 +1076,7 @@ fn load_project_status_report(
         &pending_inbox_counts,
         &triage_backlog_counts,
         &owned_task_buckets,
+        &supervisory_pressures,
         &branch_mismatches,
         &worktree_staleness,
         &agent_health,

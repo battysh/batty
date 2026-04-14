@@ -13,8 +13,9 @@ use crate::team::message;
 use crate::team::standup::MemberState;
 use crate::team::status;
 use crate::team::supervisory_notice::{
-    SupervisoryPressure, classify_supervisory_pressure_normalized, extract_task_id, is_idle_nudge,
-    is_review_nudge, is_status_update_normalized, normalized_body,
+    SupervisoryPressure, SupervisoryPressureSnapshot,
+    actionable_supervisory_pressure_count_from_bodies, classify_supervisory_pressure_normalized,
+    extract_task_id, is_idle_nudge, is_review_nudge, is_status_update_normalized, normalized_body,
 };
 
 /// Extract a task ID from assignment body text like "Task #42: ..." or "Task #42 ...".
@@ -111,11 +112,11 @@ impl ManagerNoticeClass {
         match self {
             Self::Completion => 0,
             Self::Review => 1,
-            Self::Immediate => 2,
-            Self::Escalation => 3,
+            Self::Triage => 2,
+            Self::Utilization => 3,
             Self::Dispatch => 4,
-            Self::Utilization => 5,
-            Self::Triage => 6,
+            Self::Immediate => 5,
+            Self::Escalation => 6,
             Self::Recovery => 7,
             Self::Status => 8,
         }
@@ -136,6 +137,7 @@ struct SupervisoryDigest {
     entries: Vec<SupervisoryDigestEntry>,
     total_messages: usize,
     duplicates_suppressed: usize,
+    pressure: SupervisoryPressureSnapshot,
 }
 
 fn is_status_query(body: &str) -> bool {
@@ -170,12 +172,12 @@ fn classify_manager_notice(body: &str) -> ManagerNoticeClass {
             SupervisoryPressure::ReviewNudge | SupervisoryPressure::ReviewBacklog => {
                 ManagerNoticeClass::Review
             }
-            SupervisoryPressure::DispatchRecovery => ManagerNoticeClass::Dispatch,
-            SupervisoryPressure::UtilizationRecovery => ManagerNoticeClass::Utilization,
             SupervisoryPressure::TriageBacklog => ManagerNoticeClass::Triage,
-            SupervisoryPressure::IdleNudge | SupervisoryPressure::RecoveryUpdate => {
-                ManagerNoticeClass::Recovery
-            }
+            SupervisoryPressure::IdleActiveRecovery => ManagerNoticeClass::Utilization,
+            SupervisoryPressure::DispatchGap => ManagerNoticeClass::Dispatch,
+            SupervisoryPressure::IdleNudge
+            | SupervisoryPressure::RecoveryUpdate
+            | SupervisoryPressure::ResolvedUpdate => ManagerNoticeClass::Recovery,
             SupervisoryPressure::StatusUpdate => ManagerNoticeClass::Status,
         }
     } else {
@@ -197,22 +199,12 @@ fn should_batch_manager_notice(class: ManagerNoticeClass) -> bool {
     )
 }
 
-fn is_actionable_supervisory_notice(class: ManagerNoticeClass) -> bool {
-    !matches!(
-        class,
-        ManagerNoticeClass::Status | ManagerNoticeClass::Recovery
-    )
-}
-
 pub(in crate::team) fn actionable_supervisory_notice_count(
     messages: &[inbox::InboxMessage],
 ) -> usize {
-    let digest = build_supervisory_digest(messages);
-    digest
-        .entries
-        .into_iter()
-        .filter(|entry| is_actionable_supervisory_notice(entry.class))
-        .count()
+    actionable_supervisory_pressure_count_from_bodies(
+        messages.iter().map(|message| message.body.as_str()),
+    )
 }
 
 fn is_manager_completion_notice(body: &str) -> bool {
@@ -278,8 +270,10 @@ fn build_supervisory_digest(messages: &[inbox::InboxMessage]) -> SupervisoryDige
     let mut entries: Vec<SupervisoryDigestEntry> = Vec::new();
     let mut entry_by_key: std::collections::HashMap<(ManagerNoticeClass, String), usize> =
         std::collections::HashMap::new();
+    let mut pressure = SupervisoryPressureSnapshot::default();
 
     for (index, message) in messages.iter().enumerate() {
+        pressure.add_notice_body(&message.body);
         let class = classify_manager_notice(&message.body);
         let preview = manager_notice_preview(&message.body);
         let dedupe_key = (class, manager_notice_digest_key(message, class));
@@ -310,18 +304,23 @@ fn build_supervisory_digest(messages: &[inbox::InboxMessage]) -> SupervisoryDige
         duplicates_suppressed: messages.len().saturating_sub(entries.len()),
         total_messages: messages.len(),
         entries,
+        pressure,
     }
 }
 
 fn format_supervisory_digest(digest: &SupervisoryDigest) -> String {
+    let pressure_summary = digest
+        .pressure
+        .status_summary()
+        .unwrap_or_else(|| "pressure 0: low-signal only".to_string());
     let header = if digest.duplicates_suppressed == 0 {
         format!(
-            "[manager-digest] {} low-signal supervisory notice(s) collapsed by actionability.",
+            "[manager-digest] {pressure_summary}; {} low-signal supervisory notice(s) collapsed by actionability.",
             digest.total_messages
         )
     } else {
         format!(
-            "[manager-digest] {} low-signal supervisory notice(s) collapsed by actionability ({} duplicate(s) suppressed).",
+            "[manager-digest] {pressure_summary}; {} low-signal supervisory notice(s) collapsed by actionability ({} duplicate(s) suppressed).",
             digest.total_messages, digest.duplicates_suppressed
         )
     };
@@ -2094,7 +2093,8 @@ mod tests {
         let cmd: crate::shim::protocol::Command = child_channel.recv().unwrap().unwrap();
         match cmd {
             crate::shim::protocol::Command::SendMessage { body, .. } => {
-                assert!(body.contains("[manager-digest] 3 low-signal supervisory notice(s)"));
+                assert!(body.contains("[manager-digest]"));
+                assert!(body.contains("pressure "));
                 assert!(body.contains("2 duplicate(s) suppressed"));
                 assert!(body.contains("review [architect x3]"));
             }
@@ -2160,7 +2160,8 @@ mod tests {
         let cmd: crate::shim::protocol::Command = child_channel.recv().unwrap().unwrap();
         match cmd {
             crate::shim::protocol::Command::SendMessage { body, .. } => {
-                assert!(body.contains("[manager-digest] 2 low-signal supervisory notice(s)"));
+                assert!(body.contains("[manager-digest]"));
+                assert!(body.contains("pressure 0: low-signal only"));
                 assert!(body.contains("1 duplicate(s) suppressed"));
                 assert!(body.contains("recovery [daemon x2]"));
                 assert!(
