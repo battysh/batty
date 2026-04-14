@@ -68,6 +68,10 @@ const TASK_METRICS_COLUMNS: &[SchemaColumn] = &[
         name: "confidence_score",
         definition: "confidence_score REAL",
     },
+    SchemaColumn {
+        name: "orphan_reconciliation_branch_mismatch_count",
+        definition: "orphan_reconciliation_branch_mismatch_count INTEGER NOT NULL DEFAULT 0",
+    },
 ];
 
 const SESSION_SUMMARY_COLUMNS: &[SchemaColumn] = &[
@@ -194,7 +198,8 @@ fn init_schema(conn: &Connection) -> Result<()> {
             handoff_successes INTEGER NOT NULL DEFAULT 0,
             carry_forward_effective INTEGER,
             merge_time_secs  INTEGER,
-            confidence_score REAL
+            confidence_score REAL,
+            orphan_reconciliation_branch_mismatch_count INTEGER NOT NULL DEFAULT 0
         );
 
         CREATE TABLE IF NOT EXISTS session_summary (
@@ -590,6 +595,20 @@ fn update_metrics_for_event(conn: &Connection, event: &TeamEvent) -> Result<()> 
                 }
             }
         }
+        "state_reconciliation" => {
+            if let Some(task) = &event.task
+                && event
+                    .reason
+                    .as_deref()
+                    .is_some_and(|reason| reason.starts_with("orphan_branch_mismatch"))
+            {
+                conn.execute(
+                    "INSERT INTO task_metrics (task_id, orphan_reconciliation_branch_mismatch_count) VALUES (?1, 1)
+                     ON CONFLICT(task_id) DO UPDATE SET orphan_reconciliation_branch_mismatch_count = orphan_reconciliation_branch_mismatch_count + 1",
+                    params![task],
+                )?;
+            }
+        }
         "daemon_started" => {
             let session_id = format!("session-{}", event.ts);
             conn.execute(
@@ -788,13 +807,15 @@ pub struct TaskMetricsRow {
     pub carry_forward_effective: Option<bool>,
     pub merge_time_secs: Option<i64>,
     pub confidence_score: Option<f64>,
+    pub orphan_reconciliation_branch_mismatch_count: i64,
 }
 
 pub fn query_task_metrics(conn: &Connection) -> Result<Vec<TaskMetricsRow>> {
     let mut stmt = conn.prepare(
         "SELECT task_id, started_at, completed_at, retries, narration_rejections, escalations,
                 context_restart_count, handoff_attempts, handoff_successes,
-                carry_forward_effective, merge_time_secs, confidence_score
+                carry_forward_effective, merge_time_secs, confidence_score,
+                orphan_reconciliation_branch_mismatch_count
          FROM task_metrics ORDER BY started_at DESC NULLS LAST LIMIT 50",
     )?;
     let rows = stmt
@@ -812,6 +833,7 @@ pub fn query_task_metrics(conn: &Connection) -> Result<Vec<TaskMetricsRow>> {
                 carry_forward_effective: row.get::<_, Option<i64>>(9)?.map(|value| value != 0),
                 merge_time_secs: row.get(10)?,
                 confidence_score: row.get(11)?,
+                orphan_reconciliation_branch_mismatch_count: row.get(12)?,
             })
         })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -1518,6 +1540,34 @@ mod tests {
         assert_eq!(summaries[0].verification_failures, 0);
         assert_eq!(summaries[0].notification_latency_total_secs, 12);
         assert_eq!(summaries[0].notification_latency_samples, 1);
+    }
+
+    #[test]
+    fn orphan_branch_mismatch_reconciliation_increments_task_metric() {
+        let conn = open_in_memory().unwrap();
+        insert_event(
+            &conn,
+            &TeamEvent::state_reconciliation(
+                Some("eng-1"),
+                Some("124"),
+                "orphan_branch_mismatch_recovered",
+            ),
+        )
+        .unwrap();
+        insert_event(
+            &conn,
+            &TeamEvent::state_reconciliation(
+                Some("eng-1"),
+                Some("124"),
+                "orphan_branch_mismatch_requeued",
+            ),
+        )
+        .unwrap();
+
+        let tasks = query_task_metrics(&conn).unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].task_id, "124");
+        assert_eq!(tasks[0].orphan_reconciliation_branch_mismatch_count, 2);
     }
 
     #[test]
