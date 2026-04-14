@@ -108,11 +108,12 @@ pub(crate) fn assert_worktree_clean(dir: &Path) {
             ".",
             ":(exclude).batty",
             ":(exclude).cargo",
+            ":(exclude).batty-target",
         ],
     );
     assert!(
         status.trim().is_empty(),
-        "worktree should be clean (ignoring .batty/.cargo), got: {status}"
+        "worktree should be clean (ignoring .batty/.cargo/.batty-target), got: {status}"
     );
 }
 

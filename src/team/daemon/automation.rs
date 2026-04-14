@@ -4189,6 +4189,80 @@ thread 'tmux::tests::split_window_horizontal_creates_new_pane' panicked at src/t
     }
 
     #[test]
+    fn reconcile_active_tasks_ignores_gitignored_runtime_noise() {
+        let _path_lock = PATH_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "reconcile-runtime-noise");
+        std::fs::write(repo.join(".gitignore"), ".batty-target/\n").unwrap();
+        git_ok(&repo, &["add", ".gitignore"]);
+        git_ok(&repo, &["commit", "-m", "ignore runtime target"]);
+        let manager = MemberInstance {
+            name: "manager".to_string(),
+            role_name: "manager".to_string(),
+            role_type: RoleType::Manager,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: None,
+            use_worktrees: false,
+            ..Default::default()
+        };
+        let engineer = MemberInstance {
+            name: "eng-1".to_string(),
+            role_name: "eng".to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("codex".to_string()),
+            prompt: None,
+            reports_to: Some("manager".to_string()),
+            use_worktrees: true,
+            ..Default::default()
+        };
+        let mut daemon = TestDaemonBuilder::new(repo.as_path())
+            .members(vec![manager, engineer])
+            .states(HashMap::from([("eng-1".to_string(), MemberState::Idle)]))
+            .build();
+
+        let team_config_dir = repo.join(".batty").join("team_config");
+        let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
+        let base_branch = engineer_base_branch_name("eng-1");
+        setup_engineer_worktree(&repo, &worktree_dir, &base_branch, &team_config_dir).unwrap();
+        git_ok(&worktree_dir, &["checkout", "-b", "eng-1/41"]);
+        std::fs::create_dir_all(worktree_dir.join(".batty-target").join("debug")).unwrap();
+        std::fs::write(
+            worktree_dir
+                .join(".batty-target")
+                .join("debug")
+                .join("build.log"),
+            "transient\n",
+        )
+        .unwrap();
+
+        write_owned_task_file_with_context(
+            &repo,
+            42,
+            "authoritative-task",
+            "in-progress",
+            "eng-1",
+            "eng-1/42",
+            ".batty/worktrees/eng-1",
+        );
+
+        daemon.reconcile_active_tasks().unwrap();
+
+        assert_eq!(daemon.active_task_id("eng-1"), Some(42));
+        assert_eq!(current_worktree_branch(&worktree_dir).unwrap(), "eng-1/42");
+        assert!(
+            !crate::team::task_loop::worktree_has_user_changes(&worktree_dir).unwrap(),
+            "runtime-only .batty-target noise should not survive reconciliation as user dirt"
+        );
+        let inbox_root = inbox::inboxes_root(&repo);
+        assert!(
+            inbox::pending_messages(&inbox_root, "manager")
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn reconcile_active_tasks_blocks_detached_head_branch_mismatch() {
         let _path_lock = PATH_LOCK.lock().unwrap_or_else(|error| error.into_inner());
         let tmp = tempfile::tempdir().unwrap();
