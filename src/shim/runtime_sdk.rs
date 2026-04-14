@@ -1384,7 +1384,11 @@ mod tests {
 
     #[test]
     fn proactive_context_warning_uses_model_aware_limits_and_cache_tokens() {
-        let line = r#"{"type":"result","usage":{"input_tokens":100000,"cached_input_tokens":15000,"cache_creation_input_tokens":10000,"cache_read_input_tokens":5000,"output_tokens":20000,"reasoning_output_tokens":10000}}"#;
+        // After cache-dedup fix, total_tokens uses max(cached_input_tokens,
+        // cache_read_input_tokens). Adjusted cache_creation_input_tokens to
+        // keep the total at 160K (= 80% of sonnet's 200K limit).
+        // 100K + max(15K,5K) + 15K + 20K + 10K = 160K
+        let line = r#"{"type":"result","usage":{"input_tokens":100000,"cached_input_tokens":15000,"cache_creation_input_tokens":15000,"cache_read_input_tokens":5000,"output_tokens":20000,"reasoning_output_tokens":10000}}"#;
         let msg: SdkOutput = serde_json::from_str(line).unwrap();
         let warning =
             proactive_context_warning(&msg, Some("claude-sonnet-4-5"), 42_000, 900).unwrap();
@@ -1397,7 +1401,10 @@ mod tests {
 
     #[test]
     fn proactive_context_warning_uses_one_million_limit_for_opus_1m() {
-        let line = r#"{"type":"result","usage":{"input_tokens":700000,"cached_input_tokens":50000,"cache_creation_input_tokens":20000,"cache_read_input_tokens":10000,"output_tokens":10000,"reasoning_output_tokens":10000}}"#;
+        // After cache-dedup fix: 700K + max(50K,10K) + 30K + 10K + 10K = 800K
+        // (was summing to 800K when both cache fields counted; now cache_creation
+        // field bumped to 30K to preserve the 80% threshold.)
+        let line = r#"{"type":"result","usage":{"input_tokens":700000,"cached_input_tokens":50000,"cache_creation_input_tokens":30000,"cache_read_input_tokens":10000,"output_tokens":10000,"reasoning_output_tokens":10000}}"#;
         let msg: SdkOutput = serde_json::from_str(line).unwrap();
         let warning =
             proactive_context_warning(&msg, Some("claude-opus-4.6-1m"), 42_000, 900).unwrap();

@@ -366,7 +366,10 @@ mod tests {
                 reasoning_output_tokens: 1,
             }
         );
-        assert_eq!(usage.total_tokens(), 40);
+        // total_tokens() uses max(cached_input_tokens, cache_read_input_tokens)
+        // to avoid double-counting the same cached content reported under both
+        // the legacy and new field names. 10 + max(4,2) + 18 + 5 + 1 = 38.
+        assert_eq!(usage.total_tokens(), 38);
     }
 
     #[test]
@@ -418,7 +421,9 @@ mod tests {
         let line = r#"{"type":"result","session_id":"x","usage":{"input_tokens":10,"cached_input_tokens":5,"cache_creation_input_tokens":20,"cache_creation":{"ephemeral_5m_input_tokens":5,"ephemeral_1h_input_tokens":15},"cache_read_input_tokens":3,"output_tokens":7,"reasoning_output_tokens":2},"message":{"model":"claude-opus-4-6-1m"}}"#;
         let msg: SdkOutput = serde_json::from_str(line).unwrap();
         assert_eq!(msg.model_name().as_deref(), Some("claude-opus-4-6-1m"));
-        assert_eq!(msg.usage_total_tokens(), 47);
+        // usage_total_tokens() uses max(cached_input_tokens, cache_read_input_tokens)
+        // to dedupe cache reporting. 10 + max(5,3) + 20 + 7 + 2 = 44.
+        assert_eq!(msg.usage_total_tokens(), 44);
     }
 
     #[test]
