@@ -18,6 +18,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 #[cfg(test)]
 use std::time::SystemTime;
 use std::time::{Duration, Instant};
@@ -142,6 +143,21 @@ pub struct DaemonConfig {
     pub pane_map: HashMap<String, String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct MainSmokeState {
+    pub broken: bool,
+    pub pause_dispatch: bool,
+    pub last_run_at: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_success_commit: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub broken_commit: Option<String>,
+    #[serde(default)]
+    pub suspects: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum CleanroomBackend {
     SkoolKit,
@@ -190,6 +206,7 @@ pub struct TeamDaemon {
     pub(super) last_board_rotation: Instant,
     pub(super) last_auto_archive: Instant,
     pub(super) last_auto_dispatch: Instant,
+    pub(super) last_main_smoke_check: Instant,
     pub(super) pipeline_starvation_fired: bool,
     pub(super) pipeline_starvation_last_fired: Option<Instant>,
     pub(super) planning_cycle_last_fired: Option<Instant>,
@@ -218,6 +235,8 @@ pub struct TeamDaemon {
     pub(super) recent_dispatches: HashMap<(u32, String), Instant>,
     /// Tracks recent escalation keys to suppress repeated alerts.
     pub(super) recent_escalations: HashMap<String, Instant>,
+    /// Latest periodic main smoke-test outcome.
+    pub(super) main_smoke_state: Option<MainSmokeState>,
     /// SQLite telemetry database connection (None if open failed).
     pub(super) telemetry_db: Option<rusqlite::Connection>,
     /// Timestamp of the last manual assignment per engineer (for cooldown).
@@ -550,6 +569,7 @@ impl TeamDaemon {
             last_board_rotation: Instant::now(),
             last_auto_archive: Instant::now(),
             last_auto_dispatch: Instant::now(),
+            last_main_smoke_check: Instant::now(),
             pipeline_starvation_fired: false,
             pipeline_starvation_last_fired: None,
             planning_cycle_last_fired: None,
@@ -568,6 +588,7 @@ impl TeamDaemon {
             auto_merge_overrides: HashMap::new(),
             recent_dispatches: HashMap::new(),
             recent_escalations: HashMap::new(),
+            main_smoke_state: None,
             telemetry_db,
             manual_assign_cooldowns: HashMap::new(),
             backend_health: HashMap::new(),
@@ -737,6 +758,153 @@ impl TeamDaemon {
 
     pub(super) fn project_root(&self) -> &Path {
         &self.config.project_root
+    }
+
+    pub(super) fn dispatch_paused_by_main_smoke(&self) -> bool {
+        self.main_smoke_state
+            .as_ref()
+            .is_some_and(|state| state.broken && state.pause_dispatch)
+    }
+
+    pub(super) fn maybe_run_main_smoke(&mut self) -> Result<()> {
+        const DEFAULT_MAIN_SMOKE_SUSPECT_COMMITS: usize = 5;
+
+        let policy = self.config.team_config.workflow_policy.main_smoke.clone();
+        if !policy.enabled {
+            return Ok(());
+        }
+
+        let interval = Duration::from_secs(policy.interval_secs);
+        if self.last_main_smoke_check.elapsed() < interval {
+            return Ok(());
+        }
+        self.last_main_smoke_check = Instant::now();
+
+        if !self.is_git_repo || self.is_multi_repo {
+            return Ok(());
+        }
+
+        let command = policy.command.trim();
+        if command.is_empty() {
+            warn!("main smoke command is empty; skipping");
+            return Ok(());
+        }
+
+        let head = Self::short_head_commit(self.project_root())?;
+        self.record_orchestrator_action(format!("main smoke: running `{command}` at {head}"));
+
+        let test_run =
+            crate::team::task_loop::run_tests_in_worktree(self.project_root(), Some(command))
+                .with_context(|| {
+                    format!(
+                        "failed while running main smoke command `{command}` in {}",
+                        self.project_root().display()
+                    )
+                })?;
+
+        if test_run.passed {
+            let was_broken = self
+                .main_smoke_state
+                .as_ref()
+                .is_some_and(|state| state.broken);
+            self.main_smoke_state = Some(MainSmokeState {
+                broken: false,
+                pause_dispatch: policy.pause_dispatch_on_failure,
+                last_run_at: now_unix(),
+                last_success_commit: Some(head.clone()),
+                broken_commit: None,
+                suspects: Vec::new(),
+                summary: Some(format!("`{command}` passed on {head}")),
+            });
+            if was_broken {
+                self.emit_event(TeamEvent::main_smoke_recovered(&head, command));
+                self.record_orchestrator_action(format!(
+                    "main smoke: recovered on {head}; dispatch gate cleared"
+                ));
+            }
+            return Ok(());
+        }
+
+        let suspects =
+            Self::recent_main_suspects(self.project_root(), DEFAULT_MAIN_SMOKE_SUSPECT_COMMITS)?;
+        let summary = Self::summarize_smoke_output(&test_run.output);
+        let should_emit = self.main_smoke_state.as_ref().is_none_or(|state| {
+            state.broken_commit.as_deref() != Some(head.as_str())
+                || state.summary.as_deref() != Some(summary.as_str())
+        });
+
+        let last_success_commit = self
+            .main_smoke_state
+            .as_ref()
+            .and_then(|state| state.last_success_commit.clone());
+        self.main_smoke_state = Some(MainSmokeState {
+            broken: true,
+            pause_dispatch: policy.pause_dispatch_on_failure,
+            last_run_at: now_unix(),
+            last_success_commit,
+            broken_commit: Some(head.clone()),
+            suspects: suspects.clone(),
+            summary: Some(summary.clone()),
+        });
+
+        if should_emit {
+            self.emit_event(TeamEvent::main_broken(&head, &suspects, &summary));
+        }
+        self.record_orchestrator_action(format!(
+            "main smoke: BROKEN at {head}; suspects [{}]; {summary}",
+            suspects.join(", ")
+        ));
+
+        if policy.auto_revert {
+            self.maybe_auto_revert_broken_main(&head)?;
+        }
+        Ok(())
+    }
+
+    fn maybe_auto_revert_broken_main(&mut self, broken_commit: &str) -> Result<()> {
+        let parent_line = super::git_cmd::run_git(
+            self.project_root(),
+            &["rev-list", "--parents", "-n", "1", "HEAD"],
+        )
+        .with_context(|| {
+            format!("failed to inspect parents for broken main commit {broken_commit}")
+        })?
+        .stdout;
+        let parent_count = parent_line.split_whitespace().count().saturating_sub(1);
+        let revert_args = if parent_count > 1 {
+            vec!["revert", "-m", "1", "--no-edit", "HEAD"]
+        } else {
+            vec!["revert", "--no-edit", "HEAD"]
+        };
+        let output = Command::new("git")
+            .args(&revert_args)
+            .current_dir(self.project_root())
+            .output()
+            .with_context(|| {
+                format!("failed to launch auto-revert for broken main commit {broken_commit}")
+            })?;
+        if output.status.success() {
+            let reverted_to = Self::short_head_commit(self.project_root())?;
+            info!(
+                broken_commit,
+                reverted_to, "main smoke auto-reverted most recent main commit"
+            );
+            self.record_orchestrator_action(format!(
+                "main smoke: auto-reverted broken commit {broken_commit}; main is now {reverted_to}"
+            ));
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            warn!(
+                broken_commit,
+                error = %stderr.trim(),
+                "main smoke auto-revert failed"
+            );
+            self.record_orchestrator_action(format!(
+                "main smoke: auto-revert failed for {broken_commit} ({})",
+                stderr.trim()
+            ));
+        }
+        Ok(())
     }
 
     #[cfg(test)]
@@ -1122,6 +1290,45 @@ impl TeamDaemon {
             .filter(|member| member.role_type == RoleType::Architect)
             .map(|member| member.name.clone())
             .collect()
+    }
+
+    fn short_head_commit(project_root: &Path) -> Result<String> {
+        Ok(
+            super::git_cmd::run_git(project_root, &["rev-parse", "--short", "HEAD"])?
+                .stdout
+                .trim()
+                .to_string(),
+        )
+    }
+
+    fn recent_main_suspects(project_root: &Path, count: usize) -> Result<Vec<String>> {
+        let limit = count.max(1).to_string();
+        let output = super::git_cmd::run_git(
+            project_root,
+            &["log", "--format=%h %s", "-n", limit.as_str(), "main"],
+        )?;
+        Ok(output
+            .stdout
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(str::to_string)
+            .collect())
+    }
+
+    fn summarize_smoke_output(output: &str) -> String {
+        let summary = output
+            .lines()
+            .map(str::trim)
+            .find(|line| {
+                !line.is_empty()
+                    && !line.starts_with("Compiling ")
+                    && !line.starts_with("Checking ")
+                    && !line.starts_with("Finished ")
+                    && !line.starts_with("Running ")
+            })
+            .unwrap_or("main smoke command failed");
+        summary.chars().take(240).collect()
     }
 
     #[cfg(test)]

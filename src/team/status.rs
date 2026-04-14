@@ -10,7 +10,7 @@ use tracing::warn;
 use crate::task;
 
 use super::config::{self, RoleType};
-use super::daemon::NudgeSchedule;
+use super::daemon::{MainSmokeState, NudgeSchedule};
 use super::daemon_mgmt::{PersistedWatchdogState, watchdog_state_path};
 use super::events;
 use super::hierarchy::MemberInstance;
@@ -137,6 +137,8 @@ struct PersistedDaemonHealthState {
     #[serde(default)]
     retry_counts: HashMap<String, u32>,
     #[serde(default)]
+    main_smoke_state: Option<MainSmokeState>,
+    #[serde(default)]
     optional_subsystem_backoff: HashMap<String, u32>,
     #[serde(default)]
     optional_subsystem_disabled_remaining_secs: HashMap<String, u64>,
@@ -226,6 +228,8 @@ pub(crate) struct TeamStatusJsonReport {
     pub(crate) session: String,
     pub(crate) running: bool,
     pub(crate) paused: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) main_smoke: Option<MainSmokeState>,
     pub(crate) watchdog: WatchdogStatus,
     pub(crate) health: TeamStatusHealth,
     pub(crate) workflow_metrics: Option<WorkflowMetrics>,
@@ -1602,6 +1606,7 @@ pub(crate) struct TeamStatusJsonReportInput {
     pub(crate) session: String,
     pub(crate) session_running: bool,
     pub(crate) paused: bool,
+    pub(crate) main_smoke: Option<MainSmokeState>,
     pub(crate) watchdog: WatchdogStatus,
     pub(crate) workflow_metrics: Option<WorkflowMetrics>,
     pub(crate) active_tasks: Vec<StatusTaskEntry>,
@@ -1612,6 +1617,33 @@ pub(crate) struct TeamStatusJsonReportInput {
     pub(crate) members: Vec<TeamStatusRow>,
 }
 
+pub(crate) fn load_main_smoke_state(project_root: &Path) -> Option<MainSmokeState> {
+    load_persisted_daemon_health_state(&daemon_state_path(project_root))
+        .ok()
+        .flatten()
+        .and_then(|state| state.main_smoke_state)
+}
+
+pub(crate) fn format_main_smoke_summary(main_smoke: &MainSmokeState) -> String {
+    if main_smoke.broken {
+        let broken_commit = main_smoke.broken_commit.as_deref().unwrap_or("unknown");
+        let suspects = if main_smoke.suspects.is_empty() {
+            "none".to_string()
+        } else {
+            main_smoke.suspects.join(", ")
+        };
+        let summary = main_smoke.summary.as_deref().unwrap_or("main smoke failed");
+        format!("BROKEN by {broken_commit}; suspects: [{suspects}]; {summary}")
+    } else {
+        let commit = main_smoke
+            .last_success_commit
+            .as_deref()
+            .unwrap_or("unknown");
+        let summary = main_smoke.summary.as_deref().unwrap_or("main smoke passed");
+        format!("healthy at {commit}; {summary}")
+    }
+}
+
 pub(crate) fn build_team_status_json_report(
     input: TeamStatusJsonReportInput,
 ) -> TeamStatusJsonReport {
@@ -1620,6 +1652,7 @@ pub(crate) fn build_team_status_json_report(
         session,
         session_running,
         paused,
+        main_smoke,
         watchdog,
         workflow_metrics,
         active_tasks,
@@ -1634,6 +1667,7 @@ pub(crate) fn build_team_status_json_report(
         session,
         running: session_running,
         paused,
+        main_smoke,
         watchdog,
         health,
         workflow_metrics,
@@ -3371,6 +3405,7 @@ mod tests {
             session: "batty-test".to_string(),
             session_running: true,
             paused: false,
+            main_smoke: None,
             watchdog: WatchdogStatus {
                 state: "running".to_string(),
                 restart_count: 2,
@@ -3831,6 +3866,7 @@ mod tests {
             session: "batty-test".to_string(),
             session_running: true,
             paused: true,
+            main_smoke: None,
             watchdog: WatchdogStatus {
                 state: "restarting".to_string(),
                 restart_count: 1,
@@ -4021,6 +4057,62 @@ mod tests {
         assert!(summary.contains("r2"));
         assert!(summary.contains("backoff=4s"));
         assert!(summary.contains("daemon exited with status 101"));
+    }
+
+    #[test]
+    fn format_main_smoke_summary_includes_commit_and_suspects() {
+        let summary = format_main_smoke_summary(&MainSmokeState {
+            broken: true,
+            pause_dispatch: true,
+            last_run_at: 1,
+            last_success_commit: Some("aaa1111".to_string()),
+            broken_commit: Some("bbb2222".to_string()),
+            suspects: vec![
+                "bbb2222 break main".to_string(),
+                "ccc3333 prior".to_string(),
+            ],
+            summary: Some("could not compile `batty-cli`".to_string()),
+        });
+        assert!(summary.contains("BROKEN by bbb2222"));
+        assert!(summary.contains("bbb2222 break main"));
+        assert!(summary.contains("could not compile `batty-cli`"));
+    }
+
+    #[test]
+    fn build_team_status_json_report_includes_main_smoke_state() {
+        let report = build_team_status_json_report(TeamStatusJsonReportInput {
+            team: "test".to_string(),
+            session: "batty-test".to_string(),
+            session_running: true,
+            paused: false,
+            main_smoke: Some(MainSmokeState {
+                broken: true,
+                pause_dispatch: true,
+                last_run_at: 1,
+                last_success_commit: None,
+                broken_commit: Some("abc1234".to_string()),
+                suspects: vec!["abc1234 break main".to_string()],
+                summary: Some("could not compile `batty-cli`".to_string()),
+            }),
+            watchdog: WatchdogStatus {
+                state: "running".to_string(),
+                restart_count: 0,
+                current_backoff_secs: None,
+                last_exit_reason: None,
+            },
+            workflow_metrics: None,
+            active_tasks: Vec::new(),
+            review_queue: Vec::new(),
+            optional_subsystems: None,
+            engineer_profiles: None,
+            members: Vec::new(),
+        });
+        let json = serde_json::to_value(&report).unwrap();
+        assert_eq!(json["main_smoke"]["broken"].as_bool(), Some(true));
+        assert_eq!(
+            json["main_smoke"]["broken_commit"].as_str(),
+            Some("abc1234")
+        );
     }
 
     #[test]

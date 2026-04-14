@@ -215,6 +215,24 @@ impl TeamEvent {
         }
     }
 
+    pub fn main_broken(commit: &str, suspects: &[String], summary: &str) -> Self {
+        Self {
+            reason: Some(commit.into()),
+            details: Some(format!("suspects: {}\n{}", suspects.join(", "), summary)),
+            success: Some(false),
+            ..Self::base("main_broken")
+        }
+    }
+
+    pub fn main_smoke_recovered(commit: &str, command: &str) -> Self {
+        Self {
+            reason: Some(commit.into()),
+            details: Some(format!("`{command}` passed")),
+            success: Some(true),
+            ..Self::base("main_smoke_recovered")
+        }
+    }
+
     pub fn context_exhausted(
         role: &str,
         task: Option<u32>,

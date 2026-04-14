@@ -397,6 +397,7 @@ pub fn team_status(project_root: &Path, json: bool, detail: bool, health: bool) 
 
     let workflow_metrics = status::workflow_metrics_section(project_root, &members);
     let watchdog = status::load_watchdog_status(project_root, session_running);
+    let main_smoke = status::load_main_smoke_state(project_root);
     let bench_state = match crate::team::bench::load_bench_state(project_root) {
         Ok(state) => state,
         Err(error) => {
@@ -431,6 +432,7 @@ pub fn team_status(project_root: &Path, json: bool, detail: bool, health: bool) 
             session: session.clone(),
             session_running,
             paused,
+            main_smoke: main_smoke.clone(),
             watchdog,
             workflow_metrics: workflow_metrics
                 .as_ref()
@@ -454,6 +456,12 @@ pub fn team_status(project_root: &Path, json: bool, detail: bool, health: bool) 
             }
         );
         println!("Watchdog: {}", status::format_watchdog_summary(&watchdog));
+        if let Some(main_smoke) = main_smoke.as_ref() {
+            println!(
+                "Main smoke: {}",
+                status::format_main_smoke_summary(main_smoke)
+            );
+        }
         println!();
         println!(
             "{:<20} {:<12} {:<10} {:<12} {:>5} {:>6} {:>7} {:<14} {:<14} {:<16} {:<18} {:<24} {:<20}",

@@ -933,6 +933,7 @@ fn load_status_report(project_root: &Path) -> Result<status::TeamStatusJsonRepor
             session: session_name,
             session_running,
             paused,
+            main_smoke: status::load_main_smoke_state(project_root),
             watchdog,
             workflow_metrics,
             active_tasks,
@@ -1003,6 +1004,7 @@ mod tests {
             session: "batty-batty".to_string(),
             running: true,
             paused: false,
+            main_smoke: None,
             watchdog: status::WatchdogStatus {
                 state: "running".to_string(),
                 restart_count: 0,

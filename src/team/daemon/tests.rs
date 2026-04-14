@@ -2,7 +2,9 @@
 
 use super::*;
 use crate::team::config::AutomationConfig;
-use crate::team::config::{BoardConfig, RoleDef, StandupConfig, WorkflowMode, WorkflowPolicy};
+use crate::team::config::{
+    BoardConfig, MainSmokePolicy, RoleDef, StandupConfig, WorkflowMode, WorkflowPolicy,
+};
 use crate::team::events::EventSink;
 use crate::team::test_helpers::make_test_daemon;
 use crate::team::test_support::{
@@ -635,6 +637,113 @@ fn test_maybe_auto_dispatch_skips_when_disabled() {
     let before = daemon.last_auto_dispatch;
     daemon.maybe_auto_dispatch().unwrap();
     assert_eq!(daemon.last_auto_dispatch, before);
+}
+
+#[test]
+fn test_maybe_auto_dispatch_skips_when_main_smoke_blocks_dispatch() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut daemon = TestDaemonBuilder::new(tmp.path()).build();
+    daemon.main_smoke_state = Some(MainSmokeState {
+        broken: true,
+        pause_dispatch: true,
+        last_run_at: 1,
+        last_success_commit: None,
+        broken_commit: Some("abc1234".to_string()),
+        suspects: vec!["abc1234 break main".to_string()],
+        summary: Some("could not compile `batty-cli`".to_string()),
+    });
+    daemon.last_auto_dispatch = Instant::now() - Duration::from_secs(30);
+
+    let before = daemon.last_auto_dispatch;
+    daemon.maybe_auto_dispatch().unwrap();
+    assert_eq!(daemon.last_auto_dispatch, before);
+}
+
+#[test]
+fn main_smoke_detects_broken_main_and_recovers() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = init_git_repo(&tmp, "batty-main-smoke");
+    write_open_task_file(&repo, 1, "dispatch-blocked", "todo");
+
+    let mut daemon = TestDaemonBuilder::new(&repo)
+        .members(vec![engineer_member("eng-1", None, false)])
+        .states(HashMap::from([("eng-1".to_string(), MemberState::Idle)]))
+        .workflow_policy(WorkflowPolicy {
+            main_smoke: MainSmokePolicy {
+                interval_secs: 1,
+                ..MainSmokePolicy::default()
+            },
+            ..WorkflowPolicy::default()
+        })
+        .build();
+
+    std::fs::write(
+        repo.join("src").join("lib.rs"),
+        "pub fn smoke() -> bool { \n",
+    )
+    .unwrap();
+    git_ok(&repo, &["add", "src/lib.rs"]);
+    git_ok(&repo, &["commit", "-m", "break main"]);
+
+    daemon.last_main_smoke_check = Instant::now() - Duration::from_secs(30);
+    daemon.maybe_run_main_smoke().unwrap();
+
+    let broken_commit =
+        crate::team::test_support::git_stdout(&repo, &["rev-parse", "--short", "HEAD"]);
+    let state = daemon.main_smoke_state.as_ref().expect("main smoke state");
+    assert!(state.broken);
+    assert_eq!(state.broken_commit.as_deref(), Some(broken_commit.as_str()));
+    assert!(state.pause_dispatch);
+    assert!(
+        state
+            .summary
+            .as_deref()
+            .unwrap_or_default()
+            .contains("error"),
+        "expected compiler failure summary, got {:?}",
+        state.summary
+    );
+
+    daemon.last_auto_dispatch = Instant::now() - Duration::from_secs(30);
+    let before_dispatch = daemon.last_auto_dispatch;
+    daemon.maybe_auto_dispatch().unwrap();
+    assert_eq!(
+        daemon.active_task_id("eng-1"),
+        None,
+        "dispatch should stay gated while main is broken"
+    );
+    assert_eq!(daemon.last_auto_dispatch, before_dispatch);
+
+    let events_path = repo.join(".batty").join("team_config").join("events.jsonl");
+    let events = crate::team::events::read_events(&events_path).unwrap();
+    assert!(events.iter().any(|event| {
+        event.event == "main_broken" && event.reason.as_deref() == Some(broken_commit.as_str())
+    }));
+
+    std::fs::write(
+        repo.join("src").join("lib.rs"),
+        "pub fn smoke() -> bool { true }\n",
+    )
+    .unwrap();
+    git_ok(&repo, &["add", "src/lib.rs"]);
+    git_ok(&repo, &["commit", "-m", "repair main"]);
+
+    daemon.last_main_smoke_check = Instant::now() - Duration::from_secs(30);
+    daemon.maybe_run_main_smoke().unwrap();
+
+    let recovered = daemon.main_smoke_state.as_ref().expect("main smoke state");
+    assert!(
+        !recovered.broken,
+        "main smoke should clear once main is healthy"
+    );
+
+    let events = crate::team::events::read_events(&events_path).unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|event| event.event == "main_smoke_recovered"),
+        "expected recovery event after repairing main"
+    );
 }
 
 #[test]

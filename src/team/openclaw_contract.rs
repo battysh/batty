@@ -1124,6 +1124,7 @@ mod tests {
             session: "batty-fixture-team".to_string(),
             running: true,
             paused: false,
+            main_smoke: None,
             watchdog: status::WatchdogStatus {
                 state: "running".to_string(),
                 restart_count: 0,
