@@ -14,6 +14,7 @@ use super::test_results::{self, TestRunOutput};
 
 const SHARED_CARGO_CONFIG_MARKER: &str = "# Managed by Batty: shared cargo target";
 const WORKTREE_EXCLUDE_MARKER: &str = "# Managed by Batty worktree ignores";
+const PRESERVE_COMMIT_EXCLUDE_PATHS: &[&str] = &[".batty", ".cargo", ".batty-target"];
 pub(crate) const ADDITIVE_CONFLICT_AUTO_RESOLVE_FENCE: &[&str] =
     &["src/team/task_loop.rs", "src/team/review.rs"];
 const MIN_REVIEW_READY_PRODUCTION_ADDITIONS: usize = 10;
@@ -1081,18 +1082,14 @@ pub(crate) fn preserve_worktree_with_commit(
         return Ok(false);
     }
 
-    run_git_with_timeout(
-        worktree_dir,
-        &[
-            "add",
-            "-A",
-            "--",
-            ".",
-            ":(exclude).batty",
-            ":(exclude).cargo",
-        ],
-        timeout,
-    )?;
+    // `git add` treats ignored exclude pathspecs as explicitly named paths and
+    // aborts with "ignored by one of your .gitignore files". Stage the repo
+    // root, then unstage Batty-managed support paths so tracked runtime files
+    // like restart_context.json do not leak into preservation commits.
+    run_git_with_timeout(worktree_dir, &["add", "-A", "--", "."], timeout)?;
+    let mut unstage_args = vec!["reset", "-q", "--"];
+    unstage_args.extend_from_slice(PRESERVE_COMMIT_EXCLUDE_PATHS);
+    run_git_with_timeout(worktree_dir, &unstage_args, timeout)?;
     run_git_with_timeout(
         worktree_dir,
         &[
@@ -2990,6 +2987,59 @@ mod tests {
 
         let head_after = git_stdout(&wt_dir, &["rev-parse", "HEAD"]);
         assert_eq!(head_before, head_after, "no commit should be created");
+    }
+
+    #[test]
+    fn preserve_worktree_with_commit_succeeds_with_ignored_batty_and_cargo_dirs_present() {
+        let Some(_path_lock) = git_test_guard() else {
+            return;
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp);
+        let wt_dir = repo
+            .join(".batty")
+            .join("worktrees")
+            .join("eng-preserve-ignored");
+        let team_config_dir = repo.join(".batty").join("team_config");
+
+        prepare_engineer_assignment_worktree(
+            &repo,
+            &wt_dir,
+            "eng-preserve-ignored",
+            "eng-preserve-ignored/105",
+            &team_config_dir,
+        )
+        .unwrap();
+
+        std::fs::write(wt_dir.join("preserved.txt"), "keep this work\n").unwrap();
+        std::fs::create_dir_all(wt_dir.join(".batty").join("scratch")).unwrap();
+        std::fs::create_dir_all(wt_dir.join(".cargo")).unwrap();
+        std::fs::write(
+            wt_dir.join(".batty").join("scratch").join("session.log"),
+            "transient\n",
+        )
+        .unwrap();
+        std::fs::write(wt_dir.join(".cargo").join("config.toml"), "build = {}\n").unwrap();
+
+        let saved = preserve_worktree_with_commit(
+            &wt_dir,
+            "wip: auto-save before restart [batty]",
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        assert!(saved, "dirty worktree should still be auto-committed");
+
+        crate::team::test_support::assert_worktree_clean(&wt_dir);
+
+        let log = git_stdout(&wt_dir, &["log", "--oneline", "-1"]);
+        assert!(
+            log.contains("wip: auto-save before restart [batty]"),
+            "expected restart preservation commit, got: {log}"
+        );
+        assert_eq!(
+            git_stdout(&wt_dir, &["show", "HEAD:preserved.txt"]),
+            "keep this work"
+        );
     }
 
     #[test]
