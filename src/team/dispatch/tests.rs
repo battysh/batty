@@ -857,6 +857,71 @@ fn worktree_gate_blocks_dirty_worktrees() {
 }
 
 #[test]
+fn worktree_gate_resets_base_branch_that_remains_ahead_after_rebase() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = init_git_repo(&tmp, "dispatch-queue-ahead-base");
+    write_open_task_file(&repo, 101, "queued-task", "todo");
+    let team_config_dir = repo.join(".batty").join("team_config");
+    let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
+    let base_branch = engineer_base_branch_name("eng-1");
+    setup_engineer_worktree(&repo, &worktree_dir, &base_branch, &team_config_dir).unwrap();
+    std::fs::write(worktree_dir.join("AHEAD.txt"), "ahead\n").unwrap();
+    assert!(
+        std::process::Command::new("git")
+            .args(["add", "AHEAD.txt"])
+            .current_dir(&worktree_dir)
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        std::process::Command::new("git")
+            .args(["commit", "-m", "ahead base branch commit"])
+            .current_dir(&worktree_dir)
+            .status()
+            .unwrap()
+            .success()
+    );
+
+    let members = vec![
+        manager_member("manager", None),
+        engineer_member("eng-1", Some("manager"), true),
+    ];
+    let mut daemon = TestDaemonBuilder::new(&repo)
+        .members(members)
+        .board(BoardConfig {
+            auto_dispatch: true,
+            dispatch_stabilization_delay_secs: 0,
+            ..BoardConfig::default()
+        })
+        .states(HashMap::from([("eng-1".to_string(), MemberState::Idle)]))
+        .build();
+    daemon.last_auto_dispatch = Instant::now() - Duration::from_secs(30);
+    daemon.idle_started_at.insert(
+        "eng-1".to_string(),
+        Instant::now() - Duration::from_secs(60),
+    );
+
+    daemon.maybe_auto_dispatch().unwrap();
+
+    assert_eq!(daemon.dispatch_queue.len(), 1);
+    assert_eq!(daemon.dispatch_queue[0].validation_failures, 0);
+    assert!(daemon.dispatch_queue[0].last_failure.is_none());
+    assert_eq!(
+        crate::worktree::git_current_branch(&worktree_dir).unwrap(),
+        base_branch,
+        "recovery should leave the engineer on the cleaned base branch"
+    );
+    let ahead = std::process::Command::new("git")
+        .args(["rev-list", "--count", "main..HEAD"])
+        .current_dir(&worktree_dir)
+        .output()
+        .unwrap();
+    assert!(ahead.status.success());
+    assert_eq!(String::from_utf8_lossy(&ahead.stdout).trim(), "0");
+}
+
+#[test]
 fn queue_escalates_after_repeated_validation_failures() {
     let tmp = tempfile::tempdir().unwrap();
     write_open_task_file(tmp.path(), 101, "queued-task", "todo");
