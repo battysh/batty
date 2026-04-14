@@ -168,11 +168,7 @@ pub(super) fn ensure_git_ready(project_root: &Path) -> Result<()> {
         .filter(|line| !line.is_empty())
         .filter(|line| {
             let path = line.get(3..).unwrap_or("").trim();
-            let path = path
-                .split(" -> ")
-                .last()
-                .unwrap_or(path)
-                .trim_matches('"');
+            let path = path.split(" -> ").last().unwrap_or(path).trim_matches('"');
             !path.starts_with(".batty/")
         })
         .map(str::to_string)

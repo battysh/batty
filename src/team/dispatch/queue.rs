@@ -474,7 +474,8 @@ impl TeamDaemon {
                     task_id = entry.task_id,
                     "dispatch queue: recovering engineer stuck in Working with no active task"
                 );
-                self.states.insert(entry.engineer.clone(), MemberState::Idle);
+                self.states
+                    .insert(entry.engineer.clone(), MemberState::Idle);
                 self.update_automation_timers_for_state(&entry.engineer, MemberState::Idle);
             }
 
