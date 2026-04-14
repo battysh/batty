@@ -293,6 +293,7 @@ mod tests {
             pending_delivery_queue: HashMap::new(),
             verification_states: HashMap::new(),
             narration_rejection_counts: HashMap::new(),
+            zero_diff_completion_counts: HashMap::new(),
             shim_handles: HashMap::new(),
             planning_cycle_last_fired: None,
             planning_cycle_active: false,

@@ -260,6 +260,9 @@ pub struct TeamDaemon {
     /// Tracks consecutive narration-only rejections per task (commits exist
     /// but the branch still has no file diff). After threshold, escalates.
     pub(super) narration_rejection_counts: HashMap<u32, u32>,
+    /// Tracks consecutive shim completions whose worktree still has zero diff
+    /// against main, so the daemon can break completion loops proactively.
+    pub(super) zero_diff_completion_counts: HashMap<u32, u32>,
     /// Messages deferred because the target agent was still starting.
     /// Drained automatically when the agent transitions to ready.
     pub(super) pending_delivery_queue: HashMap<String, Vec<PendingMessage>>,
@@ -607,6 +610,7 @@ impl TeamDaemon {
             last_disk_hygiene_check: Instant::now() - Duration::from_secs(3600),
             verification_states: HashMap::new(),
             narration_rejection_counts: HashMap::new(),
+            zero_diff_completion_counts: HashMap::new(),
             pending_delivery_queue: HashMap::new(),
             shim_handles: HashMap::new(),
             last_shim_health_check: Instant::now(),
@@ -1426,6 +1430,7 @@ impl TeamDaemon {
     pub(super) fn clear_active_task(&mut self, engineer: &str) {
         if let Some(task_id) = self.active_tasks.remove(engineer) {
             self.narration_rejection_counts.remove(&task_id);
+            self.zero_diff_completion_counts.remove(&task_id);
         }
         self.retry_counts.remove(engineer);
         self.verification_states.remove(engineer);
@@ -1439,6 +1444,16 @@ impl TeamDaemon {
             .map(|member| self.member_work_dir(member))
             .unwrap_or_else(|| self.config.project_root.clone());
         super::checkpoint::remove_restart_context(&work_dir);
+    }
+
+    pub(super) fn note_zero_diff_completion(&mut self, task_id: u32) -> u32 {
+        let count = self.zero_diff_completion_counts.entry(task_id).or_insert(0);
+        *count += 1;
+        *count
+    }
+
+    pub(super) fn clear_zero_diff_completion(&mut self, task_id: u32) {
+        self.zero_diff_completion_counts.remove(&task_id);
     }
 
     /// Remove active_task entries for tasks that are done, archived, or no longer on the board.
