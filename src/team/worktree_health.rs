@@ -7,6 +7,15 @@ use anyhow::{Context, Result};
 use super::config::RoleType;
 use super::hierarchy;
 
+fn git_program() -> &'static str {
+    for program in ["git", "/usr/bin/git", "/opt/homebrew/bin/git"] {
+        if Command::new(program).arg("--version").output().is_ok() {
+            return program;
+        }
+    }
+    "git"
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct WorktreeHealth {
     member: String,
@@ -160,7 +169,7 @@ fn status_notes(status: &WorktreeHealth) -> String {
 }
 
 fn registered_worktree_paths(project_root: &Path) -> Result<HashSet<PathBuf>> {
-    let output = Command::new("git")
+    let output = Command::new(git_program())
         .args(["worktree", "list", "--porcelain"])
         .current_dir(project_root)
         .output()
@@ -188,7 +197,7 @@ fn git_output(path: &Path, args: &[&str]) -> Option<String> {
     if !path.exists() {
         return None;
     }
-    let output = Command::new("git")
+    let output = Command::new(git_program())
         .args(args)
         .current_dir(path)
         .env_remove("GIT_DIR")
@@ -255,7 +264,7 @@ fn find_lock_files(path: &Path) -> Vec<String> {
 }
 
 fn behind_main_count(project_root: &Path, path: &Path) -> Option<u64> {
-    let output = Command::new("git")
+    let output = Command::new(git_program())
         .args(["rev-list", "--left-right", "--count", "HEAD...main"])
         .current_dir(path)
         .env_remove("GIT_DIR")
@@ -285,7 +294,7 @@ mod tests {
     fn init_repo() -> tempfile::TempDir {
         let tmp = tempfile::tempdir().unwrap();
         assert!(
-            Command::new("git")
+            Command::new(git_program())
                 .args(["init", "-b", "main"])
                 .current_dir(tmp.path())
                 .status()
@@ -293,7 +302,7 @@ mod tests {
                 .success()
         );
         assert!(
-            Command::new("git")
+            Command::new(git_program())
                 .args(["config", "user.email", "batty@example.com"])
                 .current_dir(tmp.path())
                 .status()
@@ -301,7 +310,7 @@ mod tests {
                 .success()
         );
         assert!(
-            Command::new("git")
+            Command::new(git_program())
                 .args(["config", "user.name", "Batty Tests"])
                 .current_dir(tmp.path())
                 .status()
@@ -310,7 +319,7 @@ mod tests {
         );
         std::fs::write(tmp.path().join("README.md"), "hello\n").unwrap();
         assert!(
-            Command::new("git")
+            Command::new(git_program())
                 .args(["add", "README.md"])
                 .current_dir(tmp.path())
                 .status()
@@ -318,7 +327,7 @@ mod tests {
                 .success()
         );
         assert!(
-            Command::new("git")
+            Command::new(git_program())
                 .args(["commit", "-m", "init"])
                 .current_dir(tmp.path())
                 .status()
@@ -347,7 +356,7 @@ mod tests {
     fn behind_main_count_reports_stale_branch() {
         let repo = init_repo();
         assert!(
-            Command::new("git")
+            Command::new(git_program())
                 .args(["checkout", "-b", "feature"])
                 .current_dir(repo.path())
                 .status()
@@ -355,7 +364,7 @@ mod tests {
                 .success()
         );
         assert!(
-            Command::new("git")
+            Command::new(git_program())
                 .args(["checkout", "main"])
                 .current_dir(repo.path())
                 .status()
@@ -364,7 +373,7 @@ mod tests {
         );
         std::fs::write(repo.path().join("README.md"), "hello\nworld\n").unwrap();
         assert!(
-            Command::new("git")
+            Command::new(git_program())
                 .args(["commit", "-am", "advance main"])
                 .current_dir(repo.path())
                 .status()
@@ -372,7 +381,7 @@ mod tests {
                 .success()
         );
         assert!(
-            Command::new("git")
+            Command::new(git_program())
                 .args(["checkout", "feature"])
                 .current_dir(repo.path())
                 .status()
