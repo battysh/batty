@@ -2,6 +2,22 @@
 
 All notable changes to Batty are documented here.
 
+## 0.11.6 — 2026-04-14
+
+Dispatch stability fixes.
+
+### Fixes
+
+- **Recover dispatch when engineer base branch stays ahead** — when an
+  engineer's base branch is ahead of main (from an unpushed commit that
+  won't rebase), the dispatch queue now recovers instead of stalling.
+  (`src/team/dispatch/queue.rs`)
+- **Fix task branch ownership drift in verification and dispatch** —
+  addresses inconsistencies where a task's branch no longer matches the
+  engineer's expected branch, causing verification and dispatch to reject
+  valid work. (`src/team/daemon/verification.rs`, `src/team/dispatch/mod.rs`,
+  `src/team/task_cmd.rs`)
+
 ## 0.11.5 — 2026-04-13
 
 Critical dispatch pipeline fix.
