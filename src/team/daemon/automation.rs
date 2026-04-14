@@ -621,6 +621,7 @@ impl TeamDaemon {
         engineer: &str,
         current_branch: &str,
         authorized_tasks: &[&crate::task::Task],
+        completed_task: Option<&crate::task::Task>,
         reason: &str,
     ) {
         let base_branch = engineer_base_branch_name(engineer);
@@ -636,6 +637,60 @@ impl TeamDaemon {
 
         let worktree_dir = self.worktree_dir(engineer);
         if !worktree_dir.exists() {
+            return;
+        }
+
+        if let Some(task) = completed_task {
+            let team_config_dir = self.config.project_root.join(".batty").join("team_config");
+            match crate::team::task_loop::quarantine_completed_lane_for_recovery(
+                &self.config.project_root,
+                &worktree_dir,
+                engineer,
+                task,
+                current_branch,
+                reason,
+                &team_config_dir,
+                Duration::from_secs(10),
+            ) {
+                Ok(Some(record)) => {
+                    self.emit_event(TeamEvent::worktree_reconciled(engineer, current_branch));
+                    self.record_state_reconciliation(
+                        Some(engineer),
+                        Some(task.id),
+                        "done_lane_reset",
+                    );
+                    self.record_orchestrator_action(format!(
+                        "state reconciliation: quarantined completed task #{} for {} before reset ({})",
+                        task.id,
+                        engineer,
+                        record.doctor_check_line()
+                    ));
+                }
+                Ok(None) => {
+                    self.emit_event(TeamEvent::worktree_reconciled(engineer, current_branch));
+                    self.record_state_reconciliation(
+                        Some(engineer),
+                        Some(task.id),
+                        "done_lane_reset",
+                    );
+                    self.record_orchestrator_action(format!(
+                        "state reconciliation: reset completed task lane #{} for {} to '{}'",
+                        task.id, engineer, base_branch
+                    ));
+                }
+                Err(error) => {
+                    self.report_preserve_failure(
+                        engineer,
+                        Some(task.id),
+                        "completed-task cleanup/reset",
+                        &error.to_string(),
+                    );
+                    self.record_orchestrator_action(format!(
+                        "state reconciliation: blocked completed task lane #{} for {} ({error})",
+                        task.id, engineer
+                    ));
+                }
+            }
             return;
         }
 
@@ -714,8 +769,11 @@ impl TeamDaemon {
             .filter_map(|(engineer, task_id)| {
                 let task_id = *task_id;
                 match board_tasks.iter().find(|t| t.id == task_id) {
-                    Some(task) if task.status == "done" || task.status == "archived" => {
-                        Some((engineer.clone(), task_id, "task is done/archived", false))
+                    Some(task) if task.status == "done" => {
+                        Some((engineer.clone(), task_id, "task is done", false))
+                    }
+                    Some(task) if task.status == "archived" => {
+                        Some((engineer.clone(), task_id, "task is archived", false))
                     }
                     Some(task) if task.status == "review" => {
                         Some((engineer.clone(), task_id, "task entered review", true))
@@ -741,6 +799,49 @@ impl TeamDaemon {
             .collect();
         let mut released_claims = false;
         for (engineer, task_id, reason, release_claim) in stale {
+            if reason == "task is done" {
+                if let Some(task) = board_tasks.iter().find(|task| task.id == task_id) {
+                    let worktree_dir = self.worktree_dir(&engineer);
+                    if worktree_dir.exists() {
+                        let source_branch = authoritative_task_branch(&engineer, task);
+                        let team_config_dir =
+                            self.config.project_root.join(".batty").join("team_config");
+                        match crate::team::task_loop::quarantine_completed_lane_for_recovery(
+                            &self.config.project_root,
+                            &worktree_dir,
+                            &engineer,
+                            task,
+                            &source_branch,
+                            "completed task no longer needs engineer lane",
+                            &team_config_dir,
+                            Duration::from_secs(10),
+                        ) {
+                            Ok(Some(record)) => {
+                                self.record_orchestrator_action(format!(
+                                    "state reconciliation: preserved completed task #{} for {} before cleanup ({})",
+                                    task_id,
+                                    engineer,
+                                    record.doctor_check_line()
+                                ));
+                            }
+                            Ok(None) => {}
+                            Err(error) => {
+                                self.report_preserve_failure(
+                                    &engineer,
+                                    Some(task_id),
+                                    "completed-task cleanup/reset",
+                                    &error.to_string(),
+                                );
+                                self.record_orchestrator_action(format!(
+                                    "state reconciliation: blocked completed task #{} cleanup for {} ({error})",
+                                    task_id, engineer
+                                ));
+                                continue;
+                            }
+                        }
+                    }
+                }
+            }
             info!(
                 engineer = %engineer,
                 task_id,
@@ -2081,6 +2182,12 @@ impl TeamDaemon {
                 continue;
             }
 
+            let completed_task_for_branch = board_tasks.iter().find(|task| {
+                task.claimed_by.as_deref() == Some(engineer.as_str())
+                    && task.status == "done"
+                    && authoritative_task_branch(&engineer, task) == branch
+            });
+
             if is_managed_task_branch(&engineer, &branch)
                 && authorized_tasks
                     .iter()
@@ -2090,6 +2197,7 @@ impl TeamDaemon {
                     &engineer,
                     &branch,
                     &authorized_tasks,
+                    completed_task_for_branch,
                     "board no longer authorizes current branch",
                 );
                 continue;
@@ -6059,6 +6167,271 @@ thread 'tmux::tests::split_window_horizontal_creates_new_pane' panicked at src/t
             event.event == "state_reconciliation"
                 && event.role.as_deref() == Some("eng-1")
                 && event.reason.as_deref() == Some("branch_reset")
+        }));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn reconcile_stale_worktrees_preserves_staged_done_lane_before_safe_branch_reset() {
+        let _path_lock = PATH_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "worktree-reset-done-staged");
+        let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
+        let team_config_dir = repo.join(".batty").join("team_config");
+        let base_branch = engineer_base_branch_name("eng-1");
+        setup_engineer_worktree(&repo, &worktree_dir, &base_branch, &team_config_dir).unwrap();
+        crate::team::task_loop::checkout_worktree_branch_from_main(&worktree_dir, "eng-1/42")
+            .unwrap();
+        std::fs::write(worktree_dir.join("staged-only.txt"), "baseline\n").unwrap();
+        git_ok(&worktree_dir, &["add", "staged-only.txt"]);
+        git_ok(
+            &worktree_dir,
+            &["commit", "-m", "baseline stale branch file"],
+        );
+        std::fs::write(
+            worktree_dir.join("staged-only.txt"),
+            "staged dirty done work\n",
+        )
+        .unwrap();
+        git_ok(&worktree_dir, &["add", "staged-only.txt"]);
+
+        write_owned_task_file_with_context(
+            &repo,
+            42,
+            "done-task",
+            "done",
+            "eng-1",
+            "eng-1/42",
+            ".batty/worktrees/eng-1",
+        );
+
+        let mut daemon = TestDaemonBuilder::new(repo.as_path())
+            .members(vec![
+                manager_member("manager", None),
+                engineer_member("eng-1", Some("manager"), true),
+            ])
+            .states(HashMap::from([("eng-1".to_string(), MemberState::Idle)]))
+            .build();
+
+        daemon.maybe_reconcile_stale_worktrees().unwrap();
+
+        assert_eq!(current_worktree_branch(&worktree_dir).unwrap(), base_branch);
+        assert!(
+            !crate::team::task_loop::worktree_has_user_changes(&worktree_dir).unwrap(),
+            "worktree should be clean after preserving staged done-lane work"
+        );
+        let preserved_record =
+            crate::team::checkpoint::read_preserved_lane_record(&repo, "eng-1").unwrap();
+        assert_eq!(
+            preserved_record.artifact_kind,
+            crate::team::checkpoint::PreservedLaneArtifactKind::Commit
+        );
+        assert_eq!(preserved_record.task_id, 42);
+        assert_eq!(preserved_record.source_branch, "eng-1/42");
+        let log_on_42 = git_stdout(&worktree_dir, &["log", "--oneline", "eng-1/42", "-1"]);
+        assert!(
+            log_on_42.contains("preserve completed task #42 before branch recovery [eng-1/42]"),
+            "expected preserve commit on stale branch, got:\n{log_on_42}"
+        );
+        let preserved = git_stdout(&worktree_dir, &["show", "eng-1/42:staged-only.txt"]);
+        assert_eq!(preserved, "staged dirty done work");
+        assert!(
+            !worktree_dir.join("staged-only.txt").exists(),
+            "reset to base branch should drop stale-branch-only file from current worktree"
+        );
+
+        let events =
+            crate::team::events::read_events(&crate::team::team_events_path(&repo)).unwrap();
+        assert!(events.iter().any(|event| {
+            event.event == "worktree_reconciled"
+                && event.role.as_deref() == Some("eng-1")
+                && event.reason.as_deref().unwrap_or("").contains("eng-1/42")
+        }));
+        assert!(events.iter().any(|event| {
+            event.event == "state_reconciliation"
+                && event.role.as_deref() == Some("eng-1")
+                && event.reason.as_deref() == Some("done_lane_reset")
+        }));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn reconcile_stale_worktrees_preserves_unstaged_done_lane_before_safe_branch_reset() {
+        let _path_lock = PATH_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "worktree-reset-done-unstaged");
+        let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
+        let team_config_dir = repo.join(".batty").join("team_config");
+        let base_branch = engineer_base_branch_name("eng-1");
+        setup_engineer_worktree(&repo, &worktree_dir, &base_branch, &team_config_dir).unwrap();
+        crate::team::task_loop::checkout_worktree_branch_from_main(&worktree_dir, "eng-1/42")
+            .unwrap();
+        std::fs::write(
+            worktree_dir.join("unstaged-only.txt"),
+            "unstaged done work\n",
+        )
+        .unwrap();
+
+        write_owned_task_file_with_context(
+            &repo,
+            42,
+            "done-task",
+            "done",
+            "eng-1",
+            "eng-1/42",
+            ".batty/worktrees/eng-1",
+        );
+
+        let mut daemon = TestDaemonBuilder::new(repo.as_path())
+            .members(vec![
+                manager_member("manager", None),
+                engineer_member("eng-1", Some("manager"), true),
+            ])
+            .states(HashMap::from([("eng-1".to_string(), MemberState::Idle)]))
+            .build();
+
+        daemon.maybe_reconcile_stale_worktrees().unwrap();
+
+        assert_eq!(current_worktree_branch(&worktree_dir).unwrap(), base_branch);
+        assert!(
+            !crate::team::task_loop::worktree_has_user_changes(&worktree_dir).unwrap(),
+            "worktree should be clean after preserving unstaged done-lane work"
+        );
+        let preserved_record =
+            crate::team::checkpoint::read_preserved_lane_record(&repo, "eng-1").unwrap();
+        assert_eq!(
+            preserved_record.artifact_kind,
+            crate::team::checkpoint::PreservedLaneArtifactKind::Commit
+        );
+        assert_eq!(preserved_record.task_id, 42);
+        assert_eq!(preserved_record.source_branch, "eng-1/42");
+        let log_on_42 = git_stdout(&worktree_dir, &["log", "--oneline", "eng-1/42", "-1"]);
+        assert!(
+            log_on_42.contains("preserve completed task #42 before branch recovery [eng-1/42]"),
+            "expected preserve commit on stale branch, got:\n{log_on_42}"
+        );
+        let preserved = git_stdout(&worktree_dir, &["show", "eng-1/42:unstaged-only.txt"]);
+        assert_eq!(preserved, "unstaged done work");
+        assert!(
+            !worktree_dir.join("unstaged-only.txt").exists(),
+            "reset to base branch should drop stale-branch-only file from current worktree"
+        );
+
+        let events =
+            crate::team::events::read_events(&crate::team::team_events_path(&repo)).unwrap();
+        assert!(events.iter().any(|event| {
+            event.event == "worktree_reconciled"
+                && event.role.as_deref() == Some("eng-1")
+                && event.reason.as_deref().unwrap_or("").contains("eng-1/42")
+        }));
+        assert!(events.iter().any(|event| {
+            event.event == "state_reconciliation"
+                && event.role.as_deref() == Some("eng-1")
+                && event.reason.as_deref() == Some("done_lane_reset")
+        }));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn reconcile_stale_worktrees_snapshots_dirty_done_lane_when_commit_preserve_fails() {
+        let _path_lock = PATH_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "worktree-reset-done-preserve-failure");
+        let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
+        let team_config_dir = repo.join(".batty").join("team_config");
+        let base_branch = engineer_base_branch_name("eng-1");
+        setup_engineer_worktree(&repo, &worktree_dir, &base_branch, &team_config_dir).unwrap();
+        crate::team::task_loop::checkout_worktree_branch_from_main(&worktree_dir, "eng-1/42")
+            .unwrap();
+        std::fs::write(
+            worktree_dir.join("blocked.txt"),
+            "blocked dirty done work\n",
+        )
+        .unwrap();
+        git_ok(&worktree_dir, &["add", "blocked.txt"]);
+        let git_dir =
+            std::path::PathBuf::from(git_stdout(&worktree_dir, &["rev-parse", "--git-dir"]));
+        let git_dir = if git_dir.is_absolute() {
+            git_dir
+        } else {
+            worktree_dir.join(git_dir)
+        };
+        std::fs::write(git_dir.join("index.lock"), "locked\n").unwrap();
+
+        write_owned_task_file_with_context(
+            &repo,
+            42,
+            "done-task",
+            "done",
+            "eng-1",
+            "eng-1/42",
+            ".batty/worktrees/eng-1",
+        );
+
+        let mut daemon = TestDaemonBuilder::new(repo.as_path())
+            .members(vec![
+                manager_member("manager", None),
+                engineer_member("eng-1", Some("manager"), true),
+            ])
+            .states(HashMap::from([("eng-1".to_string(), MemberState::Idle)]))
+            .build();
+
+        daemon.maybe_reconcile_stale_worktrees().unwrap();
+
+        assert_eq!(current_worktree_branch(&worktree_dir).unwrap(), base_branch);
+        assert!(
+            !crate::team::task_loop::worktree_has_user_changes(&worktree_dir).unwrap(),
+            "worktree should be clean after snapshot fallback recreates it"
+        );
+        let task = crate::task::load_task_by_id(
+            &repo
+                .join(".batty")
+                .join("team_config")
+                .join("board")
+                .join("tasks"),
+            42,
+        )
+        .unwrap();
+        assert_eq!(task.status, "done");
+        let preserved_record =
+            crate::team::checkpoint::read_preserved_lane_record(&repo, "eng-1").unwrap();
+        assert_eq!(
+            preserved_record.artifact_kind,
+            crate::team::checkpoint::PreservedLaneArtifactKind::Snapshot
+        );
+        let snapshot_rel = preserved_record.snapshot_path.clone().unwrap();
+        let snapshot_abs = repo.join(&snapshot_rel);
+        assert!(
+            snapshot_abs.exists(),
+            "expected snapshot at {}",
+            snapshot_abs.display()
+        );
+        let snapshot = std::fs::read_to_string(&snapshot_abs).unwrap();
+        assert!(snapshot.contains("blocked dirty done work"));
+        assert!(snapshot.contains("blocked.txt"));
+
+        let manager_messages = crate::team::inbox::pending_messages(
+            &crate::team::inbox::inboxes_root(&repo),
+            "manager",
+        )
+        .unwrap();
+        assert!(manager_messages.is_empty());
+        let engineer_messages =
+            crate::team::inbox::pending_messages(&crate::team::inbox::inboxes_root(&repo), "eng-1")
+                .unwrap();
+        assert!(engineer_messages.is_empty());
+
+        let events =
+            crate::team::events::read_events(&crate::team::team_events_path(&repo)).unwrap();
+        assert!(events.iter().any(|event| {
+            event.event == "worktree_reconciled"
+                && event.role.as_deref() == Some("eng-1")
+                && event.reason.as_deref().unwrap_or("").contains("eng-1/42")
+        }));
+        assert!(events.iter().any(|event| {
+            event.event == "state_reconciliation"
+                && event.role.as_deref() == Some("eng-1")
+                && event.reason.as_deref() == Some("done_lane_reset")
         }));
     }
 }

@@ -130,11 +130,14 @@ pub(super) fn build_board_git_checks(project_root: &Path) -> Vec<CheckLine> {
         .join("team_config")
         .join("board")
         .join("tasks");
+    let preserved_lane_checks = build_preserved_lane_checks(project_root);
     if !tasks_dir.exists() {
-        return vec![check_line(
+        let mut lines = vec![check_line(
             CheckLevel::Pass,
             "board tasks directory missing; nothing to verify",
         )];
+        lines.extend(preserved_lane_checks);
+        return lines;
     }
 
     let tasks = match load_tasks_from_dir(&tasks_dir) {
@@ -152,10 +155,12 @@ pub(super) fn build_board_git_checks(project_root: &Path) -> Vec<CheckLine> {
         .collect();
 
     if active_tasks.is_empty() {
-        return vec![check_line(
+        let mut lines = vec![check_line(
             CheckLevel::Pass,
             "no in-progress or review tasks on the board",
         )];
+        lines.extend(preserved_lane_checks);
+        return lines;
     }
 
     if git_cmd::rev_parse_toplevel(project_root).is_err() {
@@ -171,7 +176,36 @@ pub(super) fn build_board_git_checks(project_root: &Path) -> Vec<CheckLine> {
     lines.extend(worktree_consistency_checks(project_root, &active_tasks));
     lines.extend(orphan_branch_checks(project_root, &active_targets));
     lines.extend(orphan_worktree_checks(project_root, &active_targets));
+    lines.extend(preserved_lane_checks);
     lines
+}
+
+fn build_preserved_lane_checks(project_root: &Path) -> Vec<CheckLine> {
+    crate::team::checkpoint::list_preserved_lane_records(project_root)
+        .into_iter()
+        .filter(|record| preserved_lane_record_is_current(project_root, record))
+        .map(|record| check_line(CheckLevel::Pass, record.doctor_check_line()))
+        .collect()
+}
+
+fn preserved_lane_record_is_current(
+    project_root: &Path,
+    record: &crate::team::checkpoint::PreservedLaneRecord,
+) -> bool {
+    let worktree_dir = project_root
+        .join(".batty")
+        .join("worktrees")
+        .join(&record.role);
+    if !worktree_dir.is_dir() {
+        return false;
+    }
+
+    let current_branch = git_output(&worktree_dir, &["branch", "--show-current"]);
+    if current_branch.as_deref() != Some(record.target_branch.as_str()) {
+        return false;
+    }
+
+    !crate::team::task_loop::worktree_has_user_changes(&worktree_dir).unwrap_or(false)
 }
 
 pub(super) fn build_board_dependency_graph(project_root: &Path) -> Vec<String> {
@@ -867,6 +901,78 @@ roles:
                 "no in-progress or review tasks on the board",
             )]
         );
+    }
+
+    #[test]
+    fn doctor_board_git_checks_include_preserved_completed_lane_record() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = crate::team::test_support::init_git_repo(&tmp, "doctor-preserved-lane");
+        let team_config_dir = repo.join(".batty").join("team_config");
+        let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
+        let base_branch = crate::team::task_loop::engineer_base_branch_name("eng-1");
+        crate::team::task_loop::setup_engineer_worktree(
+            &repo,
+            &worktree_dir,
+            &base_branch,
+            &team_config_dir,
+        )
+        .unwrap();
+
+        let task = crate::task::Task {
+            id: 628,
+            title: "done lane".to_string(),
+            status: "done".to_string(),
+            priority: "high".to_string(),
+            claimed_by: Some("eng-1".to_string()),
+            claimed_at: None,
+            claim_ttl_secs: None,
+            claim_expires_at: None,
+            last_progress_at: None,
+            claim_warning_sent_at: None,
+            claim_extensions: None,
+            last_output_bytes: None,
+            blocked: None,
+            tags: vec![],
+            depends_on: vec![],
+            review_owner: None,
+            blocked_on: None,
+            worktree_path: Some(".batty/worktrees/eng-1".to_string()),
+            branch: Some("eng-1/628".to_string()),
+            commit: None,
+            artifacts: vec![],
+            next_action: None,
+            scheduled_for: None,
+            cron_schedule: None,
+            cron_last_run: None,
+            completed: None,
+            description: "done".to_string(),
+            batty_config: None,
+            source_path: repo
+                .join(".batty")
+                .join("team_config")
+                .join("board")
+                .join("tasks")
+                .join("628-done.md"),
+        };
+        let record = crate::team::checkpoint::PreservedLaneRecord::commit(
+            "eng-1",
+            &task,
+            "eng-1/628",
+            &base_branch,
+            "completed task no longer needs engineer lane",
+            Some("abc123456789".to_string()),
+            "def4567890abc".to_string(),
+        );
+        crate::team::checkpoint::write_preserved_lane_record(&repo, &record).unwrap();
+
+        let checks = build_board_git_checks(&repo);
+
+        assert!(checks.iter().any(|line| {
+            line.level == CheckLevel::Pass
+                && line
+                    .message
+                    .contains("eng-1 preserved completed task #628 before cleanup")
+        }));
     }
 
     #[test]

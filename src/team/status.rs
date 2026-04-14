@@ -561,6 +561,27 @@ fn task_branch_signal_for_task(
     ))
 }
 
+fn preserved_completed_lane_signal(project_root: &Path, member_name: &str) -> Option<String> {
+    let record = crate::team::checkpoint::read_preserved_lane_record(project_root, member_name)?;
+    let worktree_dir = project_root
+        .join(".batty")
+        .join("worktrees")
+        .join(member_name);
+    if !worktree_dir.is_dir() {
+        return None;
+    }
+
+    let current_branch = git_stdout_raw(&worktree_dir, ["rev-parse", "--abbrev-ref", "HEAD"])?;
+    if current_branch != crate::team::task_loop::engineer_base_branch_name(member_name) {
+        return None;
+    }
+    if crate::team::task_loop::worktree_has_user_changes(&worktree_dir).unwrap_or(false) {
+        return None;
+    }
+
+    Some(record.status_signal())
+}
+
 pub(crate) fn claimed_task_branch_signal(
     project_root: &Path,
     member_name: &str,
@@ -620,19 +641,19 @@ pub(crate) fn branch_mismatch_by_member(
         .join("team_config")
         .join("board")
         .join("tasks");
-    if !tasks_dir.is_dir() {
-        return HashMap::new();
-    }
-
-    let tasks = match load_board_tasks_for_status(
-        tasks_dir.parent().unwrap_or(&tasks_dir),
-        "branch_mismatch_by_member",
-    ) {
-        Ok(tasks) => tasks,
-        Err(error) => {
-            warn!(path = %tasks_dir.display(), error = %error, "failed to load board tasks for branch mismatch status");
-            return HashMap::new();
+    let tasks = if tasks_dir.is_dir() {
+        match load_board_tasks_for_status(
+            tasks_dir.parent().unwrap_or(&tasks_dir),
+            "branch_mismatch_by_member",
+        ) {
+            Ok(tasks) => tasks,
+            Err(error) => {
+                warn!(path = %tasks_dir.display(), error = %error, "failed to load board tasks for branch mismatch status");
+                Vec::new()
+            }
         }
+    } else {
+        Vec::new()
     };
 
     members
@@ -644,6 +665,7 @@ pub(crate) fn branch_mismatch_by_member(
                 .filter(|task| task_has_active_claim(task, &member.name))
                 .collect::<Vec<_>>();
             claimed_task_branch_signal(project_root, &member.name, &claimed_tasks)
+                .or_else(|| preserved_completed_lane_signal(project_root, &member.name))
                 .map(|signal| (member.name.clone(), signal))
         })
         .collect()
@@ -3027,6 +3049,77 @@ mod tests {
         let mismatches = branch_mismatch_by_member(&repo, &[member]);
 
         assert!(mismatches.is_empty());
+    }
+
+    #[test]
+    fn branch_mismatch_by_member_surfaces_preserved_completed_lane_signal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = crate::team::test_support::init_git_repo(&tmp, "status-preserved-done");
+        let team_config_dir = repo.join(".batty").join("team_config");
+        let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
+        let base_branch = crate::team::task_loop::engineer_base_branch_name("eng-1");
+        crate::team::task_loop::setup_engineer_worktree(
+            &repo,
+            &worktree_dir,
+            &base_branch,
+            &team_config_dir,
+        )
+        .unwrap();
+
+        let record = crate::team::checkpoint::PreservedLaneRecord::commit(
+            "eng-1",
+            &task::Task {
+                id: 628,
+                title: "done lane".to_string(),
+                status: "done".to_string(),
+                priority: "high".to_string(),
+                claimed_by: Some("eng-1".to_string()),
+                claimed_at: None,
+                claim_ttl_secs: None,
+                claim_expires_at: None,
+                last_progress_at: None,
+                claim_warning_sent_at: None,
+                claim_extensions: None,
+                last_output_bytes: None,
+                blocked: None,
+                tags: vec![],
+                depends_on: vec![],
+                review_owner: None,
+                blocked_on: None,
+                worktree_path: Some(".batty/worktrees/eng-1".to_string()),
+                branch: Some("eng-1/628".to_string()),
+                commit: None,
+                artifacts: vec![],
+                next_action: None,
+                scheduled_for: None,
+                cron_schedule: None,
+                cron_last_run: None,
+                completed: None,
+                description: "done".to_string(),
+                batty_config: None,
+                source_path: repo
+                    .join(".batty")
+                    .join("team_config")
+                    .join("board")
+                    .join("tasks")
+                    .join("628-done.md"),
+            },
+            "eng-1/628",
+            &base_branch,
+            "completed task no longer needs engineer lane",
+            Some("abc1234567890".to_string()),
+            "def4567890abc".to_string(),
+        );
+        crate::team::checkpoint::write_preserved_lane_record(&repo, &record).unwrap();
+
+        let mut member = engineer("eng-1");
+        member.use_worktrees = true;
+        let mismatches = branch_mismatch_by_member(&repo, &[member]);
+
+        assert_eq!(
+            mismatches.get("eng-1").map(String::as_str),
+            Some("saved completed lane #628 before cleanup (commit eng-1/628 @ def4567890ab)")
+        );
     }
 
     #[test]

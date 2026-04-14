@@ -5,9 +5,10 @@
 //! task context. This file is included in the restart prompt so the agent can
 //! resume with full awareness of what it was doing.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Information captured in a progress checkpoint.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -42,6 +43,115 @@ pub struct RestartContext {
     pub handoff_consumed: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PreservedLaneArtifactKind {
+    Commit,
+    Snapshot,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PreservedLaneRecord {
+    pub role: String,
+    pub task_id: u32,
+    pub task_title: String,
+    pub task_status: String,
+    pub source_branch: String,
+    pub target_branch: String,
+    pub reason: String,
+    pub created_at: String,
+    pub source_head: Option<String>,
+    pub artifact_kind: PreservedLaneArtifactKind,
+    pub preserved_commit: Option<String>,
+    pub snapshot_path: Option<String>,
+}
+
+impl PreservedLaneRecord {
+    pub fn commit(
+        role: &str,
+        task: &crate::task::Task,
+        source_branch: &str,
+        target_branch: &str,
+        reason: &str,
+        source_head: Option<String>,
+        preserved_commit: String,
+    ) -> Self {
+        Self {
+            role: role.to_string(),
+            task_id: task.id,
+            task_title: task.title.clone(),
+            task_status: task.status.clone(),
+            source_branch: source_branch.to_string(),
+            target_branch: target_branch.to_string(),
+            reason: reason.to_string(),
+            created_at: chrono_timestamp(),
+            source_head,
+            artifact_kind: PreservedLaneArtifactKind::Commit,
+            preserved_commit: Some(preserved_commit),
+            snapshot_path: None,
+        }
+    }
+
+    pub fn snapshot(
+        role: &str,
+        task: &crate::task::Task,
+        source_branch: &str,
+        target_branch: &str,
+        reason: &str,
+        source_head: Option<String>,
+        snapshot_path: String,
+    ) -> Self {
+        Self {
+            role: role.to_string(),
+            task_id: task.id,
+            task_title: task.title.clone(),
+            task_status: task.status.clone(),
+            source_branch: source_branch.to_string(),
+            target_branch: target_branch.to_string(),
+            reason: reason.to_string(),
+            created_at: chrono_timestamp(),
+            source_head,
+            artifact_kind: PreservedLaneArtifactKind::Snapshot,
+            preserved_commit: None,
+            snapshot_path: Some(snapshot_path),
+        }
+    }
+
+    pub fn status_signal(&self) -> String {
+        match self.artifact_kind {
+            PreservedLaneArtifactKind::Commit => format!(
+                "saved completed lane #{} before cleanup (commit {} @ {})",
+                self.task_id,
+                self.source_branch,
+                abbreviate_commit(self.preserved_commit.as_deref())
+            ),
+            PreservedLaneArtifactKind::Snapshot => format!(
+                "saved completed lane #{} before cleanup (snapshot {})",
+                self.task_id,
+                self.snapshot_path.as_deref().unwrap_or("-")
+            ),
+        }
+    }
+
+    pub fn doctor_check_line(&self) -> String {
+        match self.artifact_kind {
+            PreservedLaneArtifactKind::Commit => format!(
+                "{} preserved completed task #{} before cleanup on {} ({})",
+                self.role,
+                self.task_id,
+                self.source_branch,
+                abbreviate_commit(self.preserved_commit.as_deref())
+            ),
+            PreservedLaneArtifactKind::Snapshot => format!(
+                "{} preserved completed task #{} before cleanup in {}",
+                self.role,
+                self.task_id,
+                self.snapshot_path.as_deref().unwrap_or("-")
+            ),
+        }
+    }
+}
+
 /// Returns the progress directory path: `<project_root>/.batty/progress/`.
 pub fn progress_dir(project_root: &Path) -> PathBuf {
     project_root.join(".batty").join("progress")
@@ -50,6 +160,14 @@ pub fn progress_dir(project_root: &Path) -> PathBuf {
 /// Returns the checkpoint file path for a given role.
 pub fn checkpoint_path(project_root: &Path, role: &str) -> PathBuf {
     progress_dir(project_root).join(format!("{role}.md"))
+}
+
+pub fn preserved_lane_dir(project_root: &Path) -> PathBuf {
+    progress_dir(project_root).join("preserved-lanes")
+}
+
+pub fn preserved_lane_record_path(project_root: &Path, role: &str) -> PathBuf {
+    preserved_lane_dir(project_root).join(format!("{role}.json"))
 }
 
 pub fn restart_context_path(worktree_dir: &Path) -> PathBuf {
@@ -78,6 +196,149 @@ pub fn read_checkpoint(project_root: &Path, role: &str) -> Option<String> {
 pub fn remove_checkpoint(project_root: &Path, role: &str) {
     let path = checkpoint_path(project_root, role);
     let _ = std::fs::remove_file(&path);
+}
+
+pub fn write_preserved_lane_record(
+    project_root: &Path,
+    record: &PreservedLaneRecord,
+) -> Result<PathBuf> {
+    let dir = preserved_lane_dir(project_root);
+    std::fs::create_dir_all(&dir)?;
+    let path = preserved_lane_record_path(project_root, &record.role);
+    let content = serde_json::to_vec_pretty(record)?;
+    std::fs::write(&path, content)?;
+    Ok(path)
+}
+
+pub fn read_preserved_lane_record(project_root: &Path, role: &str) -> Option<PreservedLaneRecord> {
+    let path = preserved_lane_record_path(project_root, role);
+    let content = std::fs::read(path).ok()?;
+    serde_json::from_slice(&content).ok()
+}
+
+pub fn list_preserved_lane_records(project_root: &Path) -> Vec<PreservedLaneRecord> {
+    let dir = preserved_lane_dir(project_root);
+    let mut records = Vec::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return records;
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(content) = std::fs::read(&path) else {
+            continue;
+        };
+        let Ok(record) = serde_json::from_slice(&content) else {
+            continue;
+        };
+        records.push(record);
+    }
+
+    records.sort_by(|left, right| {
+        left.role
+            .cmp(&right.role)
+            .then(left.task_id.cmp(&right.task_id))
+    });
+    records
+}
+
+pub fn remove_preserved_lane_record(project_root: &Path, role: &str) {
+    let path = preserved_lane_record_path(project_root, role);
+    let _ = std::fs::remove_file(path);
+}
+
+pub fn write_dirty_lane_snapshot(
+    project_root: &Path,
+    worktree_dir: &Path,
+    role: &str,
+    task: &crate::task::Task,
+    source_branch: &str,
+    target_branch: &str,
+    reason: &str,
+    source_head: Option<&str>,
+) -> Result<PathBuf> {
+    let dir = preserved_lane_dir(project_root);
+    std::fs::create_dir_all(&dir)?;
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let path = dir.join(format!("{role}-task-{}-{stamp}.md", task.id));
+
+    let status = git_stdout(
+        worktree_dir,
+        &["status", "--short", "--untracked-files=all"],
+    )
+    .context("failed to capture worktree status for preserved lane snapshot")?;
+    let staged_diff = git_stdout(
+        worktree_dir,
+        &["diff", "--cached", "--binary", "--no-ext-diff"],
+    )
+    .context("failed to capture staged diff for preserved lane snapshot")?;
+    let unstaged_diff = git_stdout(worktree_dir, &["diff", "--binary", "--no-ext-diff"])
+        .context("failed to capture unstaged diff for preserved lane snapshot")?;
+    let untracked_paths = git_stdout(
+        worktree_dir,
+        &["ls-files", "--others", "--exclude-standard"],
+    )
+    .context("failed to capture untracked files for preserved lane snapshot")?;
+
+    let mut content = String::new();
+    content.push_str(&format!("# Preserved Dirty Lane Snapshot: {role}\n\n"));
+    content.push_str(&format!("Task: #{} - {}\n", task.id, task.title));
+    content.push_str(&format!("Task Status: {}\n", task.status));
+    content.push_str(&format!("Source Branch: {source_branch}\n"));
+    content.push_str(&format!("Target Branch: {target_branch}\n"));
+    content.push_str(&format!("Reason: {reason}\n"));
+    content.push_str(&format!("Created At: {}\n", chrono_timestamp()));
+    if let Some(head) = source_head {
+        content.push_str(&format!("Source HEAD: {head}\n"));
+    }
+    content.push_str("\n## Git Status\n\n```text\n");
+    content.push_str(status.trim_end());
+    content.push_str("\n```\n");
+
+    if !staged_diff.trim().is_empty() {
+        content.push_str("\n## Staged Diff\n\n```diff\n");
+        content.push_str(staged_diff.trim_end());
+        content.push_str("\n```\n");
+    }
+
+    if !unstaged_diff.trim().is_empty() {
+        content.push_str("\n## Unstaged Diff\n\n```diff\n");
+        content.push_str(unstaged_diff.trim_end());
+        content.push_str("\n```\n");
+    }
+
+    let tracked_untracked = untracked_paths
+        .lines()
+        .map(str::trim)
+        .filter(|path| {
+            !path.is_empty() && !path.starts_with(".batty/") && !path.starts_with(".cargo/")
+        })
+        .collect::<Vec<_>>();
+    if !tracked_untracked.is_empty() {
+        content.push_str("\n## Untracked Files\n");
+        for relative in tracked_untracked {
+            let file_path = worktree_dir.join(relative);
+            let file_body = std::fs::read(&file_path).with_context(|| {
+                format!("failed to read untracked file {}", file_path.display())
+            })?;
+            content.push_str(&format!("\n### {relative}\n\n```text\n"));
+            content.push_str(&String::from_utf8_lossy(&file_body));
+            if !content.ends_with('\n') {
+                content.push('\n');
+            }
+            content.push_str("```\n");
+        }
+    }
+
+    std::fs::write(&path, content)
+        .with_context(|| format!("failed to write preserved lane snapshot {}", path.display()))?;
+    Ok(path)
 }
 
 pub fn write_restart_context(worktree_dir: &Path, context: &RestartContext) -> Result<()> {
@@ -176,6 +437,16 @@ fn git_current_branch(worktree_dir: &Path) -> Option<String> {
     } else {
         None
     }
+}
+
+fn git_stdout(worktree_dir: &Path, args: &[&str]) -> Result<String> {
+    Ok(crate::team::git_cmd::run_git(worktree_dir, args)?.stdout)
+}
+
+fn abbreviate_commit(commit: Option<&str>) -> String {
+    commit
+        .map(|commit| commit.chars().take(12).collect::<String>())
+        .unwrap_or_else(|| "unknown".to_string())
 }
 
 /// Get the last commit hash and message in a worktree directory.
@@ -366,6 +637,79 @@ mod tests {
         };
         write_checkpoint(root, &cp).unwrap();
         assert!(dir.exists());
+    }
+
+    #[test]
+    fn preserved_lane_record_round_trips() {
+        let tmp = tempfile::tempdir().unwrap();
+        let task = crate::task::Task {
+            status: "done".to_string(),
+            claimed_by: Some("eng-1".to_string()),
+            worktree_path: Some(".batty/worktrees/eng-1".to_string()),
+            ..make_task(628, "done lane", "done lane description")
+        };
+        let record = PreservedLaneRecord::commit(
+            "eng-1",
+            &task,
+            "eng-1/628",
+            "eng-main/eng-1",
+            "completed task no longer needs engineer lane",
+            Some("abc123456789".to_string()),
+            "def4567890abc".to_string(),
+        );
+
+        let path = write_preserved_lane_record(tmp.path(), &record).unwrap();
+        assert!(path.exists());
+
+        let loaded = read_preserved_lane_record(tmp.path(), "eng-1").unwrap();
+        assert_eq!(loaded, record);
+        assert_eq!(
+            loaded.status_signal(),
+            "saved completed lane #628 before cleanup (commit eng-1/628 @ def4567890ab)"
+        );
+    }
+
+    #[test]
+    fn write_dirty_lane_snapshot_captures_diffs_and_untracked_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = crate::team::test_support::init_git_repo(&tmp, "checkpoint-snapshot");
+        let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
+        let team_config_dir = repo.join(".batty").join("team_config");
+        crate::team::task_loop::prepare_engineer_assignment_worktree(
+            &repo,
+            &worktree_dir,
+            "eng-1",
+            "eng-1/628",
+            &team_config_dir,
+        )
+        .unwrap();
+        fs::write(worktree_dir.join("tracked.txt"), "tracked\n").unwrap();
+        crate::team::test_support::git_ok(&worktree_dir, &["add", "tracked.txt"]);
+        fs::write(worktree_dir.join("unstaged.txt"), "unstaged\n").unwrap();
+
+        let task = crate::task::Task {
+            status: "done".to_string(),
+            claimed_by: Some("eng-1".to_string()),
+            worktree_path: Some(".batty/worktrees/eng-1".to_string()),
+            ..make_task(628, "done lane", "done lane description")
+        };
+        let snapshot_path = write_dirty_lane_snapshot(
+            &repo,
+            &worktree_dir,
+            "eng-1",
+            &task,
+            "eng-1/628",
+            "eng-main/eng-1",
+            "completed task no longer needs engineer lane",
+            Some("abc123456789"),
+        )
+        .unwrap();
+
+        let content = fs::read_to_string(&snapshot_path).unwrap();
+        assert!(content.contains("Source Branch: eng-1/628"));
+        assert!(content.contains("tracked.txt"));
+        assert!(content.contains("unstaged.txt"));
+        assert!(content.contains("completed task no longer needs engineer lane"));
     }
 
     #[test]
