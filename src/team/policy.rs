@@ -69,6 +69,11 @@ mod tests {
         assert_eq!(policy.review_timeout_secs, 7200);
         assert_eq!(policy.auto_archive_done_after_secs, None);
         assert!(policy.capability_overrides.is_empty());
+        assert!(policy.main_smoke.enabled);
+        assert_eq!(policy.main_smoke.interval_secs, 600);
+        assert_eq!(policy.main_smoke.command, "cargo check");
+        assert!(policy.main_smoke.pause_dispatch_on_failure);
+        assert!(!policy.main_smoke.auto_revert);
     }
 
     #[test]

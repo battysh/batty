@@ -288,6 +288,8 @@ pub struct WorkflowPolicy {
     #[serde(default)]
     pub allocation: AllocationPolicy,
     #[serde(default)]
+    pub main_smoke: MainSmokePolicy,
+    #[serde(default)]
     pub auto_merge: AutoMergePolicy,
     /// When true, context exhaustion restarts capture a work summary and
     /// inject it into the new agent session so it can continue where the
@@ -372,6 +374,7 @@ impl Default for WorkflowPolicy {
             verification: VerificationPolicy::default(),
             claim_ttl: ClaimTtlPolicy::default(),
             allocation: AllocationPolicy::default(),
+            main_smoke: MainSmokePolicy::default(),
             auto_merge: AutoMergePolicy::default(),
             context_handoff_enabled: default_context_handoff_enabled(),
             handoff_screen_history: default_handoff_screen_history(),
@@ -411,6 +414,32 @@ impl Default for AllocationPolicy {
             load_penalty: default_allocation_load_penalty(),
             conflict_penalty: default_allocation_conflict_penalty(),
             experience_bonus: default_allocation_experience_bonus(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct MainSmokePolicy {
+    #[serde(default = "default_main_smoke_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_main_smoke_interval_secs")]
+    pub interval_secs: u64,
+    #[serde(default = "default_main_smoke_command")]
+    pub command: String,
+    #[serde(default = "default_main_smoke_pause_dispatch_on_failure")]
+    pub pause_dispatch_on_failure: bool,
+    #[serde(default = "default_main_smoke_auto_revert")]
+    pub auto_revert: bool,
+}
+
+impl Default for MainSmokePolicy {
+    fn default() -> Self {
+        Self {
+            enabled: default_main_smoke_enabled(),
+            interval_secs: default_main_smoke_interval_secs(),
+            command: default_main_smoke_command(),
+            pause_dispatch_on_failure: default_main_smoke_pause_dispatch_on_failure(),
+            auto_revert: default_main_smoke_auto_revert(),
         }
     }
 }
@@ -496,6 +525,26 @@ fn default_allocation_conflict_penalty() -> i32 {
 
 fn default_allocation_experience_bonus() -> i32 {
     3
+}
+
+fn default_main_smoke_enabled() -> bool {
+    true
+}
+
+fn default_main_smoke_interval_secs() -> u64 {
+    600
+}
+
+fn default_main_smoke_command() -> String {
+    "cargo check".to_string()
+}
+
+fn default_main_smoke_pause_dispatch_on_failure() -> bool {
+    true
+}
+
+fn default_main_smoke_auto_revert() -> bool {
+    false
 }
 
 fn default_auto_commit_on_restart() -> bool {

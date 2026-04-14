@@ -197,10 +197,19 @@ This block controls execution quality and merge safety.
 - `verification`: completion retry limits and test command policy
 - `claim_ttl`: stale-ownership reclaim timings
 - `allocation`: scored assignment weights
+- `main_smoke`: periodic `main` smoke test and dispatch-gate policy
 - `auto_merge`: unattended merge thresholds and post-merge verification
 - `context_*` and `handoff_*`: context-pressure restart and handoff behavior
 - `review_*` and `stale_*`: escalation thresholds for aging work
 - `narration_*`: guard rails against agents narrating instead of changing code
+
+`workflow_policy.main_smoke` fields:
+
+- `enabled`: turn periodic `main` smoke checks on or off. Default: `true`
+- `interval_secs`: smoke-check cadence. Default: `600`
+- `command`: shell command run at the project root. Default: `cargo check`
+- `pause_dispatch_on_failure`: stop auto-dispatch while `main` is broken. Default: `true`
+- `auto_revert`: optionally revert `HEAD` after a failing smoke run. Default: `false`
 
 ## `roles`
 

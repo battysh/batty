@@ -1266,6 +1266,31 @@ roles:
 }
 
 #[test]
+fn parse_main_smoke_policy_fields_from_yaml() {
+    let yaml = r#"
+name: test-team
+workflow_policy:
+  main_smoke:
+    enabled: true
+    interval_secs: 120
+    command: cargo test --lib
+    pause_dispatch_on_failure: false
+    auto_revert: true
+roles:
+  - name: architect
+    role_type: architect
+    agent: claude
+"#;
+    let config: TeamConfig = serde_yaml::from_str(yaml).unwrap();
+    let smoke = &config.workflow_policy.main_smoke;
+    assert!(smoke.enabled);
+    assert_eq!(smoke.interval_secs, 120);
+    assert_eq!(smoke.command, "cargo test --lib");
+    assert!(!smoke.pause_dispatch_on_failure);
+    assert!(smoke.auto_revert);
+}
+
+#[test]
 fn parse_workflow_policy_restart_preservation_fields_from_yaml() {
     let yaml = r#"
 name: test-team

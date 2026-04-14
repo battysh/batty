@@ -1088,6 +1088,7 @@ fn load_project_status_report(
             session: project.session_name.clone(),
             session_running,
             paused,
+            main_smoke: crate::team::status::load_main_smoke_state(&project.project_root),
             watchdog,
             workflow_metrics,
             active_tasks,
@@ -1776,6 +1777,7 @@ mod tests {
             session: "batty-batty".to_string(),
             running: true,
             paused: false,
+            main_smoke: None,
             watchdog: crate::team::status::WatchdogStatus {
                 state: "running".to_string(),
                 restart_count: 0,
