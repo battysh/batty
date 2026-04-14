@@ -612,6 +612,23 @@ impl TeamDaemon {
                     .join(", ")
             );
         }
+        if self.member_uses_worktrees(engineer)
+            && let Some(task_id) = effective_task_id
+        {
+            let branch = engineer_task_branch_name(engineer, task, Some(task_id));
+            let worktree_dir = self.worktree_dir(engineer);
+            let worktree_path = worktree_dir
+                .strip_prefix(&self.config.project_root)
+                .ok()
+                .map(|path| path.to_string_lossy().into_owned())
+                .unwrap_or_else(|| worktree_dir.display().to_string());
+            crate::team::task_cmd::set_task_assignment_context(
+                &board_dir,
+                task_id,
+                Some(&branch),
+                Some(&worktree_path),
+            )?;
+        }
         let launch =
             self.launch_task_assignment_as(sender, engineer, task, effective_task_id, true)?;
         if let Some(task_id) = effective_task_id {

@@ -452,6 +452,79 @@ fn shim_assignment_sends_message_to_existing_engineer() {
 }
 
 #[test]
+fn assign_task_with_task_id_records_assignment_context_for_worktree_assignments() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = init_git_repo(&tmp, "dispatch-record-branch");
+    let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
+    let team_config_dir = repo.join(".batty").join("team_config");
+
+    setup_engineer_worktree(
+        &repo,
+        &worktree_dir,
+        &engineer_base_branch_name("eng-1"),
+        &team_config_dir,
+    )
+    .unwrap();
+    write_task_file(
+        &repo,
+        "042-active-task.md",
+        "---\nid: 42\ntitle: active-task\nstatus: todo\npriority: high\nclass: standard\n---\n\nTask body.\n",
+    );
+
+    let mut daemon = TestDaemonBuilder::new(repo.as_path())
+        .members(vec![
+            manager_member("manager", None),
+            engineer_member("eng-1", Some("manager"), true),
+        ])
+        .build();
+    daemon.config.team_config.use_shim = true;
+
+    let (parent_sock, child_sock) = socketpair().unwrap();
+    let parent_channel = crate::shim::protocol::Channel::new(parent_sock);
+    let mut child_channel = crate::shim::protocol::Channel::new(child_sock);
+    let mut handle = AgentHandle::new(
+        "eng-1".to_string(),
+        parent_channel,
+        12345,
+        "codex".to_string(),
+        "codex".to_string(),
+        worktree_dir.clone(),
+    );
+    handle.apply_state_change(ShimState::Idle);
+    daemon.shim_handles.insert("eng-1".to_string(), handle);
+
+    let launch = daemon
+        .assign_task_with_task_id_as("manager", "eng-1", "Task #42: fix it", Some(42))
+        .unwrap();
+
+    let cmd: Command = child_channel.recv().unwrap().unwrap();
+    match cmd {
+        Command::SendMessage { from, body, .. } => {
+            assert_eq!(from, "manager");
+            assert!(body.contains("Task #42: active-task"));
+            assert!(body.contains("Assignment Packet:"));
+        }
+        other => panic!("expected SendMessage, got {other:?}"),
+    }
+
+    let task = crate::task::Task::from_file(
+        &repo
+            .join(".batty")
+            .join("team_config")
+            .join("board")
+            .join("tasks")
+            .join("042-active-task.md"),
+    )
+    .unwrap();
+    assert_eq!(launch.branch.as_deref(), Some("eng-1/42"));
+    assert_eq!(task.branch.as_deref(), Some("eng-1/42"));
+    assert_eq!(
+        task.worktree_path.as_deref(),
+        Some(".batty/worktrees/eng-1")
+    );
+}
+
+#[test]
 fn assignment_guard_rejects_second_active_task_for_engineer() {
     let tmp = tempfile::tempdir().unwrap();
     crate::team::test_support::write_owned_task_file(
@@ -488,6 +561,49 @@ fn assignment_guard_rejects_second_active_task_for_engineer() {
         .to_string();
 
     assert!(error.contains("already owns active board task(s) #91"));
+}
+
+#[test]
+fn assignment_guard_does_not_mutate_blocked_task_assignment_context() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = init_git_repo(&tmp, "dispatch-guard-no-mutation");
+    write_task_file(
+        &repo,
+        "091-active-task.md",
+        "---\nid: 91\ntitle: active-task\nstatus: in-progress\npriority: high\nclaimed_by: eng-1\nclass: standard\n---\n\nTask body.\n",
+    );
+    write_task_file(
+        &repo,
+        "092-next-task.md",
+        "---\nid: 92\ntitle: next-task\nstatus: todo\npriority: high\nclass: standard\n---\n\nTask body.\n",
+    );
+
+    let mut daemon = TestDaemonBuilder::new(repo.as_path())
+        .members(vec![
+            manager_member("manager", None),
+            engineer_member("eng-1", Some("manager"), true),
+        ])
+        .build();
+    daemon.config.team_config.use_shim = true;
+
+    let error = daemon
+        .assign_task_with_task_id_as("manager", "eng-1", "Task #92: do next", Some(92))
+        .unwrap_err()
+        .to_string();
+
+    assert!(error.contains("already owns active board task(s) #91"));
+
+    let task = crate::task::Task::from_file(
+        &repo
+            .join(".batty")
+            .join("team_config")
+            .join("board")
+            .join("tasks")
+            .join("092-next-task.md"),
+    )
+    .unwrap();
+    assert!(task.branch.is_none());
+    assert!(task.worktree_path.is_none());
 }
 
 #[test]
