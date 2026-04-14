@@ -43,6 +43,8 @@ pub struct DiffSummary {
     pub files_changed: usize,
     pub lines_added: usize,
     pub lines_removed: usize,
+    pub generated_lines_added: usize,
+    pub generated_lines_removed: usize,
     pub modules_touched: HashSet<String>,
     pub sensitive_files: Vec<String>,
     pub has_unsafe: bool,
@@ -58,6 +60,15 @@ pub struct DiffSummary {
 impl DiffSummary {
     pub fn total_lines(&self) -> usize {
         self.lines_added + self.lines_removed
+    }
+
+    pub fn generated_data_lines(&self) -> usize {
+        self.generated_lines_added + self.generated_lines_removed
+    }
+
+    pub fn review_lines(&self) -> usize {
+        self.total_lines()
+            .saturating_sub(self.generated_data_lines())
     }
 }
 
@@ -149,6 +160,8 @@ pub fn analyze_diff(repo: &Path, base: &str, branch: &str) -> Result<DiffSummary
     let mut files_changed = 0usize;
     let mut lines_added = 0usize;
     let mut lines_removed = 0usize;
+    let mut generated_lines_added = 0usize;
+    let mut generated_lines_removed = 0usize;
     let mut modules_touched = HashSet::new();
     let mut changed_paths = Vec::new();
 
@@ -158,14 +171,24 @@ pub fn analyze_diff(repo: &Path, base: &str, branch: &str) -> Result<DiffSummary
             continue;
         }
         files_changed += 1;
-        if let Ok(added) = parts[0].parse::<usize>() {
+        let added = parts[0].parse::<usize>().ok();
+        let removed = parts[1].parse::<usize>().ok();
+        if let Some(added) = added {
             lines_added += added;
         }
-        if let Ok(removed) = parts[1].parse::<usize>() {
+        if let Some(removed) = removed {
             lines_removed += removed;
         }
         let path = parts[2];
         changed_paths.push(path.to_string());
+        if is_generated_data_file(path) {
+            if let Some(added) = added {
+                generated_lines_added += added;
+            }
+            if let Some(removed) = removed {
+                generated_lines_removed += removed;
+            }
+        }
 
         // Extract top-level module (first component under src/)
         if let Some(rest) = path.strip_prefix("src/") {
@@ -214,6 +237,8 @@ pub fn analyze_diff(repo: &Path, base: &str, branch: &str) -> Result<DiffSummary
         files_changed,
         lines_added,
         lines_removed,
+        generated_lines_added,
+        generated_lines_removed,
         modules_touched,
         sensitive_files: changed_paths, // filtered by caller via policy
         has_unsafe,
@@ -258,6 +283,12 @@ fn is_migration_file(path: &str) -> bool {
         || lower.contains("/db/")
         || lower.contains("schema")
         || lower.ends_with(".sql")
+}
+
+fn is_generated_data_file(path: &str) -> bool {
+    let lower = path.to_lowercase();
+    (lower.contains("generated/") || lower.contains("reference/") || lower.contains("fixtures/"))
+        && !lower.starts_with("src/")
 }
 
 /// Returns true if the path looks like a config file (not source code).
@@ -390,11 +421,11 @@ pub fn evaluate_auto_merge_candidate(
         ));
     }
 
-    let total_lines = summary.total_lines();
-    if total_lines > policy.max_diff_lines {
+    let review_lines = summary.review_lines();
+    if review_lines > policy.max_diff_lines {
         reasons.push(format!(
             "{} diff lines (max {})",
-            total_lines, policy.max_diff_lines
+            review_lines, policy.max_diff_lines
         ));
     }
 
@@ -556,6 +587,8 @@ mod tests {
             files_changed: files,
             lines_added: added,
             lines_removed: removed,
+            generated_lines_added: 0,
+            generated_lines_removed: 0,
             modules_touched: modules.into_iter().map(String::from).collect(),
             sensitive_files: sensitive.into_iter().map(String::from).collect(),
             has_unsafe,
@@ -891,6 +924,41 @@ mod tests {
         assert!(is_config_file("package.json"));
         assert!(is_config_file(".env"));
         assert!(!is_config_file("src/team/config.rs"));
+    }
+
+    #[test]
+    fn generated_data_diff_does_not_trip_line_count_gate() {
+        let mut summary = make_summary(1, 39035, 0, vec![], vec!["generated/catalog.json"], false);
+        summary.generated_lines_added = 39035;
+        let policy = enabled_policy();
+        let decision = should_auto_merge(&summary, &policy, true);
+        match decision {
+            AutoMergeDecision::AutoMerge { .. } => {}
+            other => panic!(
+                "generated data extraction should auto-merge, got {:?}",
+                other
+            ),
+        }
+    }
+
+    #[test]
+    fn source_diff_still_trips_line_count_gate() {
+        let summary = make_summary(1, 2500, 0, vec!["team"], vec!["src/team/catalog.rs"], false);
+        let policy = enabled_policy();
+        let decision = should_auto_merge(&summary, &policy, true);
+        match decision {
+            AutoMergeDecision::ManualReview { reasons, .. } => {
+                assert!(
+                    reasons.iter().any(|r| r.contains("2500 diff lines")),
+                    "should mention gated source diff lines: {:?}",
+                    reasons
+                );
+            }
+            other => panic!(
+                "large source diff should route to manual review, got {:?}",
+                other
+            ),
+        }
     }
 
     #[test]

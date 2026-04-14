@@ -337,6 +337,8 @@ mod tests {
             files_changed: files,
             lines_added: added,
             lines_removed: removed,
+            generated_lines_added: 0,
+            generated_lines_removed: 0,
             modules_touched: modules.iter().map(|s| s.to_string()).collect(),
             sensitive_files: vec![],
             has_unsafe: false,
