@@ -994,33 +994,31 @@ impl TeamDaemon {
             return Ok(None);
         }
 
-        let work_dir = self.member_work_dir(member);
-        let output = std::process::Command::new("git")
-            .args(["diff", "--name-only", "main..HEAD"])
-            .current_dir(&work_dir)
-            .output()?;
-        if !output.status.success() {
-            warn!(
-                member = member_name,
-                task_id, "failed to inspect completion diff against main"
-            );
-            return Ok(None);
-        }
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let changed_paths = stdout
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty())
-            .collect::<Vec<_>>();
-        if !changed_paths.is_empty() {
+        let expected_branch = self
+            .active_task(member_name)?
+            .and_then(|task| task.branch)
+            .unwrap_or_else(|| format!("{member_name}/{task_id}"));
+        let base_branch = crate::team::task_loop::engineer_base_branch_name(member_name);
+        let branch_exists =
+            crate::team::git_cmd::show_ref_exists(self.project_root(), &expected_branch)
+                .unwrap_or(false);
+        let commits_ahead = if branch_exists {
+            let range = format!("{base_branch}..{expected_branch}");
+            crate::team::git_cmd::run_git(self.project_root(), &["rev-list", "--count", &range])
+                .ok()
+                .and_then(|output| output.stdout.trim().parse::<u32>().ok())
+                .unwrap_or(0)
+        } else {
+            0
+        };
+        if branch_exists && commits_ahead > 0 {
             self.clear_zero_diff_completion(task_id);
             return Ok(None);
         }
 
         let count = self.note_zero_diff_completion(task_id);
         self.record_orchestrator_action(format!(
-            "quality: {member_name} reported completion for task #{task_id} with zero diff against main ({count}/{ZERO_DIFF_COMPLETION_RECOVERY_THRESHOLD})"
+            "quality: {member_name} reported completion for task #{task_id} without an attributed engineer commit on {expected_branch} ahead of {base_branch} ({count}/{ZERO_DIFF_COMPLETION_RECOVERY_THRESHOLD})"
         ));
         Ok(Some((task_id, count)))
     }
@@ -1041,7 +1039,7 @@ impl TeamDaemon {
 
         let manager = self.assignment_sender(member_name);
         let body = format!(
-            "Task #{task_id}: {member_name} reported completion {count} times with zero diff against main. Restarting the shim to break the completion loop and leaving the task assigned for manual recovery."
+            "Task #{task_id}: {member_name} reported completion {count} times without an attributed engineer commit on the expected task branch ahead of base. Restarting the shim to break the completion loop and leaving the task assigned for manual recovery."
         );
         let _ = self.queue_daemon_message(member_name, &body);
         let _ = self.queue_daemon_message(&manager, &body);
@@ -1051,7 +1049,7 @@ impl TeamDaemon {
             Some("zero_diff_completion_loop"),
         );
         self.record_orchestrator_action(format!(
-            "health: restarting {member_name} after {count} zero-diff completions on task #{task_id}"
+            "health: restarting {member_name} after {count} zero-attribution completions on task #{task_id}"
         ));
         self.clear_zero_diff_completion(task_id);
         if self.shim_handles.contains_key(member_name) {

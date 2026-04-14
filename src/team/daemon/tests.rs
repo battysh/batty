@@ -782,6 +782,26 @@ fn zero_diff_completion_tracking_counts_consecutive_empty_diffs() {
 }
 
 #[test]
+fn zero_diff_completion_tracking_counts_missing_task_branch() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = init_git_repo(&tmp, "batty-zero-diff-missing-branch");
+    write_owned_task_file(&repo, 42, "zero-diff-task", "in-progress", "eng-1");
+
+    let mut daemon = TestDaemonBuilder::new(&repo)
+        .members(vec![
+            manager_member("manager", None),
+            engineer_member("eng-1", Some("manager"), true),
+        ])
+        .build();
+    daemon.set_active_task_for_test("eng-1", 42);
+
+    assert_eq!(
+        daemon.maybe_track_zero_diff_completion("eng-1").unwrap(),
+        Some((42, 1))
+    );
+}
+
+#[test]
 fn zero_diff_completion_tracking_resets_when_real_diff_appears() {
     let tmp = tempfile::tempdir().unwrap();
     let repo = init_git_repo(&tmp, "batty-zero-diff-reset");
@@ -858,7 +878,11 @@ fn zero_diff_completion_recovery_escalates_after_threshold() {
         crate::team::inbox::pending_messages(&crate::team::inbox::inboxes_root(&repo), "manager")
             .unwrap();
     assert_eq!(manager_inbox.len(), 1);
-    assert!(manager_inbox[0].body.contains("zero diff against main"));
+    assert!(
+        manager_inbox[0]
+            .body
+            .contains("without an attributed engineer commit")
+    );
 
     let events = crate::team::events::read_events(
         &repo.join(".batty").join("team_config").join("events.jsonl"),
