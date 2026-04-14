@@ -1032,6 +1032,7 @@ fn preserve_worktree_before_restart_reports_block_when_preserve_fails() {
     )
     .unwrap();
     assert_eq!(task.status, "blocked");
+    assert!(crate::team::checkpoint::read_preserved_lane_record(&repo, "eng-1").is_none());
 }
 
 #[test]
@@ -1086,6 +1087,50 @@ fn report_preserve_failure_deduplicates_identical_alerts() {
     assert_eq!(
         preserve_alerts, 2,
         "expected exactly 2 preserve-failure alerts (detail-a + detail-b); duplicate detail-a should have been suppressed, got {preserve_alerts}",
+    );
+}
+
+#[test]
+fn report_preserve_failure_deduplicates_identical_lane_level_alerts() {
+    let _path_lock = PATH_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = init_git_repo(&tmp, "batty-daemon-preserve-dedup-lane");
+    let team_config_dir = repo.join(".batty").join("team_config");
+    let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
+    crate::team::task_loop::prepare_engineer_assignment_worktree(
+        &repo,
+        &worktree_dir,
+        "eng-1",
+        "eng-1/56",
+        &team_config_dir,
+    )
+    .unwrap();
+
+    let mut daemon = TestDaemonBuilder::new(&repo)
+        .members(vec![
+            manager_member("manager", None),
+            engineer_member("eng-1", Some("manager"), true),
+        ])
+        .build();
+
+    daemon.report_preserve_failure("eng-1", None, "safe-branch recovery", "detail-a");
+    daemon.report_preserve_failure("eng-1", None, "safe-branch recovery", "detail-a");
+    daemon.report_preserve_failure("eng-1", None, "safe-branch recovery", "detail-b");
+
+    let manager_messages =
+        crate::team::inbox::pending_messages(&crate::team::inbox::inboxes_root(&repo), "manager")
+            .unwrap();
+    let preserve_alerts = manager_messages
+        .iter()
+        .filter(|message| {
+            message
+                .body
+                .contains("Batty could not safely auto-save eng-1's dirty worktree before safe-branch recovery")
+        })
+        .count();
+    assert_eq!(
+        preserve_alerts, 2,
+        "expected exactly 2 lane-level preserve-failure alerts (detail-a + detail-b); duplicate detail-a should have been suppressed, got {preserve_alerts}",
     );
 }
 

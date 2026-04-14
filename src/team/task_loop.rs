@@ -376,6 +376,8 @@ pub(crate) fn prepare_engineer_assignment_worktree(
         delete_branch(project_root, &previous_branch)?;
     }
 
+    crate::team::checkpoint::remove_preserved_lane_record(project_root, engineer_name);
+
     Ok(worktree_dir.to_path_buf())
 }
 
@@ -1104,6 +1106,137 @@ pub(crate) fn preserve_worktree_with_commit(
         timeout,
     )?;
     Ok(true)
+}
+
+pub(crate) fn quarantine_completed_lane_for_recovery(
+    project_root: &Path,
+    worktree_dir: &Path,
+    engineer_name: &str,
+    task: &crate::task::Task,
+    current_branch: &str,
+    reason: &str,
+    team_config_dir: &Path,
+    timeout: Duration,
+) -> Result<Option<crate::team::checkpoint::PreservedLaneRecord>> {
+    let base_branch = engineer_base_branch_name(engineer_name);
+    if !worktree_has_user_changes(worktree_dir)? {
+        let reset_reason = crate::worktree::reset_worktree_to_base_with_options(
+            worktree_dir,
+            &base_branch,
+            &format!("wip: preserve completed task #{} before recovery", task.id),
+            timeout,
+            crate::worktree::PreserveFailureMode::SkipReset,
+        )?;
+        if !reset_reason.reset_performed() {
+            bail!(
+                "{}",
+                dirty_worktree_preservation_blocked_reason(
+                    worktree_dir,
+                    "completed-task branch recovery"
+                )
+            );
+        }
+        return Ok(None);
+    }
+
+    let source_head = git_cmd::run_git(worktree_dir, &["rev-parse", "HEAD"])
+        .ok()
+        .map(|output| output.stdout.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let commit_message = format!(
+        "wip: preserve completed task #{} before branch recovery [{}]",
+        task.id, current_branch
+    );
+
+    match preserve_worktree_with_commit(worktree_dir, &commit_message, timeout) {
+        Ok(true) => {
+            let preserved_commit = git_cmd::run_git(worktree_dir, &["rev-parse", "HEAD"])
+                .map_err(|error| anyhow::anyhow!("failed to read preservation commit: {error}"))?
+                .stdout
+                .trim()
+                .to_string();
+            let record = crate::team::checkpoint::PreservedLaneRecord::commit(
+                engineer_name,
+                task,
+                current_branch,
+                &base_branch,
+                reason,
+                source_head,
+                preserved_commit,
+            );
+            crate::team::checkpoint::write_preserved_lane_record(project_root, &record)?;
+
+            let reset_reason = crate::worktree::reset_worktree_to_base_with_options(
+                worktree_dir,
+                &base_branch,
+                &commit_message,
+                timeout,
+                crate::worktree::PreserveFailureMode::SkipReset,
+            )?;
+            if !reset_reason.reset_performed() {
+                bail!(
+                    "{}",
+                    dirty_worktree_preservation_blocked_reason(
+                        worktree_dir,
+                        "completed-task branch recovery"
+                    )
+                );
+            }
+
+            Ok(Some(record))
+        }
+        Ok(false) => Ok(None),
+        Err(commit_error) => {
+            let snapshot_path = crate::team::checkpoint::write_dirty_lane_snapshot(
+                project_root,
+                worktree_dir,
+                engineer_name,
+                task,
+                current_branch,
+                &base_branch,
+                reason,
+                source_head.as_deref(),
+            )
+            .map_err(|snapshot_error| {
+                anyhow::anyhow!(
+                    "failed to preserve completed task #{} dirty lane: commit preservation failed ({commit_error}); snapshot fallback failed ({snapshot_error})",
+                    task.id
+                )
+            })?;
+            let snapshot_relative = snapshot_path
+                .strip_prefix(project_root)
+                .unwrap_or(&snapshot_path)
+                .display()
+                .to_string();
+            let record = crate::team::checkpoint::PreservedLaneRecord::snapshot(
+                engineer_name,
+                task,
+                current_branch,
+                &base_branch,
+                reason,
+                source_head,
+                snapshot_relative.clone(),
+            );
+            crate::team::checkpoint::write_preserved_lane_record(project_root, &record)?;
+
+            map_git_error(
+                retry_git(|| git_cmd::worktree_remove(project_root, worktree_dir, true)),
+                &format!(
+                    "failed to remove preserved completed lane worktree after writing snapshot '{}'",
+                    snapshot_relative
+                ),
+            )?;
+            setup_engineer_worktree(project_root, worktree_dir, &base_branch, team_config_dir)
+                .with_context(|| {
+                    format!(
+                        "failed to recreate clean engineer worktree after saving completed lane snapshot '{}'",
+                        snapshot_relative
+                    )
+                })?;
+
+            Ok(Some(record))
+        }
+    }
 }
 
 pub(crate) fn dirty_worktree_preservation_blocked_reason(
