@@ -2,6 +2,49 @@
 
 All notable changes to Batty are documented here.
 
+## 0.11.10 — 2026-04-15
+
+Quota-retry gating across the four daemon subsystems that misread a
+parked engineer as "not producing output."
+
+### Fixes
+
+- **Backend-health state no longer flaps quota_exhausted→healthy**
+  (#674 defect 1) — when a shim emits `Event::QuotaBlocked` with a
+  `retry_at_epoch_secs` deadline, the daemon now records the deadline
+  in a new `backend_quota_retry_at` map. The periodic
+  `check_backend_health` probe refuses to transition a member out of
+  `QuotaExhausted` while the deadline is in the future, even if
+  `which <agent>` succeeds. A successful poll_shim ping is **not**
+  evidence of quota recovery — only the elapsed deadline or an
+  operator reset (daemon restart / bench) can clear the state.
+  (`src/team/daemon/health/checks.rs`,
+  `src/team/daemon/health/poll_shim.rs`, `src/team/daemon.rs`)
+- **Dispatch selection skips quota-parked engineers** (#674 defect 2)
+  — `rank_dispatch_engineers` now consults `member_backend_parked`
+  before handing a task to an idle engineer. This breaks the
+  15-minute stall-timer rotation cascade that redispatched each
+  reclaimed task to another quota-blocked engineer.
+  (`src/team/dispatch/queue.rs`)
+- **Stall-timer reclaim refuses to reclaim parked engineers** (#674
+  defect 3) — `maybe_manage_task_claim_ttls` short-circuits when the
+  claimed engineer is backend-parked, so tasks stay put until the
+  quota window elapses instead of rotating to the next quota-blocked
+  engineer. (`src/team/daemon/automation.rs`)
+- **Stuck-task escalator honors backend-parked state** (#674 defect
+  4) — `maybe_emit_task_aging_alerts` now skips the
+  `task_stale` / `task_escalated` path (and clears pending aging
+  cooldowns) when the owner is backend-parked. Parked engineers are
+  waiting, not stalled; escalating them during an outage produced
+  recursive stuck-task escalations against the very ticket meant to
+  fix the bug. (`src/team/daemon/automation.rs`)
+- **`member_backend_parked` helper** — a single `TeamDaemon` method
+  returns true whenever either the cached `QuotaExhausted` state or
+  the tracked `retry_at` deadline indicates the member cannot make
+  progress. Callers across the daemon use it to gate any subsystem
+  that interprets "engineer not producing output" as a problem.
+  (`src/team/daemon.rs`)
+
 ## 0.11.9 — 2026-04-15
 
 Daemon-exit classification so the watchdog stops restarting on hard failures.

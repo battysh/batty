@@ -702,6 +702,14 @@ impl TeamDaemon {
                     member_name.to_string(),
                     crate::agent::BackendHealth::QuotaExhausted,
                 );
+                // Record the retry_at deadline so that backend-health transition
+                // checks, dispatch selection, and aging alerts keep the member
+                // parked until the quota window elapses (#674 defect 1).
+                // A successful poll_shim ping is NOT evidence of quota recovery.
+                if let Some(retry_at) = retry_at_epoch_secs {
+                    self.backend_quota_retry_at
+                        .insert(member_name.to_string(), retry_at);
+                }
                 self.record_orchestrator_action(format!(
                     "quota: {member_name} backend blocked until {label} — {message}"
                 ));
@@ -709,10 +717,6 @@ impl TeamDaemon {
                     member_name,
                     &message,
                 ));
-                // retry_at_epoch_secs is reserved for future scheduling;
-                // current logic simply holds the QuotaExhausted status until the
-                // next restart or operator intervention.
-                let _ = retry_at_epoch_secs;
             }
         }
 
