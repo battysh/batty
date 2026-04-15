@@ -71,10 +71,25 @@ pub(crate) fn assign_task_owners(
     let task_path = find_task_path(board_dir, task_id)?;
     update_task_frontmatter(&task_path, |mapping| {
         if let Some(owner) = exec_owner {
-            set_optional_string(mapping, "claimed_by", normalize_optional(owner));
-            if normalize_optional(owner).is_some() {
+            let normalized_owner = normalize_optional(owner);
+            set_optional_string(mapping, "claimed_by", normalized_owner);
+            if normalized_owner.is_some() {
                 let now = Utc::now();
                 set_optional_string(mapping, "claimed_at", Some(&now.to_rfc3339()));
+                set_optional_string(mapping, "last_progress_at", Some(&now.to_rfc3339()));
+                set_optional_u64(mapping, "claim_ttl_secs", None);
+                set_optional_string(mapping, "claim_expires_at", None);
+                set_optional_string(mapping, "claim_warning_sent_at", None);
+                set_optional_u32(mapping, "claim_extensions", None);
+                set_optional_u64(mapping, "last_output_bytes", None);
+            } else {
+                set_optional_string(mapping, "claimed_at", None);
+                set_optional_string(mapping, "last_progress_at", None);
+                set_optional_u64(mapping, "claim_ttl_secs", None);
+                set_optional_string(mapping, "claim_expires_at", None);
+                set_optional_string(mapping, "claim_warning_sent_at", None);
+                set_optional_u32(mapping, "claim_extensions", None);
+                set_optional_u64(mapping, "last_output_bytes", None);
             }
         }
         if let Some(owner) = review_owner {
@@ -786,6 +801,30 @@ mod tests {
         let task = Task::from_file(&task_path).unwrap();
         assert_eq!(task.claimed_by.as_deref(), Some("eng-1-2"));
         assert_eq!(task.review_owner.as_deref(), Some("manager-1"));
+    }
+
+    #[test]
+    fn assign_resets_claim_progress_tracking_for_execution_owner() {
+        let tmp = tempfile::tempdir().unwrap();
+        let board_dir = tmp.path();
+        let task_path = write_task_file(board_dir, 17, "in-progress");
+        std::fs::write(
+            &task_path,
+            "---\nid: 17\ntitle: Task 17\nstatus: in-progress\npriority: high\nclaimed_by: eng-9\nclaimed_at: 2026-04-14T14:00:00Z\nclaim_ttl_secs: 900\nclaim_expires_at: 2026-04-14T14:15:00Z\nlast_progress_at: 2026-04-14T14:00:00Z\nclaim_warning_sent_at: 2026-04-14T14:10:00Z\nclaim_extensions: 2\nlast_output_bytes: 512\nclass: standard\n---\n\nTask body.\n",
+        )
+        .unwrap();
+
+        cmd_assign(board_dir, 17, Some("eng-1-2"), None).unwrap();
+
+        let task = Task::from_file(&task_path).unwrap();
+        assert_eq!(task.claimed_by.as_deref(), Some("eng-1-2"));
+        assert!(task.claimed_at.is_some());
+        assert_eq!(task.claim_ttl_secs, None);
+        assert_eq!(task.claim_expires_at, None);
+        assert!(task.last_progress_at.is_some());
+        assert_eq!(task.claim_warning_sent_at, None);
+        assert_eq!(task.claim_extensions, None);
+        assert_eq!(task.last_output_bytes, None);
     }
 
     #[test]
