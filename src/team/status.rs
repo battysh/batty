@@ -223,6 +223,7 @@ pub(crate) struct WatchdogStatus {
     pub(crate) state: String,
     pub(crate) restart_count: u32,
     pub(crate) current_backoff_secs: Option<u64>,
+    pub(crate) last_exit_category: Option<String>,
     pub(crate) last_exit_reason: Option<String>,
 }
 
@@ -1046,6 +1047,7 @@ pub(crate) fn load_watchdog_status(project_root: &Path, session_running: bool) -
         state,
         restart_count: persisted.restart_count,
         current_backoff_secs: persisted.current_backoff_secs,
+        last_exit_category: persisted.last_exit_category,
         last_exit_reason: persisted.last_exit_reason,
     }
 }
@@ -1057,6 +1059,11 @@ pub(crate) fn format_watchdog_summary(watchdog: &WatchdogStatus) -> String {
     ];
     if let Some(backoff_secs) = watchdog.current_backoff_secs {
         parts.push(format!("backoff={}s", backoff_secs));
+    }
+    if let Some(category) = &watchdog.last_exit_category {
+        if category != crate::team::daemon_mgmt::DAEMON_EXIT_CATEGORY_UNKNOWN {
+            parts.push(category.clone());
+        }
     }
     if let Some(reason) = &watchdog.last_exit_reason {
         parts.push(reason.clone());
@@ -3587,6 +3594,7 @@ mod tests {
                 state: "running".to_string(),
                 restart_count: 2,
                 current_backoff_secs: None,
+                last_exit_category: Some("unknown".to_string()),
                 last_exit_reason: Some("daemon exited with status 101".to_string()),
             },
             workflow_metrics: Some(WorkflowMetrics {
@@ -4059,6 +4067,7 @@ mod tests {
                 state: "restarting".to_string(),
                 restart_count: 1,
                 current_backoff_secs: Some(4),
+                last_exit_category: Some("unknown".to_string()),
                 last_exit_reason: Some("daemon exited with status 101".to_string()),
             },
             workflow_metrics: Some(WorkflowMetrics {
@@ -4238,6 +4247,7 @@ mod tests {
             state: "restarting".to_string(),
             restart_count: 2,
             current_backoff_secs: Some(4),
+            last_exit_category: Some("unknown".to_string()),
             last_exit_reason: Some("daemon exited with status 101".to_string()),
         });
 
@@ -4286,6 +4296,7 @@ mod tests {
                 state: "running".to_string(),
                 restart_count: 0,
                 current_backoff_secs: None,
+                last_exit_category: None,
                 last_exit_reason: None,
             },
             workflow_metrics: None,

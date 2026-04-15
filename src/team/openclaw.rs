@@ -1016,6 +1016,7 @@ mod tests {
                 state: "running".to_string(),
                 restart_count: 0,
                 current_backoff_secs: None,
+                last_exit_category: None,
                 last_exit_reason: None,
             },
             health: status::TeamStatusHealth {

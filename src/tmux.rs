@@ -269,6 +269,15 @@ pub fn session_exists(session: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Check whether a tmux server is currently running.
+pub fn server_running() -> bool {
+    Command::new("tmux")
+        .args(["list-sessions"])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
 /// Check if a specific tmux pane target exists.
 pub fn pane_exists(target: &str) -> bool {
     Command::new("tmux")
