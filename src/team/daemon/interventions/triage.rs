@@ -48,10 +48,7 @@ impl TeamDaemon {
             if !self.is_member_idle(&name) {
                 continue;
             }
-            // Use the same inbox-gating logic as other interventions: any non-low-priority
-            // pending message (including unclassified directives like "Handle this first.")
-            // blocks the triage nudge so the manager can process that message first.
-            if self.member_has_pending_inbox(&inbox_root, &name) {
+            if !self.ready_for_idle_automation(&inbox_root, &name) {
                 continue;
             }
 

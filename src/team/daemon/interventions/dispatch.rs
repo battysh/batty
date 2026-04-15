@@ -71,16 +71,6 @@ impl TeamDaemon {
             }
             let stall_threshold = self.config.team_config.workflow_policy.stall_threshold_secs;
             let supervisory_stalled = self.is_supervisory_lane_stalled(&name, stall_threshold);
-            if !self.is_member_idle(&name) && !supervisory_stalled {
-                continue;
-            }
-            if supervisory_stalled {
-                let reason = self.supervisory_progress_signal(&name, stall_threshold);
-                self.record_supervisory_stall_reason(&name, stall_threshold, reason);
-            }
-            if !supervisory_stalled && !self.ready_for_idle_automation(&inbox_root, &name) {
-                continue;
-            }
 
             let Some(reports) = direct_reports.get(&name) else {
                 continue;
@@ -109,12 +99,13 @@ impl TeamDaemon {
             if review_count > 0 {
                 continue;
             }
+            let manager_idle = self.member_idle_for_dispatch_gap(&name);
 
             let report_snapshots: Vec<ReportDispatchSnapshot> = reports
                 .iter()
                 .map(|report| ReportDispatchSnapshot {
                     name: report.clone(),
-                    is_working: !self.is_member_idle(report),
+                    is_working: !self.member_idle_for_dispatch_gap(report),
                     active_task_ids: tasks
                         .iter()
                         .filter(|task| task.claimed_by.as_deref() == Some(report.as_str()))
@@ -151,15 +142,46 @@ impl TeamDaemon {
                 continue;
             }
 
-            if supervisory_stalled
+            let dispatch_gap_stall_reason = self.manager_dispatch_gap_stall_reason(
+                &name,
+                stall_threshold,
+                manager_idle,
+                &idle_unassigned_reports,
+                &unassigned_open_tasks,
+            );
+            let dispatch_gap_stalled = supervisory_stalled || dispatch_gap_stall_reason.is_some();
+            if supervisory_stalled {
+                let reason = self.supervisory_progress_signal(&name, stall_threshold);
+                self.record_supervisory_stall_reason(&name, stall_threshold, reason);
+            } else if let Some((reason_suffix, short_label)) = dispatch_gap_stall_reason {
+                self.record_manager_dispatch_gap_stall(
+                    &name,
+                    stall_threshold,
+                    reason_suffix,
+                    short_label,
+                );
+            }
+            if !dispatch_gap_stalled && !manager_idle {
+                continue;
+            }
+            if !dispatch_gap_stalled && !self.ready_for_idle_automation(&inbox_root, &name) {
+                continue;
+            }
+
+            if dispatch_gap_stalled
                 && !idle_unassigned_reports.is_empty()
                 && !unassigned_open_tasks.is_empty()
             {
-                let reason = format!(
-                    "manager_{}",
-                    self.supervisory_progress_signal(&name, stall_threshold)
-                        .stall_reason()
-                );
+                let reason = if supervisory_stalled {
+                    format!(
+                        "manager_{}",
+                        self.supervisory_progress_signal(&name, stall_threshold)
+                            .stall_reason()
+                    )
+                } else {
+                    let (reason_suffix, _) = dispatch_gap_stall_reason.unwrap();
+                    format!("manager_supervisory_{reason_suffix}")
+                };
                 let fallback_count = self.fallback_direct_dispatch(
                     &name,
                     &reason,
@@ -239,6 +261,100 @@ impl TeamDaemon {
         }
 
         Ok(())
+    }
+
+    fn manager_dispatch_gap_stall_reason(
+        &self,
+        member_name: &str,
+        threshold_secs: u64,
+        member_idle: bool,
+        idle_unassigned_reports: &[&ReportDispatchSnapshot],
+        unassigned_open_tasks: &[&crate::task::Task],
+    ) -> Option<(&'static str, &'static str)> {
+        if threshold_secs == 0
+            || member_idle
+            || idle_unassigned_reports.is_empty()
+            || unassigned_open_tasks.is_empty()
+        {
+            return None;
+        }
+
+        let handle = self.shim_handles.get(member_name)?;
+        if handle.state != crate::shim::protocol::ShimState::Working
+            || handle.secs_since_state_change() < threshold_secs
+        {
+            return None;
+        }
+
+        if handle
+            .secs_since_last_activity()
+            .is_some_and(|secs| secs < threshold_secs)
+        {
+            return Some(("shim_activity_only", "shim activity only"));
+        }
+
+        if self
+            .watchers
+            .get(member_name)
+            .is_some_and(|watcher| watcher.secs_since_last_output_change() < threshold_secs)
+        {
+            return Some(("status_only_output", "status-only output"));
+        }
+
+        Some(("no_actionable_progress", "no actionable progress"))
+    }
+
+    fn member_idle_for_dispatch_gap(&self, member_name: &str) -> bool {
+        self.shim_handles
+            .get(member_name)
+            .map(|handle| handle.state != crate::shim::protocol::ShimState::Working)
+            .unwrap_or_else(|| self.is_member_idle(member_name))
+    }
+
+    fn record_manager_dispatch_gap_stall(
+        &mut self,
+        member_name: &str,
+        stall_secs: u64,
+        reason_suffix: &str,
+        short_label: &str,
+    ) {
+        let cooldown_key = format!("supervisory-stall::{member_name}");
+        let cooldown = std::time::Duration::from_secs(
+            self.config
+                .team_config
+                .automation
+                .intervention_cooldown_secs,
+        );
+        if self
+            .intervention_cooldowns
+            .get(&cooldown_key)
+            .is_some_and(|last| last.elapsed() < cooldown)
+        {
+            return;
+        }
+
+        let observed_stall_secs = self
+            .shim_handles
+            .get(member_name)
+            .map(|handle| handle.secs_since_state_change())
+            .unwrap_or(stall_secs);
+        let mut event = TeamEvent::stall_detected_with_reason(
+            member_name,
+            None,
+            observed_stall_secs,
+            Some(&format!("supervisory_stalled_manager_{reason_suffix}")),
+        );
+        event.task = Some(format!("supervisory::{member_name}"));
+        event.details = Some(format!(
+            "{member_name} (manager) stalled after {}: {short_label}",
+            crate::team::status::format_health_duration(observed_stall_secs),
+        ));
+        self.emit_event(event);
+        self.record_orchestrator_action(format!(
+            "stall: detected {member_name} manager dispatch gap ({short_label})"
+        ));
+        self.intervention_cooldowns
+            .insert(cooldown_key, Instant::now());
     }
 
     fn fallback_direct_dispatch(
