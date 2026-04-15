@@ -2,6 +2,46 @@
 
 All notable changes to Batty are documented here.
 
+## 0.11.7 — 2026-04-15
+
+Shim quota handling, CI stability, and dispatch-pipeline polish.
+
+### Fixes
+
+- **Codex shim no longer tight-loops on `usage limit` errors** — the
+  Codex shim now parses `"try again at ..."` timestamps, records a
+  `quota_blocked_until` deadline on `CodexState`, drains queued
+  messages with an error, emits one `Event::QuotaBlocked`, and refuses
+  new sends until the deadline passes. The daemon's `poll_shim` handler
+  marks the backend `QuotaExhausted` and raises a single orchestrator
+  action instead of respawning the `codex exec` process every second.
+  (`src/shim/protocol.rs`, `src/shim/runtime_codex.rs`,
+  `src/team/daemon/health/poll_shim.rs`)
+- **Main-smoke summaries survive `CARGO_TERM_COLOR=always`** — cargo's
+  ANSI escapes no longer slip past the summary filter in CI, which was
+  reporting "`    Checking ...`" as the failure line on Ubuntu runners.
+  (`src/team/daemon.rs`)
+- **Preflight tests share the PATH mutex with the rest of the suite** —
+  `health::test_helpers::PATH_LOCK` is now a re-export of the one in
+  `team::test_support`, fixing intermittent
+  `startup_preflight_accepts_available_agent_binaries` failures when
+  other suites mutated `PATH` in parallel.
+  (`src/team/daemon/health/mod.rs`)
+- **Clippy `-D warnings` gate passes again** — two crate-internal
+  helpers with 8 arguments now carry `#[allow(clippy::too_many_arguments)]`
+  and a pair of duplicate supervisory-pressure branches are collapsed.
+  (`src/team/checkpoint.rs`, `src/team/task_loop.rs`,
+  `src/team/supervisory_notice.rs`)
+- **`cargo fmt` and `mdformat` gates green** — a stray blank line in
+  `src/team/delivery/mod.rs` doc comments and list-indentation drift in
+  `docs/orchestrator.md` have been cleaned up.
+
+### Dispatch & review pipeline
+
+Numerous dispatch, stall detection, auto-merge, and worktree-hygiene
+refinements landed in parallel with the fixes above; see the commit log
+between `v0.11.6..v0.11.7` for the full list.
+
 ## 0.11.6 — 2026-04-14
 
 Dispatch stability fixes.
