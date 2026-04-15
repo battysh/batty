@@ -18,7 +18,8 @@ use super::inbox;
 use super::review::ReviewQueueState;
 use super::standup::MemberState;
 use super::supervisory_notice::{
-    SupervisoryMemberActivity, SupervisoryPressureSnapshot, supervisory_pressure_snapshots,
+    SupervisoryMemberActivity, SupervisoryPressure, SupervisoryPressureSnapshot,
+    classify_supervisory_pressure_normalized, normalized_body, supervisory_pressure_snapshots,
 };
 use super::{
     TRIAGE_RESULT_FRESHNESS_SECONDS, daemon_state_path, now_unix, pause_marker_path,
@@ -1379,8 +1380,28 @@ pub(crate) fn pending_inbox_counts(
         .iter()
         .filter_map(|member| {
             let count = if matches!(member.role_type, RoleType::Architect | RoleType::Manager) {
+                // For supervisors, exclude low-priority status rollups from the inbox
+                // count (they would otherwise inflate the number and mask real pending
+                // work). Unclassified messages such as direct requests from humans are
+                // always counted; only the specific low-signal categories are dropped.
                 match inbox::pending_messages(&root, &member.name) {
-                    Ok(messages) => crate::team::delivery::actionable_supervisory_notice_count(&messages),
+                    Ok(messages) => messages
+                        .iter()
+                        .filter(|msg| {
+                            !matches!(
+                                classify_supervisory_pressure_normalized(&normalized_body(
+                                    &msg.body
+                                )),
+                                Some(
+                                    SupervisoryPressure::StatusUpdate
+                                        | SupervisoryPressure::ResolvedUpdate
+                                        | SupervisoryPressure::RecoveryUpdate
+                                        | SupervisoryPressure::IdleNudge
+                                        | SupervisoryPressure::ReviewNudge
+                                )
+                            )
+                        })
+                        .count(),
                     Err(error) => {
                         warn!(member = %member.name, error = %error, "failed to read pending inbox messages");
                         return None;

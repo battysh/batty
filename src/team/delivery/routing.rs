@@ -199,6 +199,7 @@ fn should_batch_manager_notice(class: ManagerNoticeClass) -> bool {
     )
 }
 
+#[allow(dead_code)]
 pub(in crate::team) fn actionable_supervisory_notice_count(
     messages: &[inbox::InboxMessage],
 ) -> usize {
@@ -2014,7 +2015,10 @@ mod tests {
             crate::shim::protocol::Command::SendMessage { body, .. } => {
                 assert!(body.contains("[manager-digest]"));
                 assert!(body.contains("review [architect]"));
-                assert!(body.contains("dispatch [architect]"));
+                // "Dispatch recovery needed: idle reports still have active work" is
+                // now classified as IdleActiveRecovery (not DispatchGap), so the
+                // digest entry label is "utilization" rather than "dispatch".
+                assert!(body.contains("utilization [architect]"));
                 assert!(body.contains("Review backlog detected"));
                 assert!(body.contains("Dispatch recovery needed"));
             }

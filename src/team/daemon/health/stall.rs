@@ -37,6 +37,10 @@ impl SupervisoryLane {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in super::super) enum SupervisoryProgress {
+    // Retained for future use: pressure types that represent supervisory work
+    // which IS actionable but doesn't block stall detection (e.g. a new pressure
+    // type that requires immediate attention but not via the dispatch-gap path).
+    #[allow(dead_code)]
     Actionable(SupervisoryPressure),
     Expected(&'static str),
     Incidental(&'static str),
@@ -156,7 +160,24 @@ impl TeamDaemon {
             .get(member_name)
             .and_then(|snapshot| snapshot.top_actionable())
         {
-            return Some(SupervisoryProgress::Actionable(pressure));
+            // ReviewBacklog and TriageBacklog are expected supervisory work — the
+            // manager is actively waiting on reviews or processing direct-report
+            // packets. They should suppress stall detection without triggering the
+            // fallback-dispatch path.
+            //
+            // DispatchGap and IdleActiveRecovery are NOT returned here; they fall
+            // through to the shim/watcher activity check so that shim-chatter-only
+            // managers are still detected as stalled and the dispatch-gap
+            // intervention can fire.
+            match pressure {
+                SupervisoryPressure::ReviewBacklog => {
+                    return Some(SupervisoryProgress::Expected("review_waiting"));
+                }
+                SupervisoryPressure::TriageBacklog => {
+                    return Some(SupervisoryProgress::Expected("inbox_batching"));
+                }
+                _ => {}
+            }
         }
 
         if supervisory_pending_pressure(&inbox_root, member_name)

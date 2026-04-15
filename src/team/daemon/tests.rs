@@ -2233,11 +2233,14 @@ fn supervisory_manager_stall_detection_skips_fresh_triage_backlog() {
     let id = inbox::deliver_to_inbox(&root, &report).unwrap();
     inbox::mark_delivered(&root, "lead", &id).unwrap();
 
+    // TriageBacklog pressure now maps to Expected("inbox_batching") rather than
+    // Actionable(TriageBacklog), preserving the original intent: a manager with
+    // a direct-report triage backlog is doing expected supervisory work, not stalled.
     assert_eq!(
         daemon
             .supervisory_progress_signal("lead", threshold)
             .short_label(),
-        "direct-report packets"
+        "inbox batching"
     );
     assert!(!daemon.is_supervisory_lane_stalled("lead", threshold));
 }
@@ -2293,11 +2296,14 @@ fn supervisory_manager_stall_detection_skips_review_waiting() {
     insert_working_shim_handle(&mut daemon, "lead", threshold + 10, threshold + 10);
     write_owned_task_file(tmp.path(), 191, "review-task", "review", "eng-1");
 
+    // ReviewBacklog pressure now maps to Expected("review_waiting") rather than
+    // Actionable(ReviewBacklog), preserving the original intent: a manager with
+    // review tasks pending is doing expected supervisory work, not stalled.
     assert_eq!(
         daemon
             .supervisory_progress_signal("lead", threshold)
             .short_label(),
-        "review backlog"
+        "review waiting"
     );
     assert!(!daemon.is_supervisory_lane_stalled("lead", threshold));
 }
@@ -2324,13 +2330,18 @@ fn supervisory_manager_stall_detection_prioritizes_idle_active_lanes() {
     insert_working_shim_handle(&mut daemon, "lead", threshold + 10, threshold + 10);
     write_owned_task_file(tmp.path(), 191, "active-task", "in-progress", "eng-1");
 
+    // IdleActiveRecovery pressure no longer short-circuits the stall path:
+    // it falls through to the shim/event check. With stale shim activity
+    // (threshold+10 seconds ago) the signal is None, which IS a stall.
+    // This restores the original behaviour where the dispatch-gap intervention
+    // can fire for a Working manager whose engineers are idle.
     assert_eq!(
         daemon
             .supervisory_progress_signal("lead", threshold)
             .short_label(),
-        "idle active lanes"
+        "no actionable progress"
     );
-    assert!(!daemon.is_supervisory_lane_stalled("lead", threshold));
+    assert!(daemon.is_supervisory_lane_stalled("lead", threshold));
 }
 
 #[test]
