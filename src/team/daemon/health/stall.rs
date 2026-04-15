@@ -866,7 +866,7 @@ mod tests {
         inbox::mark_delivered(&inbox_root, "lead", &id).unwrap();
 
         let signal = daemon.supervisory_progress_signal("lead", threshold);
-        assert_eq!(signal.short_label(), "direct-report packets");
+        assert_eq!(signal.short_label(), "inbox batching");
         assert!(!daemon.is_supervisory_lane_stalled("lead", threshold));
     }
 
@@ -889,7 +889,7 @@ mod tests {
         write_owned_task_file(tmp.path(), 191, "review-task", "review", "eng-1");
 
         let signal = daemon.supervisory_progress_signal("lead", threshold);
-        assert_eq!(signal.short_label(), "review backlog");
+        assert_eq!(signal.short_label(), "review waiting");
         assert!(!daemon.is_supervisory_lane_stalled("lead", threshold));
     }
 
