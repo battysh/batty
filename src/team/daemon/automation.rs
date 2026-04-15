@@ -161,6 +161,24 @@ fn owned_task_priority_rank(priority: &str) -> u32 {
     }
 }
 
+fn owned_task_collision_rank(task: &crate::task::Task) -> (u32, bool, Option<DateTime<Utc>>, u32) {
+    (
+        owned_task_priority_rank(&task.priority),
+        task.claimed_at.is_none(),
+        task.claimed_at.as_deref().and_then(parse_rfc3339_utc),
+        task.id,
+    )
+}
+
+fn select_authoritative_multi_claim_task<'a>(
+    claimed_tasks: &[&'a crate::task::Task],
+) -> Option<&'a crate::task::Task> {
+    claimed_tasks
+        .iter()
+        .copied()
+        .min_by_key(|task| owned_task_collision_rank(task))
+}
+
 fn select_authoritative_owned_task<'a>(
     current_task_id: Option<u32>,
     current_branch: Option<&str>,
@@ -191,6 +209,8 @@ fn select_authoritative_owned_task<'a>(
         (
             owned_task_status_rank(task.status.as_str()),
             owned_task_priority_rank(&task.priority),
+            task.claimed_at.is_none(),
+            task.claimed_at.as_deref().and_then(parse_rfc3339_utc),
             task.id,
         )
     })
@@ -913,12 +933,19 @@ impl TeamDaemon {
             .map(|m| m.name.clone())
             .collect();
         for eng in &engineer_names {
-            self.normalize_engineer_active_task_ownership(
+            let released_excess_claims = self.normalize_engineer_active_task_ownership(
                 &board_tasks,
                 &board_dir,
                 eng,
                 audit_due,
             )?;
+            if released_excess_claims {
+                board_tasks = if tasks_dir.exists() {
+                    crate::task::load_tasks_from_dir(&tasks_dir)?
+                } else {
+                    Vec::new()
+                };
+            }
         }
 
         // Skip tasks that are currently tracked in active_tasks — those were just
@@ -984,7 +1011,7 @@ impl TeamDaemon {
         board_dir: &std::path::Path,
         engineer: &str,
         audit_due: bool,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let claimed: Vec<&crate::task::Task> = board_tasks
             .iter()
             .filter(|task| {
@@ -994,7 +1021,7 @@ impl TeamDaemon {
             .collect();
 
         if claimed.is_empty() {
-            return Ok(());
+            return Ok(false);
         }
 
         let worktree_dir = self.worktree_dir(engineer);
@@ -1033,7 +1060,11 @@ impl TeamDaemon {
             .map(|task| task.id)
             .collect();
 
-        let authoritative_id = if let [task_id] = branch_matches.as_slice() {
+        let authoritative_id = if claimed.len() > 1 {
+            select_authoritative_multi_claim_task(&claimed)
+                .map(|task| task.id)
+                .expect("claimed tasks is not empty")
+        } else if let [task_id] = branch_matches.as_slice() {
             *task_id
         } else if let [task_id] = worktree_matches.as_slice() {
             *task_id
@@ -1062,6 +1093,7 @@ impl TeamDaemon {
             ));
         }
 
+        let mut released_excess_claims = false;
         if claimed.len() > 1 {
             for task in claimed
                 .iter()
@@ -1081,6 +1113,7 @@ impl TeamDaemon {
                         "Reclaimed during reconciliation while {engineer} retained authoritative task #{authoritative_id}."
                     ),
                 )?;
+                released_excess_claims = true;
                 self.record_state_reconciliation(Some(engineer), Some(task.id), "repair");
                 self.record_orchestrator_action(format!(
                     "state reconciliation: released excess claimed task #{} from {} (keeping #{})",
@@ -1098,7 +1131,7 @@ impl TeamDaemon {
             self.maybe_align_engineer_worktree_with_task(engineer, task)?;
         }
 
-        Ok(())
+        Ok(released_excess_claims)
     }
 
     fn maybe_align_engineer_worktree_with_task(
@@ -2611,7 +2644,10 @@ impl TeamDaemon {
 #[cfg(test)]
 mod tests {
     use super::super::*;
-    use super::{ClaimedTaskBranchMismatch, active_stale_review_entries};
+    use super::{
+        ClaimedTaskBranchMismatch, active_stale_review_entries,
+        select_authoritative_multi_claim_task,
+    };
     use crate::team::config::RoleType;
     use crate::team::config::{BoardConfig, WorkflowMode, WorkflowPolicy};
     use crate::team::events::TeamEvent;
@@ -3869,7 +3905,43 @@ thread 'tmux::tests::split_window_horizontal_creates_new_pane' panicked at src/t
     }
 
     #[test]
-    fn reconcile_active_tasks_repairs_multiple_claimed_tasks_for_one_engineer() {
+    fn select_authoritative_multi_claim_task_prefers_priority_then_claim_age() {
+        let mut older_high = test_task(10, "in-progress", Some("eng-1"), None);
+        older_high.priority = "high".to_string();
+        older_high.claimed_at = Some("2026-04-14T21:06:20Z".to_string());
+
+        let mut newer_critical = test_task(20, "in-progress", Some("eng-1"), None);
+        newer_critical.priority = "critical".to_string();
+        newer_critical.claimed_at = Some("2026-04-14T21:06:30Z".to_string());
+
+        assert_eq!(
+            select_authoritative_multi_claim_task(&[&older_high, &newer_critical])
+                .map(|task| task.id),
+            Some(20),
+            "higher priority must win even when claimed later"
+        );
+
+        let mut older_critical = test_task(30, "in-progress", Some("eng-1"), None);
+        older_critical.priority = "critical".to_string();
+        older_critical.claimed_at = Some("2026-04-14T21:06:10Z".to_string());
+
+        let mut newer_critical_same_priority = test_task(40, "in-progress", Some("eng-1"), None);
+        newer_critical_same_priority.priority = "critical".to_string();
+        newer_critical_same_priority.claimed_at = Some("2026-04-14T21:06:40Z".to_string());
+
+        assert_eq!(
+            select_authoritative_multi_claim_task(&[
+                &older_critical,
+                &newer_critical_same_priority
+            ])
+            .map(|task| task.id),
+            Some(30),
+            "oldest claim must win when priorities tie"
+        );
+    }
+
+    #[test]
+    fn reconcile_active_tasks_repairs_multiple_claimed_tasks_for_one_engineer_in_one_pass() {
         let tmp = tempfile::tempdir().unwrap();
         let engineer = MemberInstance {
             name: "eng-1".to_string(),
@@ -3892,7 +3964,6 @@ thread 'tmux::tests::split_window_horizontal_creates_new_pane' panicked at src/t
             ..Default::default()
         };
         let mut daemon = make_test_daemon(tmp.path(), vec![manager, engineer]);
-        daemon.active_tasks.insert("eng-1".to_string(), 10);
 
         write_board_task_file(
             tmp.path(),
@@ -3912,6 +3983,24 @@ thread 'tmux::tests::split_window_horizontal_creates_new_pane' panicked at src/t
             &[],
             None,
         );
+
+        let older_task_path = board_task_path(tmp.path(), 10);
+        update_task_frontmatter(&older_task_path, |mapping| {
+            mapping.insert(
+                yaml_key("claimed_at"),
+                serde_yaml::Value::String("2026-04-14T21:06:10Z".to_string()),
+            );
+        })
+        .unwrap();
+
+        let newer_task_path = board_task_path(tmp.path(), 20);
+        update_task_frontmatter(&newer_task_path, |mapping| {
+            mapping.insert(
+                yaml_key("claimed_at"),
+                serde_yaml::Value::String("2026-04-14T21:06:40Z".to_string()),
+            );
+        })
+        .unwrap();
 
         daemon.reconcile_active_tasks().unwrap();
 
@@ -3935,6 +4024,42 @@ thread 'tmux::tests::split_window_horizontal_creates_new_pane' panicked at src/t
         let normalized = tasks.iter().find(|task| task.id == 20).unwrap();
         assert_eq!(normalized.status, "todo");
         assert!(normalized.claimed_by.is_none());
+
+        let events_path = tmp
+            .path()
+            .join(".batty")
+            .join("team_config")
+            .join("events.jsonl");
+        let first_pass_events = crate::team::events::read_events(&events_path).unwrap();
+        let first_pass_repairs = first_pass_events
+            .iter()
+            .filter(|event| {
+                event.event == "state_reconciliation"
+                    && event.role.as_deref() == Some("eng-1")
+                    && event.reason.as_deref() == Some("repair")
+            })
+            .count();
+        assert_eq!(
+            first_pass_repairs, 2,
+            "first pass should emit one authoritative-task repair and one excess-claim release"
+        );
+
+        daemon.reconcile_active_tasks().unwrap();
+
+        let second_pass_events = crate::team::events::read_events(&events_path).unwrap();
+        let second_pass_repairs = second_pass_events
+            .iter()
+            .filter(|event| {
+                event.event == "state_reconciliation"
+                    && event.role.as_deref() == Some("eng-1")
+                    && event.reason.as_deref() == Some("repair")
+            })
+            .count();
+        assert_eq!(
+            second_pass_repairs, first_pass_repairs,
+            "stable winner selection must converge without extra repair events on the next pass"
+        );
+        assert_eq!(daemon.active_task_id("eng-1"), Some(10));
     }
 
     #[test]
