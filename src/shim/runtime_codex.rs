@@ -18,6 +18,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
+use chrono::TimeZone;
+use regex::Regex;
 
 use super::codex_types::{self, CodexEvent};
 use super::common::{
@@ -59,6 +61,8 @@ struct CodexState {
     cwd: std::path::PathBuf,
     /// Whether a ContextApproaching event has already been emitted this session.
     context_approaching_emitted: bool,
+    /// When the backend quota block expires, if known.
+    quota_blocked_until: Option<u64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -86,6 +90,7 @@ pub fn run_codex_sdk(args: ShimArgs, channel: Channel) -> Result<()> {
         program: "codex".to_string(),
         cwd: args.cwd.clone(),
         context_approaching_emitted: false,
+        quota_blocked_until: None,
     }));
 
     // PTY log writer (optional — writes readable text for tmux display)
@@ -157,6 +162,22 @@ pub fn run_codex_sdk(args: ShimArgs, channel: Channel) -> Result<()> {
             } => {
                 let delivery_id = message_id.clone();
                 let mut st = state_cmd.lock().unwrap();
+                if let Some(until) = st.quota_blocked_until {
+                    let now = current_unix_secs();
+                    if until > now {
+                        let retry_at_label = format_quota_retry_label(until);
+                        drop(st);
+                        cmd_channel.send(&Event::QuotaBlocked {
+                            message: format!(
+                                "backend quota is blocked until {retry_at_label}; message not sent"
+                            ),
+                            retry_at_epoch_secs: Some(until),
+                            retry_at_label: Some(retry_at_label),
+                        })?;
+                        continue;
+                    }
+                    st.quota_blocked_until = None;
+                }
                 match st.state {
                     ShimState::Idle => {
                         st.pending_message_id = message_id;
@@ -513,6 +534,27 @@ fn run_codex_exec(
                     }
                     return;
                 }
+
+                if let Some(quota_block) = detect_quota_block(&error_msg) {
+                    let mut st = state.lock().unwrap();
+                    st.pending_message_id = None;
+                    st.state = ShimState::Idle;
+                    st.state_changed_at = Instant::now();
+                    st.quota_blocked_until = quota_block.retry_at_epoch_secs;
+                    let drain = drain_queue_errors(&mut st.message_queue, ShimState::Idle);
+                    drop(st);
+
+                    let _ = evt_channel.send(&Event::QuotaBlocked {
+                        message: error_msg.clone(),
+                        retry_at_epoch_secs: quota_block.retry_at_epoch_secs,
+                        retry_at_label: quota_block.retry_at_label.clone(),
+                    });
+                    for event in drain {
+                        let _ = evt_channel.send(&event);
+                    }
+                    let _ = child.wait();
+                    return;
+                }
             }
 
             "error" => {
@@ -532,10 +574,26 @@ fn run_codex_exec(
                     || lower.contains("purchase more credits")
                 {
                     eprintln!("[shim-codex {shim_id}] QUOTA EXHAUSTED: {error_msg}");
-                    let _ = evt_channel.send(&Event::Error {
-                        command: "QuotaExhausted".into(),
-                        reason: error_msg.clone(),
-                    });
+                    if let Some(quota_block) = detect_quota_block(&error_msg) {
+                        let mut st = state.lock().unwrap();
+                        st.pending_message_id = None;
+                        st.state = ShimState::Idle;
+                        st.state_changed_at = Instant::now();
+                        st.quota_blocked_until = quota_block.retry_at_epoch_secs;
+                        let drain = drain_queue_errors(&mut st.message_queue, ShimState::Idle);
+                        drop(st);
+
+                        let _ = evt_channel.send(&Event::QuotaBlocked {
+                            message: error_msg.clone(),
+                            retry_at_epoch_secs: quota_block.retry_at_epoch_secs,
+                            retry_at_label: quota_block.retry_at_label.clone(),
+                        });
+                        for event in drain {
+                            let _ = evt_channel.send(&event);
+                        }
+                        let _ = child.wait();
+                        return;
+                    }
                 }
             }
 
@@ -645,6 +703,64 @@ fn terminate_child(child: &mut Child) {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct QuotaBlock {
+    retry_at_epoch_secs: Option<u64>,
+    retry_at_label: Option<String>,
+}
+
+fn detect_quota_block(message: &str) -> Option<QuotaBlock> {
+    let lower = message.to_ascii_lowercase();
+    let quota_hit = lower.contains("usage limit")
+        || lower.contains("purchase more credits")
+        || (lower.contains("quota") && lower.contains("try again"));
+    if !quota_hit {
+        return None;
+    }
+
+    let retry_at_epoch_secs = message
+        .split_once("try again at")
+        .and_then(|(_, tail)| parse_quota_retry_at(tail.trim()));
+    let retry_at_label = retry_at_epoch_secs.map(format_quota_retry_label);
+    Some(QuotaBlock {
+        retry_at_epoch_secs,
+        retry_at_label,
+    })
+}
+
+fn parse_quota_retry_at(value: &str) -> Option<u64> {
+    let ordinal_suffixes = Regex::new(r"(?i)\b(\d{1,2})(st|nd|rd|th)\b").ok()?;
+    let normalized = ordinal_suffixes
+        .replace_all(value.trim().trim_end_matches('.'), "$1")
+        .to_string();
+    let naive = chrono::NaiveDateTime::parse_from_str(&normalized, "%b %e, %Y %I:%M %p")
+        .or_else(|_| chrono::NaiveDateTime::parse_from_str(&normalized, "%B %e, %Y %I:%M %p"))
+        .ok()?;
+    let local = chrono::Local
+        .from_local_datetime(&naive)
+        .single()
+        .or_else(|| chrono::Local.from_local_datetime(&naive).earliest())
+        .or_else(|| chrono::Local.from_local_datetime(&naive).latest())?;
+    Some(local.timestamp().max(0) as u64)
+}
+
+fn format_quota_retry_label(unix_secs: u64) -> String {
+    use std::time::{Duration as StdDuration, UNIX_EPOCH};
+
+    let dt = UNIX_EPOCH + StdDuration::from_secs(unix_secs);
+    let datetime: chrono::DateTime<chrono::Local> = dt.into();
+    datetime.format("%Y-%m-%d %H:%M").to_string()
+}
+
+fn current_unix_secs() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
 /// Extract the last N lines from a string.
 fn last_n_lines_of(text: &str, n: usize) -> String {
     let lines: Vec<&str> = text.lines().collect();
@@ -682,6 +798,7 @@ mod tests {
             program: "codex".into(),
             cwd: std::path::PathBuf::from("/tmp"),
             context_approaching_emitted: false,
+            quota_blocked_until: None,
         };
         assert_eq!(st.state, ShimState::Idle);
         assert!(st.thread_id.is_none());
@@ -696,5 +813,26 @@ mod tests {
         child.send(&Event::Ready).unwrap();
         let event: Event = parent.recv().unwrap().unwrap();
         assert!(matches!(event, Event::Ready));
+    }
+
+    #[test]
+    fn parse_quota_retry_at_handles_codex_usage_limit_timestamp() {
+        let parsed = parse_quota_retry_at("Apr 16th, 2026 12:54 PM.");
+        assert!(parsed.is_some(), "expected retry timestamp to parse");
+    }
+
+    #[test]
+    fn detect_quota_block_extracts_retry_metadata() {
+        let quota = detect_quota_block(
+            "You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at Apr 16th, 2026 12:54 PM.",
+        )
+        .expect("expected quota block");
+        assert!(quota.retry_at_epoch_secs.is_some());
+        assert_eq!(quota.retry_at_label.as_deref(), Some("2026-04-16 12:54"));
+    }
+
+    #[test]
+    fn detect_quota_block_ignores_non_quota_failures() {
+        assert!(detect_quota_block("stream error").is_none());
     }
 }

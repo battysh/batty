@@ -632,6 +632,32 @@ impl TeamDaemon {
                 );
             }
 
+            Event::QuotaBlocked {
+                message,
+                retry_at_epoch_secs,
+                retry_at_label,
+            } => {
+                let retry_suffix = retry_at_label
+                    .as_deref()
+                    .map(|label| format!(" until {label}"))
+                    .unwrap_or_default();
+                let _ = append_shim_event_log(
+                    &self.config.project_root,
+                    member_name,
+                    &format!("<- quota_blocked{retry_suffix}: {message}"),
+                );
+
+                if let Some(handle) = self.shim_handles.get_mut(member_name) {
+                    handle.apply_state_change(ShimState::Idle);
+                    handle.clear_in_flight_message();
+                }
+                self.states
+                    .insert(member_name.to_string(), MemberState::Working);
+                self.update_automation_timers_for_state(member_name, MemberState::Working);
+
+                self.record_quota_block(member_name, &message, retry_at_epoch_secs)?;
+            }
+
             Event::ScreenCapture { .. } | Event::State { .. } => {
                 debug!(member = member_name, event = ?event, "shim event (unhandled in poll)");
             }
@@ -646,22 +672,7 @@ impl TeamDaemon {
                 // Quota exhaustion: mark backend unhealthy and stop dispatching.
                 // Don't restart the agent — it will just hit the same error.
                 if command == "QuotaExhausted" {
-                    warn!(
-                        member = member_name,
-                        reason = reason.as_str(),
-                        "backend quota exhausted — pausing agent"
-                    );
-                    self.backend_health.insert(
-                        member_name.to_string(),
-                        crate::agent::BackendHealth::QuotaExhausted,
-                    );
-                    self.record_orchestrator_action(format!(
-                        "quota: {member_name} backend quota exhausted — {reason}"
-                    ));
-                    self.emit_event(crate::team::events::TeamEvent::backend_quota_exhausted(
-                        member_name,
-                        &reason,
-                    ));
+                    self.record_quota_block(member_name, &reason, None)?;
                     return Ok(());
                 }
 
@@ -681,6 +692,67 @@ impl TeamDaemon {
                 }
                 debug!(member = member_name, command, reason, "shim error");
             }
+        }
+
+        Ok(())
+    }
+
+    fn record_quota_block(
+        &mut self,
+        member_name: &str,
+        reason: &str,
+        retry_at_epoch_secs: Option<u64>,
+    ) -> Result<()> {
+        let block = crate::team::daemon::QuotaBlock {
+            until_ts: retry_at_epoch_secs,
+            reason: reason.to_string(),
+        };
+        let already_blocked = self.quota_blocks.get(member_name) == Some(&block);
+        self.quota_blocks.insert(member_name.to_string(), block);
+        self.backend_health
+            .insert(member_name.to_string(), crate::agent::BackendHealth::QuotaExhausted);
+
+        let status = self
+            .quota_block_label(member_name)
+            .unwrap_or_else(|| "quota-blocked".to_string());
+        warn!(
+            member = member_name,
+            retry_at_epoch_secs,
+            reason,
+            "{status} — pausing agent"
+        );
+        self.record_orchestrator_action(format!("quota: {member_name} {status} — {reason}"));
+        self.emit_event(crate::team::events::TeamEvent::backend_quota_exhausted(
+            member_name,
+            &format!("{status}: {reason}"),
+        ));
+
+        if already_blocked {
+            return Ok(());
+        }
+
+        let dedup_key = format!(
+            "quota-block:{member_name}:{}",
+            retry_at_epoch_secs
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "manual".to_string())
+        );
+        if self.suppress_recent_escalation(dedup_key, Duration::from_secs(3600)) {
+            return Ok(());
+        }
+
+        let escalation = format!(
+            "{member_name} is {status}. Backend reported: {reason}. Pause recovery/restart attempts until the quota window clears."
+        );
+        let manager_name = self.manager_name(member_name);
+        if let Some(manager_name) = manager_name.as_deref() {
+            let _ = self.queue_daemon_message(manager_name, &escalation);
+        }
+        for architect_name in self.architect_names() {
+            if Some(architect_name.as_str()) == manager_name.as_deref() {
+                continue;
+            }
+            let _ = self.queue_daemon_message(&architect_name, &escalation);
         }
 
         Ok(())

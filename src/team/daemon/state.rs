@@ -11,6 +11,7 @@ use tracing::warn;
 
 use super::dispatch::DispatchQueueEntry;
 use super::{TeamDaemon, now_unix, standup};
+use super::QuotaBlock;
 use crate::team::standup::MemberState;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -27,6 +28,8 @@ pub(super) struct PersistedDaemonState {
     pub states: HashMap<String, MemberState>,
     pub active_tasks: HashMap<String, u32>,
     pub retry_counts: HashMap<String, u32>,
+    #[serde(default)]
+    pub quota_blocks: HashMap<String, QuotaBlock>,
     #[serde(default)]
     pub discord_event_cursor: usize,
     #[serde(default)]
@@ -57,6 +60,7 @@ impl TeamDaemon {
             .collect();
         self.active_tasks = state.active_tasks;
         self.retry_counts = state.retry_counts;
+        self.quota_blocks = state.quota_blocks;
         self.discord_event_cursor = state.discord_event_cursor;
         self.dispatch_queue = state.dispatch_queue;
         self.paused_standups = state.paused_standups;
@@ -91,6 +95,7 @@ impl TeamDaemon {
             states: self.states.clone(),
             active_tasks: self.active_tasks.clone(),
             retry_counts: self.retry_counts.clone(),
+            quota_blocks: self.quota_blocks.clone(),
             discord_event_cursor: self.discord_event_cursor,
             dispatch_queue: self.dispatch_queue.clone(),
             paused_standups: self.paused_standups.clone(),
