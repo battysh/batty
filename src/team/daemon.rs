@@ -1321,9 +1321,29 @@ impl TeamDaemon {
     }
 
     fn summarize_smoke_output(output: &str) -> String {
+        // Cargo emits ANSI color codes when CARGO_TERM_COLOR=always (set by CI),
+        // which would bypass the starts_with checks below. Strip them first.
+        fn strip_ansi(s: &str) -> String {
+            let mut out = String::with_capacity(s.len());
+            let mut chars = s.chars().peekable();
+            while let Some(c) = chars.next() {
+                if c == '\u{1b}' && chars.peek() == Some(&'[') {
+                    chars.next();
+                    for esc in chars.by_ref() {
+                        if esc.is_ascii_alphabetic() {
+                            break;
+                        }
+                    }
+                } else {
+                    out.push(c);
+                }
+            }
+            out
+        }
+
         let summary = output
             .lines()
-            .map(str::trim)
+            .map(|line| strip_ansi(line).trim().to_string())
             .find(|line| {
                 !line.is_empty()
                     && !line.starts_with("Compiling ")
@@ -1332,7 +1352,7 @@ impl TeamDaemon {
                     && !line.starts_with("Finished ")
                     && !line.starts_with("Running ")
             })
-            .unwrap_or("main smoke command failed");
+            .unwrap_or_else(|| "main smoke command failed".to_string());
         summary.chars().take(240).collect()
     }
 
