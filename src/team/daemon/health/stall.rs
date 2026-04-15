@@ -1,6 +1,8 @@
 //! Stall detection, restart, and escalation.
 
-use std::time::Instant;
+use chrono::{DateTime, Utc};
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::Result;
 use tracing::warn;
@@ -51,6 +53,8 @@ impl SupervisoryProgress {
     pub(in super::super) fn stall_reason(&self) -> &'static str {
         match self {
             Self::Actionable(_) => "supervisory_actionable_progress",
+            Self::Expected("main_git_activity") => "supervisory_main_git_activity",
+            Self::Expected("board_state_transition") => "supervisory_board_state_transition",
             Self::Expected("inbox_batching") => "supervisory_inbox_batching",
             Self::Expected("supervisory_digest") => "supervisory_digest_waiting",
             Self::Expected("fresh_supervisory_input") => "supervisory_fresh_input",
@@ -64,6 +68,8 @@ impl SupervisoryProgress {
     fn stall_reason_suffix(self) -> &'static str {
         match self {
             Self::Actionable(pressure) => pressure.stall_reason_suffix(),
+            Self::Expected("main_git_activity") => "main_git_activity",
+            Self::Expected("board_state_transition") => "board_state_transition",
             Self::Expected("inbox_batching") => "inbox_batching",
             Self::Expected("supervisory_digest") => "digest_waiting",
             Self::Expected("fresh_supervisory_input") => "fresh_input",
@@ -77,6 +83,8 @@ impl SupervisoryProgress {
     pub(in super::super) fn short_label(&self) -> &'static str {
         match self {
             Self::Actionable(pressure) => pressure.short_label(),
+            Self::Expected("main_git_activity") => "main merge activity",
+            Self::Expected("board_state_transition") => "board state transition",
             Self::Expected("inbox_batching") => "inbox batching",
             Self::Expected("supervisory_digest") => "digest review",
             Self::Expected("fresh_supervisory_input") => "fresh supervisory input",
@@ -244,6 +252,73 @@ impl TeamDaemon {
         })
     }
 
+    fn recent_supervisory_side_effect_signal(
+        &self,
+        member_name: &str,
+        threshold_secs: u64,
+    ) -> Option<SupervisoryProgress> {
+        match self.supervisory_lane(member_name)? {
+            SupervisoryLane::Architect => self.recent_architect_git_signal(threshold_secs),
+            SupervisoryLane::Manager => self.recent_manager_board_signal(threshold_secs),
+        }
+    }
+
+    fn recent_architect_git_signal(&self, threshold_secs: u64) -> Option<SupervisoryProgress> {
+        let git_dir = resolve_git_dir(&self.config.project_root)?;
+        let threshold = Duration::from_secs(threshold_secs);
+
+        let main_activity = [
+            git_dir.join("logs").join("refs").join("heads").join("main"),
+            git_dir.join("CHERRY_PICK_HEAD"),
+            git_dir.join("MERGE_HEAD"),
+            git_dir.join("REBASE_HEAD"),
+            git_dir.join("ORIG_HEAD"),
+        ];
+        if main_activity
+            .iter()
+            .any(|path| path_modified_within(path, threshold))
+        {
+            return Some(SupervisoryProgress::Expected("main_git_activity"));
+        }
+
+        if tree_modified_within(&git_dir.join("refs").join("tags"), threshold)
+            || path_modified_within(&git_dir.join("packed-refs"), threshold)
+        {
+            return Some(SupervisoryProgress::Expected("main_git_activity"));
+        }
+
+        None
+    }
+
+    fn recent_manager_board_signal(&self, threshold_secs: u64) -> Option<SupervisoryProgress> {
+        let tasks_dir = self
+            .config
+            .project_root
+            .join(".batty")
+            .join("team_config")
+            .join("board")
+            .join("tasks");
+        let now = Utc::now();
+        let has_recent_completion = crate::task::load_tasks_from_dir(&tasks_dir)
+            .ok()?
+            .into_iter()
+            .any(|task| {
+                task.status == "done"
+                    && task
+                        .completed
+                        .as_deref()
+                        .and_then(|completed| DateTime::parse_from_rfc3339(completed).ok())
+                        .is_some_and(|completed| {
+                            now.signed_duration_since(completed.with_timezone(&Utc))
+                                <= chrono::Duration::seconds(threshold_secs as i64)
+                        })
+            });
+        if has_recent_completion {
+            return Some(SupervisoryProgress::Expected("board_state_transition"));
+        }
+        None
+    }
+
     pub(in super::super) fn format_supervisory_stall_summary(
         &self,
         member_name: &str,
@@ -278,6 +353,12 @@ impl TeamDaemon {
         }
 
         if let Some(signal) = self.recent_supervisory_event_signal(member_name, threshold_secs) {
+            return signal;
+        }
+
+        if let Some(signal) =
+            self.recent_supervisory_side_effect_signal(member_name, threshold_secs)
+        {
             return signal;
         }
 
@@ -545,6 +626,54 @@ impl TeamDaemon {
     }
 }
 
+fn resolve_git_dir(project_root: &Path) -> Option<PathBuf> {
+    let git_path = project_root.join(".git");
+    if git_path.is_dir() {
+        return Some(git_path);
+    }
+    let contents = std::fs::read_to_string(&git_path).ok()?;
+    let gitdir = contents.trim().strip_prefix("gitdir:")?.trim();
+    let git_dir = PathBuf::from(gitdir);
+    Some(if git_dir.is_absolute() {
+        git_dir
+    } else {
+        project_root.join(git_dir)
+    })
+}
+
+fn path_modified_within(path: &Path, threshold: Duration) -> bool {
+    std::fs::metadata(path)
+        .ok()
+        .and_then(|metadata| metadata.modified().ok())
+        .is_some_and(|modified| modified_within(modified, threshold))
+}
+
+fn tree_modified_within(path: &Path, threshold: Duration) -> bool {
+    if path_modified_within(path, threshold) {
+        return true;
+    }
+
+    let Ok(entries) = std::fs::read_dir(path) else {
+        return false;
+    };
+
+    entries.filter_map(|entry| entry.ok()).any(|entry| {
+        let child = entry.path();
+        if child.is_dir() {
+            tree_modified_within(&child, threshold)
+        } else {
+            path_modified_within(&child, threshold)
+        }
+    })
+}
+
+fn modified_within(modified: SystemTime, threshold: Duration) -> bool {
+    SystemTime::now()
+        .duration_since(modified)
+        .map(|elapsed| elapsed <= threshold)
+        .unwrap_or(true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::super::*;
@@ -560,9 +689,11 @@ mod tests {
     use crate::team::standup::MemberState;
     use crate::team::test_helpers::{make_test_daemon, write_event_log};
     use crate::team::test_support::{
-        TestDaemonBuilder, architect_member, engineer_member, manager_member, setup_fake_claude,
-        write_owned_task_file, write_owned_task_file_with_context,
+        TestDaemonBuilder, architect_member, engineer_member, git_ok, init_git_repo,
+        manager_member, setup_fake_claude, write_owned_task_file,
+        write_owned_task_file_with_context,
     };
+    use chrono::Utc;
     use serial_test::serial;
     use std::collections::HashMap;
     use std::process::Command;
@@ -591,6 +722,85 @@ mod tests {
         handle.state_changed_at = Instant::now() - Duration::from_secs(working_secs);
         handle.last_activity_at = Some(Instant::now() - Duration::from_secs(last_activity_secs));
         daemon.shim_handles.insert(member.to_string(), handle);
+    }
+
+    #[test]
+    fn architect_not_flagged_stalled_while_cherry_picking_recent_commits() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "stall-architect-merge");
+        let mut daemon = TestDaemonBuilder::new(&repo)
+            .members(vec![
+                architect_member("architect"),
+                manager_member("lead", Some("architect")),
+                engineer_member("eng-1", Some("lead"), false),
+            ])
+            .states(HashMap::from([(
+                "architect".to_string(),
+                MemberState::Working,
+            )]))
+            .build();
+        let threshold = daemon
+            .config
+            .team_config
+            .workflow_policy
+            .stall_threshold_secs;
+        insert_working_shim_handle(&mut daemon, "architect", threshold + 10, threshold + 10);
+
+        git_ok(&repo, &["checkout", "-b", "feature"]);
+        for (index, contents) in ["first\n", "second\n", "third\n"].into_iter().enumerate() {
+            let path = repo.join(format!("feature-{index}.txt"));
+            std::fs::write(path, contents).unwrap();
+            git_ok(&repo, &["add", "."]);
+            git_ok(&repo, &["commit", "-m", &format!("feature commit {index}")]);
+        }
+        git_ok(&repo, &["checkout", "main"]);
+        for commit in ["feature~2", "feature~1", "feature"] {
+            git_ok(&repo, &["cherry-pick", commit]);
+        }
+
+        let signal = daemon.supervisory_progress_signal("architect", threshold);
+        assert_eq!(signal.short_label(), "main merge activity");
+        assert!(!daemon.is_supervisory_lane_stalled("architect", threshold));
+    }
+
+    #[test]
+    fn manager_not_flagged_stalled_while_advancing_board_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "stall-manager-board");
+        let mut daemon = TestDaemonBuilder::new(&repo)
+            .members(vec![
+                architect_member("architect"),
+                manager_member("lead", Some("architect")),
+                engineer_member("eng-1", Some("lead"), false),
+            ])
+            .states(HashMap::from([("lead".to_string(), MemberState::Working)]))
+            .build();
+        let threshold = daemon
+            .config
+            .team_config
+            .workflow_policy
+            .stall_threshold_secs;
+        insert_working_shim_handle(&mut daemon, "lead", threshold + 10, threshold + 10);
+
+        let completed = Utc::now().to_rfc3339();
+        let task_path = repo
+            .join(".batty")
+            .join("team_config")
+            .join("board")
+            .join("tasks")
+            .join("191-review-task.md");
+        std::fs::create_dir_all(task_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &task_path,
+            format!(
+                "---\nid: 191\ntitle: review-task\nstatus: done\npriority: critical\nclaimed_by: eng-1\ncompleted: {completed}\nclass: standard\n---\n\nTask description.\n"
+            ),
+        )
+        .unwrap();
+
+        let signal = daemon.supervisory_progress_signal("lead", threshold);
+        assert_eq!(signal.short_label(), "board state transition");
+        assert!(!daemon.is_supervisory_lane_stalled("lead", threshold));
     }
 
     #[test]
@@ -656,7 +866,7 @@ mod tests {
         inbox::mark_delivered(&inbox_root, "lead", &id).unwrap();
 
         let signal = daemon.supervisory_progress_signal("lead", threshold);
-        assert_eq!(signal, SupervisoryProgress::Expected("inbox_batching"));
+        assert_eq!(signal.short_label(), "direct-report packets");
         assert!(!daemon.is_supervisory_lane_stalled("lead", threshold));
     }
 
@@ -679,7 +889,7 @@ mod tests {
         write_owned_task_file(tmp.path(), 191, "review-task", "review", "eng-1");
 
         let signal = daemon.supervisory_progress_signal("lead", threshold);
-        assert_eq!(signal, SupervisoryProgress::Expected("review_waiting"));
+        assert_eq!(signal.short_label(), "review backlog");
         assert!(!daemon.is_supervisory_lane_stalled("lead", threshold));
     }
 
