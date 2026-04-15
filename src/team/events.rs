@@ -86,6 +86,8 @@ pub struct TeamEvent {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit_category: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub step: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
@@ -146,6 +148,7 @@ impl TeamEvent {
             total_members: None,
             session_running: None,
             reason: None,
+            exit_category: None,
             step: None,
             error: None,
             details: None,
@@ -199,12 +202,32 @@ impl TeamEvent {
     }
 
     pub fn daemon_stopped_with_reason(reason: &str, uptime_secs: u64) -> Self {
+        Self::daemon_stopped_with_reason_and_category(reason, uptime_secs, None)
+    }
+
+    pub fn daemon_stopped_with_reason_and_category(
+        reason: &str,
+        uptime_secs: u64,
+        exit_category: Option<&str>,
+    ) -> Self {
         Self {
             action_type: Some("session_lifecycle".into()),
             session_running: Some(false),
             reason: Some(reason.into()),
+            exit_category: exit_category.map(str::to_string),
             uptime_secs: Some(uptime_secs),
             ..Self::base("daemon_stopped")
+        }
+    }
+
+    pub fn daemon_exited(reason: &str, uptime_secs: u64, exit_category: &str) -> Self {
+        Self {
+            action_type: Some("session_lifecycle".into()),
+            session_running: Some(false),
+            reason: Some(reason.into()),
+            exit_category: Some(exit_category.into()),
+            uptime_secs: Some(uptime_secs),
+            ..Self::base("daemon_exited")
         }
     }
 
@@ -1420,6 +1443,10 @@ mod tests {
                 "daemon_stopped",
                 TeamEvent::daemon_stopped_with_reason("signal", 3600),
             ),
+            (
+                "daemon_exited",
+                TeamEvent::daemon_exited("tmux server died", 12, "unrecoverable"),
+            ),
             ("daemon_heartbeat", TeamEvent::daemon_heartbeat(120)),
             (
                 "context_exhausted",
@@ -1966,6 +1993,18 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed["reason"].as_str().unwrap(), "signal");
         assert_eq!(parsed["uptime_secs"].as_u64().unwrap(), 7200);
+        assert!(parsed.get("exit_category").is_none());
+    }
+
+    #[test]
+    fn daemon_exited_includes_reason_and_exit_category() {
+        let event = TeamEvent::daemon_exited("tmux server died", 9, "unrecoverable");
+        let json = serde_json::to_string(&event).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["event"].as_str().unwrap(), "daemon_exited");
+        assert_eq!(parsed["reason"].as_str().unwrap(), "tmux server died");
+        assert_eq!(parsed["exit_category"].as_str().unwrap(), "unrecoverable");
+        assert_eq!(parsed["uptime_secs"].as_u64().unwrap(), 9);
     }
 
     #[test]

@@ -86,7 +86,11 @@ impl TeamDaemon {
             }
 
             if !tmux::session_exists(&self.config.session) {
-                shutdown_reason = "session_gone";
+                shutdown_reason = if tmux::server_running() {
+                    "tmux session disappeared"
+                } else {
+                    "tmux server died"
+                };
                 info!("tmux session gone, shutting down");
                 break;
             }

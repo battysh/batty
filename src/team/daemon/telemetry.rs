@@ -50,7 +50,13 @@ impl TeamDaemon {
     }
 
     pub(super) fn record_daemon_stopped(&mut self, reason: &str, uptime_secs: u64) {
-        self.emit_event(TeamEvent::daemon_stopped_with_reason(reason, uptime_secs));
+        let exit_category = crate::team::daemon_mgmt::classify_daemon_exit_reason(reason);
+        self.emit_event(TeamEvent::daemon_exited(reason, uptime_secs, exit_category));
+        self.emit_event(TeamEvent::daemon_stopped_with_reason_and_category(
+            reason,
+            uptime_secs,
+            Some(exit_category),
+        ));
         info!(reason = reason, uptime_secs = uptime_secs, "daemon stopped");
     }
 

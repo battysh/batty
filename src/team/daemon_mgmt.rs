@@ -26,6 +26,10 @@ const WATCHDOG_MAX_BACKOFF_SECS: u64 = 30;
 const WATCHDOG_CIRCUIT_BREAKER_THRESHOLD: usize = 5;
 const WATCHDOG_CIRCUIT_BREAKER_WINDOW_SECS: u64 = 60;
 const DAEMON_CHILD_PID_FILE: &str = "daemon-child.pid";
+#[allow(dead_code)] // reserved for future transient-exit classification
+pub(crate) const DAEMON_EXIT_CATEGORY_TRANSIENT: &str = "transient";
+pub(crate) const DAEMON_EXIT_CATEGORY_UNRECOVERABLE: &str = "unrecoverable";
+pub(crate) const DAEMON_EXIT_CATEGORY_UNKNOWN: &str = "unknown";
 
 #[cfg(unix)]
 static WATCHDOG_SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
@@ -153,6 +157,28 @@ pub(crate) struct PersistedWatchdogState {
     pub current_backoff_secs: Option<u64>,
     #[serde(default)]
     pub last_exit_reason: Option<String>,
+    #[serde(default)]
+    pub last_exit_category: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DaemonExitObservation {
+    reason: String,
+    exit_category: String,
+}
+
+pub(crate) fn classify_daemon_exit_reason(reason: &str) -> &'static str {
+    let reason = reason.to_ascii_lowercase();
+    if reason.contains("daemon startup pre-flight failed")
+        || reason.contains("no team config found")
+        || reason.contains("tmux server died")
+        || reason.contains("tmux session disappeared")
+        || (reason.contains("tmux session '") && reason.contains("not found"))
+    {
+        DAEMON_EXIT_CATEGORY_UNRECOVERABLE
+    } else {
+        DAEMON_EXIT_CATEGORY_UNKNOWN
+    }
 }
 
 fn load_watchdog_state(project_root: &Path) -> Result<PersistedWatchdogState> {
@@ -332,19 +358,80 @@ fn watchdog_shutdown_requested() -> bool {
     false
 }
 
+fn event_count(path: &Path) -> usize {
+    events::read_events(path)
+        .map(|events| events.len())
+        .unwrap_or(0)
+}
+
+fn read_daemon_exit_observation(
+    project_root: &Path,
+    event_cursor: usize,
+) -> Option<DaemonExitObservation> {
+    let events_path = super::team_events_path(project_root);
+    let events = events::read_events(&events_path).ok()?;
+    events
+        .into_iter()
+        .skip(event_cursor)
+        .rev()
+        .find_map(|event| {
+            if event.event == "daemon_exited" || event.event == "daemon_stopped" {
+                Some(DaemonExitObservation {
+                    reason: event.reason?,
+                    exit_category: event
+                        .exit_category
+                        .unwrap_or_else(|| DAEMON_EXIT_CATEGORY_UNKNOWN.to_string()),
+                })
+            } else if event.event == "daemon_panic" {
+                Some(DaemonExitObservation {
+                    reason: event.reason.unwrap_or_else(|| "unknown panic".to_string()),
+                    exit_category: DAEMON_EXIT_CATEGORY_UNKNOWN.to_string(),
+                })
+            } else {
+                None
+            }
+        })
+}
+
+fn observe_daemon_exit(
+    project_root: &Path,
+    event_cursor: usize,
+    exit_status: std::process::ExitStatus,
+) -> DaemonExitObservation {
+    read_daemon_exit_observation(project_root, event_cursor).unwrap_or_else(|| {
+        let reason = if let Some(code) = exit_status.code() {
+            format!("daemon exited with status {code}")
+        } else {
+            "daemon exited from signal".to_string()
+        };
+        DaemonExitObservation {
+            exit_category: classify_daemon_exit_reason(&reason).to_string(),
+            reason,
+        }
+    })
+}
+
 fn record_watchdog_crash(
     project_root: &Path,
     state: &mut PersistedWatchdogState,
-    reason: String,
+    observation: DaemonExitObservation,
 ) -> Result<Option<u64>> {
     let now = super::now_unix();
     state.restart_count += 1;
-    state.last_exit_reason = Some(reason);
+    state.last_exit_reason = Some(observation.reason.clone());
+    state.last_exit_category = Some(observation.exit_category.clone());
     state.child_pid = None;
     state
         .crash_timestamps
         .retain(|ts| now.saturating_sub(*ts) < WATCHDOG_CIRCUIT_BREAKER_WINDOW_SECS);
     state.crash_timestamps.push(now);
+
+    if observation.exit_category == DAEMON_EXIT_CATEGORY_UNRECOVERABLE {
+        state.circuit_breaker_tripped = true;
+        state.current_backoff_secs = None;
+        save_watchdog_state(project_root, state)?;
+        return Ok(None);
+    }
 
     if state.crash_timestamps.len() >= WATCHDOG_CIRCUIT_BREAKER_THRESHOLD {
         state.circuit_breaker_tripped = true;
@@ -633,9 +720,13 @@ pub fn run_daemon(project_root: &Path, resume: bool) -> Result<()> {
             eprintln!("daemon exited with error: {e:#}");
             // Try to log the error event
             if let Ok(mut sink) = events::EventSink::new(&events_path) {
-                let _ = sink.emit(events::TeamEvent::daemon_stopped_with_reason(
-                    &format!("error: {e:#}"),
+                let reason = format!("error: {e:#}");
+                let exit_category = classify_daemon_exit_reason(&reason);
+                let _ = sink.emit(events::TeamEvent::daemon_exited(&reason, 0, exit_category));
+                let _ = sink.emit(events::TeamEvent::daemon_stopped_with_reason_and_category(
+                    &reason,
                     0,
+                    Some(exit_category),
                 ));
             }
             Err(e)
@@ -652,6 +743,11 @@ pub fn run_daemon(project_root: &Path, resume: bool) -> Result<()> {
             eprintln!("daemon panicked: {reason}");
             // Log panic event
             if let Ok(mut sink) = events::EventSink::new(&events_path) {
+                let _ = sink.emit(events::TeamEvent::daemon_exited(
+                    &format!("panic: {reason}"),
+                    0,
+                    DAEMON_EXIT_CATEGORY_UNKNOWN,
+                ));
                 let _ = sink.emit(events::TeamEvent::daemon_panic(&reason));
             }
             std::panic::resume_unwind(panic_payload);
@@ -666,6 +762,7 @@ pub fn run_watchdog(project_root: &Path, resume: bool) -> Result<()> {
     state.circuit_breaker_tripped = false;
     state.current_backoff_secs = None;
     state.last_exit_reason = None;
+    state.last_exit_category = None;
     state.child_pid = None;
     save_watchdog_state(project_root, &state)?;
 
@@ -681,6 +778,7 @@ pub fn run_watchdog(project_root: &Path, resume: bool) -> Result<()> {
             return Ok(());
         }
 
+        let event_cursor = event_count(&super::team_events_path(project_root));
         let mut child = spawn_daemon_child(project_root, resume_on_launch)?;
         resume_on_launch = true;
 
@@ -707,21 +805,23 @@ pub fn run_watchdog(project_root: &Path, resume: bool) -> Result<()> {
             match child.try_wait() {
                 Ok(Some(exit_status)) => {
                     clear_watchdog_child_pid(project_root, &mut state)?;
-                    let reason = if let Some(code) = exit_status.code() {
-                        format!("daemon exited with status {code}")
-                    } else {
-                        "daemon exited from signal".to_string()
-                    };
+                    let observation = observe_daemon_exit(project_root, event_cursor, exit_status);
                     if let Some(backoff_secs) =
-                        record_watchdog_crash(project_root, &mut state, reason.clone())?
+                        record_watchdog_crash(project_root, &mut state, observation.clone())?
                     {
-                        warn!(backoff_secs, reason = %reason, "daemon crashed; watchdog restarting with backoff");
+                        warn!(
+                            backoff_secs,
+                            reason = %observation.reason,
+                            exit_category = %observation.exit_category,
+                            "daemon crashed; watchdog restarting with backoff"
+                        );
                         std::thread::sleep(Duration::from_secs(backoff_secs));
                         break;
                     }
 
                     warn!(
-                        reason = %reason,
+                        reason = %observation.reason,
+                        exit_category = %observation.exit_category,
                         threshold = WATCHDOG_CIRCUIT_BREAKER_THRESHOLD,
                         window_secs = WATCHDOG_CIRCUIT_BREAKER_WINDOW_SECS,
                         "watchdog circuit breaker tripped; daemon will not be restarted"
@@ -733,8 +833,12 @@ pub fn run_watchdog(project_root: &Path, resume: bool) -> Result<()> {
                 Err(error) => {
                     clear_watchdog_child_pid(project_root, &mut state)?;
                     let reason = format!("failed to poll daemon child: {error}");
+                    let observation = DaemonExitObservation {
+                        exit_category: classify_daemon_exit_reason(&reason).to_string(),
+                        reason: reason.clone(),
+                    };
                     if let Some(backoff_secs) =
-                        record_watchdog_crash(project_root, &mut state, reason.clone())?
+                        record_watchdog_crash(project_root, &mut state, observation)?
                     {
                         warn!(backoff_secs, reason = %reason, "watchdog poll failed; retrying daemon launch");
                         std::thread::sleep(Duration::from_secs(backoff_secs));
@@ -1079,26 +1183,119 @@ mod tests {
         let mut state = PersistedWatchdogState::default();
 
         assert_eq!(
-            record_watchdog_crash(tmp.path(), &mut state, "boom-1".to_string()).unwrap(),
+            record_watchdog_crash(
+                tmp.path(),
+                &mut state,
+                DaemonExitObservation {
+                    reason: "boom-1".to_string(),
+                    exit_category: DAEMON_EXIT_CATEGORY_UNKNOWN.to_string(),
+                },
+            )
+            .unwrap(),
             Some(1)
         );
         assert_eq!(
-            record_watchdog_crash(tmp.path(), &mut state, "boom-2".to_string()).unwrap(),
+            record_watchdog_crash(
+                tmp.path(),
+                &mut state,
+                DaemonExitObservation {
+                    reason: "boom-2".to_string(),
+                    exit_category: DAEMON_EXIT_CATEGORY_UNKNOWN.to_string(),
+                },
+            )
+            .unwrap(),
             Some(2)
         );
         assert_eq!(
-            record_watchdog_crash(tmp.path(), &mut state, "boom-3".to_string()).unwrap(),
+            record_watchdog_crash(
+                tmp.path(),
+                &mut state,
+                DaemonExitObservation {
+                    reason: "boom-3".to_string(),
+                    exit_category: DAEMON_EXIT_CATEGORY_UNKNOWN.to_string(),
+                },
+            )
+            .unwrap(),
             Some(4)
         );
         assert_eq!(
-            record_watchdog_crash(tmp.path(), &mut state, "boom-4".to_string()).unwrap(),
+            record_watchdog_crash(
+                tmp.path(),
+                &mut state,
+                DaemonExitObservation {
+                    reason: "boom-4".to_string(),
+                    exit_category: DAEMON_EXIT_CATEGORY_UNKNOWN.to_string(),
+                },
+            )
+            .unwrap(),
             Some(8)
         );
         assert_eq!(
-            record_watchdog_crash(tmp.path(), &mut state, "boom-5".to_string()).unwrap(),
+            record_watchdog_crash(
+                tmp.path(),
+                &mut state,
+                DaemonExitObservation {
+                    reason: "boom-5".to_string(),
+                    exit_category: DAEMON_EXIT_CATEGORY_UNKNOWN.to_string(),
+                },
+            )
+            .unwrap(),
             None
         );
         assert!(state.circuit_breaker_tripped);
         assert_eq!(state.restart_count, 5);
+    }
+
+    #[test]
+    fn record_watchdog_crash_opens_circuit_immediately_for_unrecoverable_exit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut state = PersistedWatchdogState::default();
+
+        assert_eq!(
+            record_watchdog_crash(
+                tmp.path(),
+                &mut state,
+                DaemonExitObservation {
+                    reason: "tmux server died".to_string(),
+                    exit_category: DAEMON_EXIT_CATEGORY_UNRECOVERABLE.to_string(),
+                },
+            )
+            .unwrap(),
+            None
+        );
+        assert!(state.circuit_breaker_tripped);
+        assert_eq!(state.restart_count, 1);
+        assert_eq!(state.last_exit_reason.as_deref(), Some("tmux server died"));
+        assert_eq!(
+            state.last_exit_category.as_deref(),
+            Some(DAEMON_EXIT_CATEGORY_UNRECOVERABLE)
+        );
+    }
+
+    #[test]
+    fn read_daemon_exit_observation_prefers_structured_exit_event() {
+        let tmp = tempfile::tempdir().unwrap();
+        let events_path = tmp
+            .path()
+            .join(".batty")
+            .join("team_config")
+            .join("events.jsonl");
+        std::fs::create_dir_all(events_path.parent().unwrap()).unwrap();
+        let mut sink = events::EventSink::new(&events_path).unwrap();
+        sink.emit(events::TeamEvent::daemon_started()).unwrap();
+        let cursor = event_count(&events_path);
+        sink.emit(events::TeamEvent::daemon_exited(
+            "daemon startup pre-flight failed: git worktree is dirty:\nM src/team/task_loop.rs",
+            0,
+            DAEMON_EXIT_CATEGORY_UNRECOVERABLE,
+        ))
+        .unwrap();
+
+        let observation = read_daemon_exit_observation(tmp.path(), cursor).unwrap();
+        assert!(observation.reason.contains("dirty"));
+        assert_eq!(
+            observation.exit_category,
+            DAEMON_EXIT_CATEGORY_UNRECOVERABLE
+        );
     }
 }
