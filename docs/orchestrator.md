@@ -309,15 +309,15 @@ The orchestrator-related `team.yaml` keys are spread across root config, board c
 
 ### Workflow Policy Keys
 
-| Key                                            | Meaning                                                       |
-| ---------------------------------------------- | ------------------------------------------------------------- |
-| `workflow_policy.wip_limit_per_engineer`       | Optional engineer concurrency guard for dispatch.             |
-| `workflow_policy.wip_limit_per_reviewer`       | Optional reviewer concurrency guard.                          |
-| `workflow_policy.main_smoke.*`                | Periodic `main` smoke test, failure signal, and dispatch gate. |
-| `workflow_policy.escalation_threshold_secs`    | Timeout threshold for escalation-sensitive workflow handling. |
-| `workflow_policy.review_timeout_secs`          | Timeout threshold for overdue review work.                    |
-| `workflow_policy.auto_archive_done_after_secs` | Optional archival timeout for completed work.                 |
-| `workflow_policy.capability_overrides`         | Maps work types to roles/capabilities for dispatch decisions. |
+| Key                                            | Meaning                                                        |
+| ---------------------------------------------- | -------------------------------------------------------------- |
+| `workflow_policy.wip_limit_per_engineer`       | Optional engineer concurrency guard for dispatch.              |
+| `workflow_policy.wip_limit_per_reviewer`       | Optional reviewer concurrency guard.                           |
+| `workflow_policy.main_smoke.*`                 | Periodic `main` smoke test, failure signal, and dispatch gate. |
+| `workflow_policy.escalation_threshold_secs`    | Timeout threshold for escalation-sensitive workflow handling.  |
+| `workflow_policy.review_timeout_secs`          | Timeout threshold for overdue review work.                     |
+| `workflow_policy.auto_archive_done_after_secs` | Optional archival timeout for completed work.                  |
+| `workflow_policy.capability_overrides`         | Maps work types to roles/capabilities for dispatch decisions.  |
 
 ### Role-Level Keys
 

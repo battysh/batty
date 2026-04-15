@@ -6,7 +6,6 @@ use std::time::{Duration, Instant};
 
 use crate::tmux;
 
-
 pub(super) const DELIVERY_VERIFICATION_CAPTURE_LINES: u32 = 50;
 /// Increased capture window for agents that recently became ready, to account
 /// for startup output pushing the delivery marker further up the scrollback.
