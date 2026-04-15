@@ -306,37 +306,12 @@ pub(super) mod test_helpers {
         WorkflowMode, WorkflowPolicy,
     };
     use std::path::PathBuf;
-    use std::sync::{LazyLock, Mutex};
 
-    pub static PATH_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
-
-    pub struct EnvVarGuard {
-        key: &'static str,
-        original: Option<String>,
-    }
-
-    impl EnvVarGuard {
-        pub fn set(key: &'static str, value: &str) -> Self {
-            let original = std::env::var(key).ok();
-            unsafe {
-                std::env::set_var(key, value);
-            }
-            Self { key, original }
-        }
-    }
-
-    impl Drop for EnvVarGuard {
-        fn drop(&mut self) {
-            match self.original.as_deref() {
-                Some(value) => unsafe {
-                    std::env::set_var(self.key, value);
-                },
-                None => unsafe {
-                    std::env::remove_var(self.key);
-                },
-            }
-        }
-    }
+    // Re-export the shared PATH_LOCK and EnvVarGuard so preflight tests share
+    // the same lock as other suites that toggle PATH. A duplicate LazyLock
+    // here would allow parallel tests to race on the PATH environment variable
+    // and fail `which` lookups intermittently on heavily loaded CI runners.
+    pub(crate) use crate::team::test_support::{EnvVarGuard, PATH_LOCK};
 
     pub fn setup_fake_kanban(tmp: &tempfile::TempDir, script_name: &str) -> PathBuf {
         let fake_bin = tmp.path().join(format!("{script_name}-bin"));
