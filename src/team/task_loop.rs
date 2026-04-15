@@ -1146,6 +1146,7 @@ fn worktree_has_staged_changes(worktree_dir: &Path) -> Result<bool> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn quarantine_completed_lane_for_recovery(
     project_root: &Path,
     worktree_dir: &Path,
