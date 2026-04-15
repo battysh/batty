@@ -169,9 +169,10 @@ jobs:
         shell: bash
 
       - name: Run fuzz targets with expanded case budget
-        run: >-
-          cargo test --test scenarios --features scenario-test --release
-          fuzz_workflow_happy fuzz_workflow_with_faults fuzz_restart_resilience
+        run: |
+          cargo test --test scenarios --features scenario-test --release fuzz_workflow_happy
+          cargo test --test scenarios --features scenario-test --release fuzz_workflow_with_faults
+          cargo test --test scenarios --features scenario-test --release fuzz_restart_resilience
         env:
           PROPTEST_CASES: '2048'
           PROPTEST_MAX_SHRINK_ITERS: '8192'
