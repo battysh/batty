@@ -951,6 +951,18 @@ impl TeamDaemon {
             .filter(|engineer_name| !queued_engineers.contains(engineer_name))
             .filter(|engineer_name| !benched_engineers.contains(engineer_name))
             .filter(|engineer_name| {
+                // #674 defect 2: skip engineers whose backend is parked
+                // (quota_exhausted with future retry_at). Without this gate,
+                // a stale cached `Healthy` state or the 15-minute stall-timer
+                // reclaim would rotate tasks through every quota-blocked
+                // engineer on every dispatch tick.
+                if self.member_backend_parked(engineer_name) {
+                    debug!(
+                        engineer = %engineer_name,
+                        "skipping dispatch — backend quota parked"
+                    );
+                    return false;
+                }
                 let Some(assigned_at) = self.manual_assign_cooldowns.get(engineer_name) else {
                     return true;
                 };
@@ -2056,6 +2068,48 @@ mod tests {
         assert_eq!(daemon.dispatch_queue.len(), 1);
         assert_eq!(daemon.dispatch_queue[0].engineer, "eng-2");
         assert_eq!(daemon.dispatch_queue[0].task_id, 70);
+    }
+
+    /// #674 defect 2: dispatch selection must skip engineers whose backend
+    /// is parked (quota_exhausted with future retry_at), regardless of
+    /// cached health state. Without this gate, the stall-timer reclaim
+    /// cascade rotates tasks across every quota-blocked engineer every
+    /// 15 minutes, producing board churn with zero real progress.
+    #[test]
+    fn enqueue_dispatch_candidates_skips_quota_parked_engineer() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_open_task_file(tmp.path(), 674, "dispatchable", "todo");
+
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![
+                engineer_member("eng-1", None, false),
+                engineer_member("eng-2", None, false),
+            ])
+            .states(HashMap::from([
+                ("eng-1".to_string(), MemberState::Idle),
+                ("eng-2".to_string(), MemberState::Idle),
+            ]))
+            .build();
+
+        // eng-1 is quota-parked via future retry_at (32h out). Its cached
+        // health value is intentionally left as the default (Healthy) to
+        // prove the retry_at deadline alone is sufficient to park it.
+        let future_deadline = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or(std::time::Duration::ZERO)
+            .as_secs()
+            + 32 * 3600;
+        daemon
+            .backend_quota_retry_at
+            .insert("eng-1".to_string(), future_deadline);
+
+        daemon.enqueue_dispatch_candidates().unwrap();
+        assert_eq!(daemon.dispatch_queue.len(), 1);
+        assert_eq!(
+            daemon.dispatch_queue[0].engineer, "eng-2",
+            "quota-parked engineer must be skipped even if cached health is Healthy"
+        );
+        assert_eq!(daemon.dispatch_queue[0].task_id, 674);
     }
 
     #[test]

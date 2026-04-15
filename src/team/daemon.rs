@@ -243,6 +243,13 @@ pub struct TeamDaemon {
     pub(super) manual_assign_cooldowns: HashMap<String, Instant>,
     /// Per-member agent backend health state.
     pub(super) backend_health: HashMap<String, BackendHealth>,
+    /// Per-member quota retry-at deadline (epoch seconds). Populated when a
+    /// shim emits `Event::QuotaBlocked` with a retry_at. Consulted by the
+    /// backend-health transition, dispatch selection, and aging alerts to
+    /// keep an engineer marked as `quota_exhausted` (i.e. parked) until the
+    /// reset deadline passes. A successful poll_shim ping is NOT evidence
+    /// of quota recovery — only the deadline or operator intervention is.
+    pub(super) backend_quota_retry_at: HashMap<String, u64>,
     /// Rolling capture history used to detect narration loops.
     pub(super) narration_tracker: health::narration::NarrationTracker,
     /// Per-session output tracking used for proactive context-pressure handling.
@@ -596,6 +603,7 @@ impl TeamDaemon {
             telemetry_db,
             manual_assign_cooldowns: HashMap::new(),
             backend_health: HashMap::new(),
+            backend_quota_retry_at: HashMap::new(),
             narration_tracker: health::narration::NarrationTracker::new(
                 narration_detection_enabled,
                 narration_threshold_polls,
@@ -696,6 +704,31 @@ impl TeamDaemon {
 
     pub(super) fn active_task_id(&self, engineer: &str) -> Option<u32> {
         self.active_tasks.get(engineer).copied()
+    }
+
+    /// Returns true when the member's backend is parked due to a quota block.
+    /// A member is parked when either (a) cached health is `QuotaExhausted`
+    /// or (b) the tracked quota `retry_at` deadline is still in the future.
+    /// Dispatch selection, stall-timer reclaim, and aging-alert escalation
+    /// gate on this to avoid churn against an engineer that simply cannot
+    /// make progress until the quota window elapses (#674).
+    pub(in crate::team) fn member_backend_parked(&self, member_name: &str) -> bool {
+        if matches!(
+            self.backend_health.get(member_name),
+            Some(BackendHealth::QuotaExhausted)
+        ) {
+            return true;
+        }
+        if let Some(&retry_at) = self.backend_quota_retry_at.get(member_name) {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d: std::time::Duration| d.as_secs())
+                .unwrap_or(0);
+            if retry_at > now {
+                return true;
+            }
+        }
+        false
     }
 
     pub(super) fn preserve_worktree_before_restart(

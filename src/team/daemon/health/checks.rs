@@ -407,6 +407,33 @@ impl TeamDaemon {
                 .copied()
                 .unwrap_or(BackendHealth::Healthy);
 
+            // #674 defect 1: do NOT transition from QuotaExhausted to a
+            // better state just because `which codex` returned Healthy.
+            // A successful binary probe (or even a successful poll_shim ping)
+            // is not evidence of quota recovery — the codex shim can connect
+            // fine and still fail on the first real turn. Keep the member
+            // parked until the recorded retry_at deadline elapses or the
+            // entry has been cleared explicitly (e.g. operator intervention
+            // via daemon restart / bench reset).
+            if prev_health == BackendHealth::QuotaExhausted
+                && new_health != BackendHealth::QuotaExhausted
+            {
+                let now_epoch = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                let retry_at = self.backend_quota_retry_at.get(member_name).copied();
+                if retry_at.is_some_and(|deadline| deadline > now_epoch) {
+                    // Deadline still in the future — hold QuotaExhausted.
+                    self.backend_health
+                        .insert(member_name.clone(), BackendHealth::QuotaExhausted);
+                    continue;
+                }
+                // Deadline elapsed (or never recorded) — allow the transition
+                // and clear any stale retry_at bookkeeping.
+                self.backend_quota_retry_at.remove(member_name);
+            }
+
             if new_health != prev_health {
                 let transition = format!("{}→{}", prev_health.as_str(), new_health.as_str());
                 info!(
@@ -777,6 +804,140 @@ mod tests {
 
         assert!(daemon.backend_health.contains_key("architect"));
         assert!(daemon.backend_health.contains_key("eng-1"));
+    }
+
+    /// #674 defect 1: when a member has been marked QuotaExhausted with a
+    /// retry_at deadline in the future, the periodic backend-health probe
+    /// must NOT transition the member back to Healthy even if `which <agent>`
+    /// succeeds. Only the elapsed retry_at (or operator intervention) can
+    /// clear the quota_exhausted state.
+    #[test]
+    fn check_backend_health_preserves_quota_exhausted_when_retry_at_is_future() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".batty").join("team_config")).unwrap();
+
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![engineer_member("eng-parked", None, false)])
+            .build();
+        daemon.last_health_check = Instant::now() - Duration::from_secs(3600);
+        daemon
+            .backend_health
+            .insert("eng-parked".to_string(), BackendHealth::QuotaExhausted);
+        let future_deadline = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or(Duration::ZERO)
+            .as_secs()
+            + 32 * 3600; // 32h from now
+        daemon
+            .backend_quota_retry_at
+            .insert("eng-parked".to_string(), future_deadline);
+
+        daemon.check_backend_health().unwrap();
+
+        assert_eq!(
+            daemon.backend_health.get("eng-parked").copied(),
+            Some(BackendHealth::QuotaExhausted),
+            "QuotaExhausted must be held while retry_at is in the future"
+        );
+        assert_eq!(
+            daemon.backend_quota_retry_at.get("eng-parked").copied(),
+            Some(future_deadline),
+            "retry_at bookkeeping must not be cleared while deadline is still future"
+        );
+        let events = crate::team::events::read_events(
+            &tmp.path()
+                .join(".batty")
+                .join("team_config")
+                .join("events.jsonl"),
+        )
+        .unwrap_or_default();
+        assert!(
+            !events
+                .iter()
+                .any(|e| e.event == "health_changed" && e.role.as_deref() == Some("eng-parked")),
+            "no health_changed event should fire while quota deadline is in future"
+        );
+    }
+
+    /// #674 defect 1 (recovery path): once retry_at has elapsed, the next
+    /// periodic health probe must allow the transition out of
+    /// QuotaExhausted and clear the retry_at bookkeeping.
+    #[test]
+    fn check_backend_health_allows_transition_when_retry_at_has_elapsed() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".batty").join("team_config")).unwrap();
+
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![engineer_member("eng-recovered", None, false)])
+            .build();
+        daemon.last_health_check = Instant::now() - Duration::from_secs(3600);
+        daemon
+            .backend_health
+            .insert("eng-recovered".to_string(), BackendHealth::QuotaExhausted);
+        // Deadline five seconds in the past.
+        let past_deadline = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or(Duration::ZERO)
+            .as_secs()
+            .saturating_sub(5);
+        daemon
+            .backend_quota_retry_at
+            .insert("eng-recovered".to_string(), past_deadline);
+
+        daemon.check_backend_health().unwrap();
+
+        // With `which` likely failing in the sandbox, the new state could be
+        // Unreachable or Healthy — either way it must NOT be QuotaExhausted
+        // and the retry_at bookkeeping must be cleared.
+        assert_ne!(
+            daemon.backend_health.get("eng-recovered").copied(),
+            Some(BackendHealth::QuotaExhausted),
+            "transition out of QuotaExhausted must be allowed once retry_at elapsed"
+        );
+        assert!(
+            !daemon.backend_quota_retry_at.contains_key("eng-recovered"),
+            "retry_at bookkeeping must be cleared after the deadline elapses"
+        );
+    }
+
+    /// #674 helper test: `member_backend_parked` reports parked state from
+    /// either the cached QuotaExhausted health value or a future retry_at
+    /// deadline, so callers need only consult one method.
+    #[test]
+    fn member_backend_parked_reports_quota_state_and_future_retry_at() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".batty").join("team_config")).unwrap();
+
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![
+                engineer_member("eng-quota", None, false),
+                engineer_member("eng-retry", None, false),
+                engineer_member("eng-healthy", None, false),
+            ])
+            .build();
+
+        // Parked via cached health state.
+        daemon
+            .backend_health
+            .insert("eng-quota".to_string(), BackendHealth::QuotaExhausted);
+        // Parked via future retry_at even without cached state.
+        let future = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or(Duration::ZERO)
+            .as_secs()
+            + 3600;
+        daemon
+            .backend_quota_retry_at
+            .insert("eng-retry".to_string(), future);
+        // Third engineer: healthy with no retry_at.
+        daemon
+            .backend_health
+            .insert("eng-healthy".to_string(), BackendHealth::Healthy);
+
+        assert!(daemon.member_backend_parked("eng-quota"));
+        assert!(daemon.member_backend_parked("eng-retry"));
+        assert!(!daemon.member_backend_parked("eng-healthy"));
+        assert!(!daemon.member_backend_parked("unknown-member"));
     }
 
     #[test]

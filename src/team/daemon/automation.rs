@@ -418,6 +418,14 @@ impl TeamDaemon {
             let Some(engineer) = task.claimed_by.as_deref() else {
                 continue;
             };
+            // #674 defect 3: skip TTL reclaim when the claimed engineer is
+            // backend-parked (quota_exhausted with future retry_at). Parked
+            // engineers cannot produce progress by definition — reclaiming
+            // their tasks only rotates them to another quota-blocked
+            // engineer and inflates board churn.
+            if self.member_backend_parked(engineer) {
+                continue;
+            }
             let Some(member) = self
                 .config
                 .members
@@ -1587,6 +1595,21 @@ impl TeamDaemon {
             let checkpoint_key = aging_cooldown_key("task_checkpoint", task.task_id);
 
             let owner = task.claimed_by.as_deref().unwrap_or("unassigned");
+            // #674 defect 4: do not escalate stuck-task or emit task_stale
+            // alerts when the owner is backend-parked. Parked engineers are
+            // waiting, not stalled — escalating produces board churn and
+            // noisy telemetry during already-degraded windows. Also clear
+            // the cooldown markers so that when the engineer recovers we
+            // start aging bookkeeping from a clean slate.
+            if task
+                .claimed_by
+                .as_deref()
+                .is_some_and(|name| self.member_backend_parked(name))
+            {
+                self.intervention_cooldowns.remove(&stale_key);
+                self.intervention_cooldowns.remove(&checkpoint_key);
+                continue;
+            }
             let liveness = tasks_by_id.get(&task.task_id).and_then(|board_task| {
                 self.in_progress_task_liveness(board_task, now, progress_window)
             });

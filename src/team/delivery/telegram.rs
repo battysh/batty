@@ -284,6 +284,7 @@ mod tests {
             telemetry_db: None,
             manual_assign_cooldowns: HashMap::new(),
             backend_health: HashMap::new(),
+            backend_quota_retry_at: HashMap::new(),
             narration_tracker: Default::default(),
             context_pressure_tracker: Default::default(),
             last_health_check: Instant::now(),
