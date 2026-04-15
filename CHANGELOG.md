@@ -2,6 +2,31 @@
 
 All notable changes to Batty are documented here.
 
+## 0.11.8 — 2026-04-15
+
+Worktree-mutation safety and nightly fuzz CI fix.
+
+### Fixes
+
+- **Daemon no longer mutates dirty engineer worktrees** — the dispatch
+  queue's auto-recovery path now refuses to touch worktrees that still
+  have user changes, re-queuing them with an actionable preservation
+  blocker instead of silently staging files. During the 2026-04-14 codex
+  quota incident the old `preserve_failed_reset_skipped` loop was
+  generating phantom staged changes on idle engineers every tick.
+  (`src/team/dispatch/queue.rs`, `src/worktree.rs`, `src/team/task_loop.rs`)
+- **Worktree-mutation audit log** — every `checkout -B` / reset
+  operation now logs the cwd, subsystem tag, and user-change paths so
+  unexpected mutations can be traced back to their triggering
+  subsystem.
+  (`src/worktree.rs`, `src/team/task_loop.rs`)
+- **Nightly scenario-framework fuzz job compiles** — `cargo test` only
+  accepts one positional test-name filter, so the three-name single
+  invocation in `.github/workflows/ci.yml` was failing with
+  `unexpected argument 'fuzz_workflow_with_faults'`. Each filter now
+  runs in its own invocation under the same PROPTEST budget.
+  (`.github/workflows/ci.yml`)
+
 ## 0.11.7 — 2026-04-15
 
 Shim quota handling, CI stability, and dispatch-pipeline polish.
