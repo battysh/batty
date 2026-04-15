@@ -109,6 +109,13 @@ pub enum Event {
         input_tokens: u64,
         output_tokens: u64,
     },
+    QuotaBlocked {
+        message: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        retry_at_epoch_secs: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        retry_at_label: Option<String>,
+    },
     ScreenCapture {
         content: String,
         cursor_row: u16,
@@ -699,6 +706,33 @@ mod tests {
                 assert_eq!(message, "context pressure detected");
                 assert_eq!(input_tokens, 80000);
                 assert_eq!(output_tokens, 20000);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn roundtrip_event_quota_blocked() {
+        let (a, b) = socketpair().unwrap();
+        let mut sender = Channel::new(a);
+        let mut receiver = Channel::new(b);
+
+        let evt = Event::QuotaBlocked {
+            message: "usage limit reached".into(),
+            retry_at_epoch_secs: Some(1_776_214_440),
+            retry_at_label: Some("2026-04-16 12:54".into()),
+        };
+        sender.send(&evt).unwrap();
+        let received: Event = receiver.recv::<Event>().unwrap().unwrap();
+        match received {
+            Event::QuotaBlocked {
+                message,
+                retry_at_epoch_secs,
+                retry_at_label,
+            } => {
+                assert_eq!(message, "usage limit reached");
+                assert_eq!(retry_at_epoch_secs, Some(1_776_214_440));
+                assert_eq!(retry_at_label.as_deref(), Some("2026-04-16 12:54"));
             }
             _ => panic!("wrong variant"),
         }
