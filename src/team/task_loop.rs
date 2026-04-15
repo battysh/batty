@@ -1,6 +1,6 @@
 //! Task-loop helpers extracted from the team daemon.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -844,14 +844,137 @@ fn engineer_worktree_project_root(worktree_dir: &Path) -> Option<PathBuf> {
 }
 
 pub(crate) fn worktree_has_user_changes(worktree_dir: &Path) -> Result<bool> {
-    Ok(!map_git_error(
+    Ok(!current_worktree_user_change_paths(worktree_dir)?.is_empty())
+}
+
+pub(crate) fn current_worktree_user_change_paths(worktree_dir: &Path) -> Result<Vec<String>> {
+    let status = map_git_error(
         retry_git(|| {
             git_cmd::run_git(worktree_dir, USER_WORKTREE_STATUS_ARGS).map(|output| output.stdout)
         }),
         "failed to inspect worktree status",
-    )?
-    .trim()
-    .is_empty())
+    )?;
+    Ok(parse_status_paths(&status))
+}
+
+pub(crate) fn current_staged_change_paths(worktree_dir: &Path) -> Result<Vec<String>> {
+    let output = map_git_error(
+        retry_git(|| git_cmd::run_git(worktree_dir, &["diff", "--cached", "--name-only"])),
+        "failed to inspect staged worktree changes",
+    )?;
+    Ok(output
+        .stdout
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(ToOwned::to_owned)
+        .collect())
+}
+
+fn parse_status_paths(status: &str) -> Vec<String> {
+    status
+        .lines()
+        .filter_map(|line| {
+            if line.len() < 4 {
+                return None;
+            }
+            let path = line[3..].trim();
+            (!path.is_empty()).then(|| path.to_string())
+        })
+        .collect()
+}
+
+pub(crate) fn log_worktree_mutation_audit(
+    worktree_dir: &Path,
+    subsystem: &str,
+    operation: &str,
+    files: &[String],
+) {
+    let branch = crate::worktree::git_current_branch(worktree_dir)
+        .unwrap_or_else(|_| "<detached-or-unavailable>".to_string());
+    let file_summary = if files.is_empty() {
+        "<none>".to_string()
+    } else {
+        files.join(", ")
+    };
+    info!(
+        subsystem,
+        operation,
+        cwd = %worktree_dir.display(),
+        branch,
+        files = %file_summary,
+        "worktree mutation audit"
+    );
+}
+
+fn rollback_newly_staged_paths(
+    worktree_dir: &Path,
+    original_staged_paths: &HashSet<String>,
+    subsystem: &str,
+) {
+    let rollback_paths = match current_staged_change_paths(worktree_dir) {
+        Ok(paths) => paths
+            .into_iter()
+            .filter(|path| !original_staged_paths.contains(path))
+            .collect::<Vec<_>>(),
+        Err(error) => {
+            warn!(
+                subsystem,
+                cwd = %worktree_dir.display(),
+                error = %error,
+                "failed to inspect staged paths while rolling back preservation staging"
+            );
+            return;
+        }
+    };
+
+    if rollback_paths.is_empty() {
+        return;
+    }
+
+    log_worktree_mutation_audit(worktree_dir, subsystem, "git reset -q --", &rollback_paths);
+    let mut last_not_found = None;
+    for program in ["git", "/usr/bin/git", "/opt/homebrew/bin/git"] {
+        let output = Command::new(program)
+            .arg("-C")
+            .arg(worktree_dir)
+            .args(["reset", "-q", "--"])
+            .args(&rollback_paths)
+            .output();
+        match output {
+            Ok(output) if output.status.success() => return,
+            Ok(output) => {
+                warn!(
+                    subsystem,
+                    cwd = %worktree_dir.display(),
+                    stderr = %String::from_utf8_lossy(&output.stderr).trim(),
+                    "failed to roll back newly staged paths after preserve failure"
+                );
+                return;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                last_not_found = Some(error);
+            }
+            Err(error) => {
+                warn!(
+                    subsystem,
+                    cwd = %worktree_dir.display(),
+                    error = %error,
+                    "failed to launch git while rolling back preservation staging"
+                );
+                return;
+            }
+        }
+    }
+
+    if let Some(error) = last_not_found {
+        warn!(
+            subsystem,
+            cwd = %worktree_dir.display(),
+            error = %error,
+            "git binary unavailable while rolling back preservation staging"
+        );
+    }
 }
 
 pub(crate) fn git_has_unresolved_conflicts(repo_dir: &Path) -> Result<bool> {
@@ -1088,62 +1211,64 @@ fn terminate_process_tree(child: &mut std::process::Child) {
     let _ = child.kill();
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn preserve_worktree_with_commit(
     worktree_dir: &Path,
     commit_message: &str,
     timeout: Duration,
 ) -> Result<bool> {
-    if !worktree_has_user_changes(worktree_dir)? {
+    preserve_worktree_with_commit_for(worktree_dir, commit_message, timeout, "task-loop/preserve")
+}
+
+pub(crate) fn preserve_worktree_with_commit_for(
+    worktree_dir: &Path,
+    commit_message: &str,
+    timeout: Duration,
+    subsystem: &str,
+) -> Result<bool> {
+    let dirty_paths = current_worktree_user_change_paths(worktree_dir)?;
+    if dirty_paths.is_empty() {
         return Ok(false);
     }
 
     // Stage from the repository root, then unstage Batty-managed runtime dirs.
     // Explicit `:(exclude)` pathspecs against ignored dirs can make `git add`
     // fail before it stages the real user changes we need to preserve.
-    run_git_with_timeout(worktree_dir, &["add", "-A"], timeout)?;
-    run_git_with_timeout(worktree_dir, PRESERVATION_UNSTAGE_ARGS, timeout)?;
-    if !worktree_has_staged_changes(worktree_dir)? {
-        return Ok(false);
-    }
-    run_git_with_timeout(
-        worktree_dir,
-        &[
-            "-c",
-            "commit.gpgSign=false",
-            "-c",
-            "core.hooksPath=/dev/null",
-            "commit",
-            "-m",
-            commit_message,
-        ],
-        timeout,
-    )?;
-    Ok(true)
-}
+    let original_staged_paths = current_staged_change_paths(worktree_dir)?
+        .into_iter()
+        .collect::<HashSet<_>>();
+    let preserve_result = (|| -> Result<bool> {
+        log_worktree_mutation_audit(worktree_dir, subsystem, "git add -A", &dirty_paths);
+        run_git_with_timeout(worktree_dir, &["add", "-A"], timeout)?;
+        run_git_with_timeout(worktree_dir, PRESERVATION_UNSTAGE_ARGS, timeout)?;
 
-fn worktree_has_staged_changes(worktree_dir: &Path) -> Result<bool> {
-    let output = run_git_command_with_fallback(worktree_dir, &["diff", "--cached", "--quiet"])
-        .with_context(|| {
-            format!(
-                "failed to inspect staged changes in {}",
-                worktree_dir.display()
-            )
-        })?;
+        let staged_paths = current_staged_change_paths(worktree_dir)?;
+        if staged_paths.is_empty() {
+            return Ok(false);
+        }
 
-    match output.status.code() {
-        Some(0) => Ok(false),
-        Some(1) => Ok(true),
-        Some(code) => bail!(
-            "`git diff --cached --quiet` failed in {} with status {}: {}",
-            worktree_dir.display(),
-            code,
-            String::from_utf8_lossy(&output.stderr).trim()
-        ),
-        None => bail!(
-            "`git diff --cached --quiet` terminated unexpectedly in {}",
-            worktree_dir.display()
-        ),
+        log_worktree_mutation_audit(worktree_dir, subsystem, "git commit", &staged_paths);
+        run_git_with_timeout(
+            worktree_dir,
+            &[
+                "-c",
+                "commit.gpgSign=false",
+                "-c",
+                "core.hooksPath=/dev/null",
+                "commit",
+                "-m",
+                commit_message,
+            ],
+            timeout,
+        )?;
+        Ok(true)
+    })();
+
+    if preserve_result.is_err() {
+        rollback_newly_staged_paths(worktree_dir, &original_staged_paths, subsystem);
     }
+
+    preserve_result
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1159,12 +1284,13 @@ pub(crate) fn quarantine_completed_lane_for_recovery(
 ) -> Result<Option<crate::team::checkpoint::PreservedLaneRecord>> {
     let base_branch = engineer_base_branch_name(engineer_name);
     if !worktree_has_user_changes(worktree_dir)? {
-        let reset_reason = crate::worktree::reset_worktree_to_base_with_options(
+        let reset_reason = crate::worktree::reset_worktree_to_base_with_options_for(
             worktree_dir,
             &base_branch,
             &format!("wip: preserve completed task #{} before recovery", task.id),
             timeout,
             crate::worktree::PreserveFailureMode::SkipReset,
+            "completed-task branch recovery",
         )?;
         if !reset_reason.reset_performed() {
             bail!(
@@ -1187,7 +1313,12 @@ pub(crate) fn quarantine_completed_lane_for_recovery(
         task.id, current_branch
     );
 
-    match preserve_worktree_with_commit(worktree_dir, &commit_message, timeout) {
+    match preserve_worktree_with_commit_for(
+        worktree_dir,
+        &commit_message,
+        timeout,
+        "completed-task branch recovery",
+    ) {
         Ok(true) => {
             let preserved_commit = git_cmd::run_git(worktree_dir, &["rev-parse", "HEAD"])
                 .map_err(|error| anyhow::anyhow!("failed to read preservation commit: {error}"))?
@@ -1205,12 +1336,13 @@ pub(crate) fn quarantine_completed_lane_for_recovery(
             );
             crate::team::checkpoint::write_preserved_lane_record(project_root, &record)?;
 
-            let reset_reason = crate::worktree::reset_worktree_to_base_with_options(
+            let reset_reason = crate::worktree::reset_worktree_to_base_with_options_for(
                 worktree_dir,
                 &base_branch,
                 &commit_message,
                 timeout,
                 crate::worktree::PreserveFailureMode::SkipReset,
+                "completed-task branch recovery",
             )?;
             if !reset_reason.reset_performed() {
                 bail!(
@@ -1296,6 +1428,7 @@ fn auto_clean_worktree(worktree_dir: &Path) -> Result<()> {
         &message,
         Duration::from_secs(5),
         crate::worktree::PreserveFailureMode::SkipReset,
+        "dispatch/reset recovery",
     )?;
     if reason == crate::worktree::WorktreeResetReason::PreserveFailedResetSkipped {
         bail!(
@@ -1330,7 +1463,12 @@ fn auto_clean_worktree(worktree_dir: &Path) -> Result<()> {
 pub(crate) fn auto_commit_before_reset(worktree_dir: &Path) -> bool {
     let branch = retry_git(|| git_cmd::rev_parse_branch(worktree_dir)).unwrap_or_default();
     let msg = format!("wip: auto-save before worktree reset [{}]", branch);
-    match preserve_worktree_with_commit(worktree_dir, &msg, Duration::from_secs(5)) {
+    match preserve_worktree_with_commit_for(
+        worktree_dir,
+        &msg,
+        Duration::from_secs(5),
+        "auto-clean before reset",
+    ) {
         Ok(true) => {
             info!(
                 worktree = %worktree_dir.display(),
@@ -3035,6 +3173,7 @@ mod tests {
 
         std::fs::write(wt_dir.join("tracked.txt"), "tracked dirty work\n").unwrap();
         git_ok(&wt_dir, &["add", "tracked.txt"]);
+        std::fs::write(wt_dir.join("unstaged.txt"), "leave unstaged\n").unwrap();
         let git_dir = PathBuf::from(git_stdout(&wt_dir, &["rev-parse", "--git-dir"]));
         let git_dir = if git_dir.is_absolute() {
             git_dir
@@ -3051,6 +3190,15 @@ mod tests {
             "expected explicit preservation blocker, got: {error}"
         );
         assert_eq!(current_worktree_branch(&wt_dir).unwrap(), "eng-blocked/77");
+        let status = git_stdout(&wt_dir, &["status", "--short"]);
+        assert!(
+            status.contains("A  tracked.txt"),
+            "original staged work should remain staged after preserve failure: {status}"
+        );
+        assert!(
+            status.contains("?? unstaged.txt"),
+            "preserve failure must not stage previously unstaged files: {status}"
+        );
     }
 
     #[test]

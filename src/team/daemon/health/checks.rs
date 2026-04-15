@@ -182,19 +182,14 @@ impl TeamDaemon {
             // Check for merge conflicts first — these block all git operations
             if git_has_unresolved_conflicts(&worktree_path).unwrap_or(false) {
                 let base = format!("eng-main/{}", name);
-                let branch =
-                    current_worktree_branch(&worktree_path).unwrap_or_else(|_| base.clone());
-                let commit_message = format!("wip: auto-save before worktree reset [{branch}]");
                 warn!(
                     member = %name,
                     "worktree has unresolved merge conflicts; auto-recovering via merge --abort and reset"
                 );
-                match crate::worktree::reset_worktree_to_base_with_options(
+                match crate::worktree::reset_worktree_to_base_if_clean(
                     &worktree_path,
                     &base,
-                    &commit_message,
-                    Duration::from_secs(5),
-                    crate::worktree::PreserveFailureMode::SkipReset,
+                    "merge-conflict recovery",
                 ) {
                     Err(error) => {
                         warn!(
@@ -309,14 +304,10 @@ impl TeamDaemon {
                         branch = %current_branch,
                         "stale branch detected; resetting worktree"
                     );
-                    let commit_message =
-                        format!("wip: auto-save before worktree reset [{current_branch}]");
-                    match crate::worktree::reset_worktree_to_base_with_options(
+                    match crate::worktree::reset_worktree_to_base_if_clean(
                         &worktree_path,
                         &base,
-                        &commit_message,
-                        Duration::from_secs(5),
-                        crate::worktree::PreserveFailureMode::SkipReset,
+                        "stale-branch recovery",
                     ) {
                         Ok(reason) if reason.reset_performed() => {
                             self.record_orchestrator_action(format!(

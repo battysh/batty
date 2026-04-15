@@ -875,6 +875,7 @@ pub fn ensure_worktree_branch_for_dispatch(
         &commit_message,
         Duration::from_secs(5),
         PreserveFailureMode::SkipReset,
+        "dispatch/branch-reset",
     )?;
     info!(
         worktree = %worktree_path.display(),
@@ -891,6 +892,13 @@ pub fn ensure_worktree_branch_for_dispatch(
         });
     }
 
+    crate::team::task_loop::log_worktree_mutation_audit(
+        worktree_path,
+        "dispatch/branch-reset",
+        "git checkout -B",
+        &crate::team::task_loop::current_worktree_user_change_paths(worktree_path)
+            .unwrap_or_default(),
+    );
     let checkout = run_git(
         worktree_path,
         [
@@ -923,12 +931,13 @@ pub fn ensure_worktree_branch_for_dispatch(
 pub fn reset_worktree_to_base(worktree_path: &Path, base_branch: &str) -> Result<()> {
     let branch = git_current_branch(worktree_path).unwrap_or_else(|_| base_branch.to_string());
     let commit_message = format!("wip: auto-save before worktree reset [{branch}]");
-    reset_worktree_to_base_with_options(
+    reset_worktree_to_base_with_options_for(
         worktree_path,
         base_branch,
         &commit_message,
         Duration::from_secs(5),
         PreserveFailureMode::SkipReset,
+        "worktree/reset",
     )?;
     Ok(())
 }
@@ -940,6 +949,24 @@ pub fn reset_worktree_to_base_with_options(
     timeout: Duration,
     preserve_failure_mode: PreserveFailureMode,
 ) -> Result<WorktreeResetReason> {
+    reset_worktree_to_base_with_options_for(
+        worktree_path,
+        base_branch,
+        commit_message,
+        timeout,
+        preserve_failure_mode,
+        "worktree/reset",
+    )
+}
+
+pub fn reset_worktree_to_base_with_options_for(
+    worktree_path: &Path,
+    base_branch: &str,
+    commit_message: &str,
+    timeout: Duration,
+    preserve_failure_mode: PreserveFailureMode,
+    subsystem: &str,
+) -> Result<WorktreeResetReason> {
     let current_branch =
         git_current_branch(worktree_path).unwrap_or_else(|_| base_branch.to_string());
     let reason = prepare_worktree_for_reset(
@@ -947,6 +974,7 @@ pub fn reset_worktree_to_base_with_options(
         commit_message,
         timeout,
         preserve_failure_mode,
+        subsystem,
     )?;
     if !reason.reset_performed() {
         return Ok(reason);
@@ -961,6 +989,13 @@ pub fn reset_worktree_to_base_with_options(
         );
     }
 
+    crate::team::task_loop::log_worktree_mutation_audit(
+        worktree_path,
+        subsystem,
+        "git checkout -B",
+        &crate::team::task_loop::current_worktree_user_change_paths(worktree_path)
+            .unwrap_or_default(),
+    );
     let checkout = run_git(worktree_path, ["checkout", "-B", base_branch, "main"])?;
     if !checkout.status.success() {
         bail!(
@@ -978,6 +1013,7 @@ pub(crate) fn prepare_worktree_for_reset(
     commit_message: &str,
     timeout: Duration,
     preserve_failure_mode: PreserveFailureMode,
+    subsystem: &str,
 ) -> Result<WorktreeResetReason> {
     if !worktree_path.exists() || !crate::team::task_loop::worktree_has_user_changes(worktree_path)?
     {
@@ -985,10 +1021,11 @@ pub(crate) fn prepare_worktree_for_reset(
         return Ok(WorktreeResetReason::CleanReset);
     }
 
-    match crate::team::task_loop::preserve_worktree_with_commit(
+    match crate::team::task_loop::preserve_worktree_with_commit_for(
         worktree_path,
         commit_message,
         timeout,
+        subsystem,
     ) {
         Ok(true) => {
             let _ = run_git(worktree_path, ["merge", "--abort"]);
@@ -1012,6 +1049,13 @@ pub(crate) fn prepare_worktree_for_reset(
     }
 
     let _ = run_git(worktree_path, ["merge", "--abort"]);
+    crate::team::task_loop::log_worktree_mutation_audit(
+        worktree_path,
+        subsystem,
+        "git reset --hard",
+        &crate::team::task_loop::current_worktree_user_change_paths(worktree_path)
+            .unwrap_or_default(),
+    );
     let reset = run_git(worktree_path, ["reset", "--hard"])?;
     if !reset.status.success() {
         bail!(
@@ -1030,6 +1074,44 @@ pub(crate) fn prepare_worktree_for_reset(
     }
 
     Ok(WorktreeResetReason::PreserveFailedForceReset)
+}
+
+pub fn reset_worktree_to_base_if_clean(
+    worktree_path: &Path,
+    base_branch: &str,
+    subsystem: &str,
+) -> Result<WorktreeResetReason> {
+    let dirty_paths = crate::team::task_loop::current_worktree_user_change_paths(worktree_path)
+        .unwrap_or_default();
+    if !dirty_paths.is_empty() {
+        warn!(
+            subsystem,
+            worktree = %worktree_path.display(),
+            branch = %git_current_branch(worktree_path).unwrap_or_else(|_| "<detached-or-unavailable>".to_string()),
+            files = %dirty_paths.join(", "),
+            "skipping background worktree reset because the lane is dirty"
+        );
+        return Ok(WorktreeResetReason::PreserveFailedResetSkipped);
+    }
+
+    let _ = run_git(worktree_path, ["merge", "--abort"]);
+    crate::team::task_loop::log_worktree_mutation_audit(
+        worktree_path,
+        subsystem,
+        "git checkout -B",
+        &dirty_paths,
+    );
+    let checkout = run_git(worktree_path, ["checkout", "-B", base_branch, "main"])?;
+    if !checkout.status.success() {
+        bail!(
+            "failed to recreate '{}' from 'main' in {}: {}",
+            base_branch,
+            worktree_path.display(),
+            String::from_utf8_lossy(&checkout.stderr).trim()
+        );
+    }
+
+    Ok(WorktreeResetReason::CleanReset)
 }
 
 fn archive_preserved_base_branch_head(worktree_path: &Path, base_branch: &str) -> Result<String> {

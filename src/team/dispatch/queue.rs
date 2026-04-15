@@ -791,14 +791,10 @@ impl TeamDaemon {
                         base_branch = %base_branch,
                         "dispatch queue: auto-resetting worktree to base branch"
                     );
-                    let commit_message =
-                        format!("wip: auto-save before worktree reset [{}]", base_branch);
-                    match crate::worktree::reset_worktree_to_base_with_options(
+                    match crate::worktree::reset_worktree_to_base_if_clean(
                         &worktree_dir,
                         &base_branch,
-                        &commit_message,
-                        std::time::Duration::from_secs(5),
-                        crate::worktree::PreserveFailureMode::SkipReset,
+                        "dispatch/reset recovery",
                     ) {
                         Err(reset_err) => {
                             warn!(
@@ -1424,7 +1420,7 @@ mod tests {
     }
 
     #[test]
-    fn process_queue_preserves_dirty_worktree_before_auto_reset() {
+    fn process_queue_blocks_dirty_worktree_instead_of_auto_preserving() {
         use super::DispatchQueueEntry;
 
         let tmp = tempfile::tempdir().unwrap();
@@ -1471,15 +1467,27 @@ mod tests {
         daemon.process_dispatch_queue().unwrap();
 
         assert_eq!(daemon.dispatch_queue.len(), 1);
-        assert_eq!(daemon.dispatch_queue[0].validation_failures, 0);
-        assert_eq!(current_worktree_branch(&worktree_dir).unwrap(), base_branch);
-        assert_eq!(
-            git_stdout(&repo, &["show", "eng-1/41:tracked.txt"]),
-            "tracked dispatch work"
+        assert_eq!(daemon.dispatch_queue[0].validation_failures, 2);
+        assert!(
+            daemon.dispatch_queue[0]
+                .last_failure
+                .as_deref()
+                .unwrap_or("")
+                .contains("could not safely auto-save dirty worktree")
         );
-        assert_eq!(
-            git_stdout(&repo, &["show", "eng-1/41:untracked.txt"]),
-            "untracked dispatch work"
+        assert_eq!(current_worktree_branch(&worktree_dir).unwrap(), "eng-1/41");
+        let status = git_stdout(&worktree_dir, &["status", "--short"]);
+        assert!(
+            status.contains("A  tracked.txt"),
+            "tracked work should remain staged instead of being auto-preserved: {status}"
+        );
+        assert!(
+            status.contains("?? untracked.txt"),
+            "untracked work should remain untouched instead of being auto-preserved: {status}"
+        );
+        assert!(
+            git_stdout(&repo, &["branch", "--list", "eng-1/41"]).contains("eng-1/41"),
+            "dirty task branch should remain in place for manual recovery"
         );
     }
 
@@ -1498,6 +1506,7 @@ mod tests {
         git_ok(&worktree_dir, &["checkout", "-b", "eng-1/41"]);
         std::fs::write(worktree_dir.join("tracked.txt"), "tracked dispatch work\n").unwrap();
         git_ok(&worktree_dir, &["add", "tracked.txt"]);
+        std::fs::write(worktree_dir.join("unstaged.txt"), "leave unstaged\n").unwrap();
         let git_dir =
             std::path::PathBuf::from(git_stdout(&worktree_dir, &["rev-parse", "--git-dir"]));
         let git_dir = if git_dir.is_absolute() {
@@ -1543,6 +1552,15 @@ mod tests {
                 .contains("could not safely auto-save dirty worktree")
         );
         assert_eq!(current_worktree_branch(&worktree_dir).unwrap(), "eng-1/41");
+        let status = git_stdout(&worktree_dir, &["status", "--short"]);
+        assert!(
+            status.contains("A  tracked.txt"),
+            "pre-existing staged work should remain staged: {status}"
+        );
+        assert!(
+            status.contains("?? unstaged.txt"),
+            "idle dispatch recovery must not stage new files: {status}"
+        );
     }
 
     fn write_blocked_task(project_root: &Path, id: u32, title: &str, block_reason: &str) {

@@ -235,6 +235,7 @@ pub(crate) fn force_clean_worktree(worktree_dir: &Path, engineer_name: &str) {
         &commit_message,
         std::time::Duration::from_secs(5),
         crate::worktree::PreserveFailureMode::ForceReset,
+        "merge/worktree-cleanup",
     ) {
         Ok(reason) => info!(
             engineer = engineer_name,
