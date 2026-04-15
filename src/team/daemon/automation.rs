@@ -2497,12 +2497,14 @@ struct InProgressTaskLiveness {
     dirty_worktree: bool,
     output_growth: bool,
     recent_claim_progress: bool,
+    fresh_claim_grace: bool,
     live_progress_type: Option<&'static str>,
 }
 
 impl InProgressTaskLiveness {
     fn has_live_progress(self) -> bool {
-        self.recent_claim_progress
+        self.fresh_claim_grace
+            || self.recent_claim_progress
             || self.output_growth
             || matches!(self.live_progress_type, Some("commit"))
     }
@@ -2593,6 +2595,22 @@ fn task_recent_claim_progress(
     age_secs >= 0 && age_secs < progress_window.as_secs() as i64
 }
 
+fn fresh_claim_immunity_secs(progress_window: Duration) -> u64 {
+    std::cmp::max(60, progress_window.as_secs() / 10)
+}
+
+fn task_in_fresh_claim_grace(
+    task: &crate::task::Task,
+    now: DateTime<Utc>,
+    progress_window: Duration,
+) -> bool {
+    let Some(claimed_at) = task.claimed_at.as_deref().and_then(parse_rfc3339_utc) else {
+        return false;
+    };
+    let age_secs = now.signed_duration_since(claimed_at).num_seconds();
+    age_secs >= 0 && age_secs < fresh_claim_immunity_secs(progress_window) as i64
+}
+
 impl TeamDaemon {
     fn in_progress_task_liveness(
         &self,
@@ -2612,6 +2630,7 @@ impl TeamDaemon {
             dirty_worktree: has_claim_progress_worktree_changes(&work_dir),
             output_growth: current_output_bytes > task.last_output_bytes.unwrap_or(0),
             recent_claim_progress: task_recent_claim_progress(task, now, progress_window),
+            fresh_claim_grace: task_in_fresh_claim_grace(task, now, progress_window),
             live_progress_type: task_claim_progress_type(task, &work_dir, current_output_bytes),
         })
     }
@@ -6102,6 +6121,64 @@ thread 'tmux::tests::split_window_horizontal_creates_new_pane' panicked at src/t
         assert!(events.iter().any(|event| {
             event.event == "task_claim_created" && event.task.as_deref() == Some("42")
         }));
+    }
+
+    #[test]
+    fn fresh_claim_grace_suppresses_stale_aging_with_old_progress_timestamp() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "fresh-claim-grace");
+        write_board_task_file(
+            &repo,
+            42,
+            "fresh-claim-grace",
+            "in-progress",
+            Some("eng-1"),
+            &[],
+            None,
+        );
+
+        let task_path = board_task_path(&repo, 42);
+        let now = chrono::Utc::now();
+        let old_started = (now - chrono::Duration::hours(8)).to_rfc3339();
+        let stale_progress = (now - chrono::Duration::hours(7)).to_rfc3339();
+        let fresh_claim = now.to_rfc3339();
+        update_task_frontmatter(&task_path, |mapping| {
+            set_optional_string(mapping, "started", Some(&old_started));
+            set_optional_string(mapping, "updated", Some(&old_started));
+            set_optional_string(mapping, "claimed_at", Some(&fresh_claim));
+            set_optional_string(mapping, "last_progress_at", Some(&stale_progress));
+            set_optional_u64(mapping, "last_output_bytes", Some(0));
+        })
+        .unwrap();
+
+        let mut daemon = TestDaemonBuilder::new(repo.as_path())
+            .members(vec![
+                architect_member("architect"),
+                manager_member("manager", Some("architect")),
+                engineer_member("eng-1", Some("manager"), false),
+            ])
+            .workflow_policy(WorkflowPolicy {
+                stale_in_progress_hours: 1,
+                ..WorkflowPolicy::default()
+            })
+            .build();
+        daemon
+            .config
+            .team_config
+            .automation
+            .intervention_cooldown_secs = 300;
+
+        daemon.maybe_emit_task_aging_alerts().unwrap();
+
+        let events =
+            crate::team::events::read_events(&crate::team::team_events_path(&repo)).unwrap();
+        assert!(
+            !events.iter().any(|event| {
+                matches!(event.event.as_str(), "task_stale" | "task_escalated")
+                    && event.task.as_deref() == Some("42")
+            }),
+            "fresh claims should suppress stale aging even when last_progress_at is old"
+        );
     }
 
     #[test]
