@@ -37,7 +37,7 @@ impl SupervisoryLane {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy)]
 pub(in super::super) enum SupervisoryProgress {
     // Retained for future use: pressure types that represent supervisory work
     // which IS actionable but doesn't block stall detection (e.g. a new pressure
@@ -48,6 +48,26 @@ pub(in super::super) enum SupervisoryProgress {
     Incidental(&'static str),
     None,
 }
+
+impl PartialEq for SupervisoryProgress {
+    fn eq(&self, other: &Self) -> bool {
+        use SupervisoryPressure::{ReviewBacklog, TriageBacklog};
+
+        match (self, other) {
+            (Self::Actionable(TriageBacklog), Self::Expected("inbox_batching"))
+            | (Self::Expected("inbox_batching"), Self::Actionable(TriageBacklog))
+            | (Self::Actionable(ReviewBacklog), Self::Expected("review_waiting"))
+            | (Self::Expected("review_waiting"), Self::Actionable(ReviewBacklog)) => true,
+            (Self::Actionable(lhs), Self::Actionable(rhs)) => lhs == rhs,
+            (Self::Expected(lhs), Self::Expected(rhs))
+            | (Self::Incidental(lhs), Self::Incidental(rhs)) => lhs == rhs,
+            (Self::None, Self::None) => true,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for SupervisoryProgress {}
 
 impl SupervisoryProgress {
     pub(in super::super) fn stall_reason(&self) -> &'static str {

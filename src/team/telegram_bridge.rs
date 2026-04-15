@@ -180,15 +180,20 @@ impl TeamDaemon {
         let session = format!("batty-{}", self.config.team_config.name);
         let running = crate::tmux::session_exists(&session);
         let paused = crate::team::pause_marker_path(&self.config.project_root).exists();
-        let pending_inbox_counts = crate::team::status::pending_inbox_counts(
-            &self.config.project_root,
-            &self.config.members,
-        );
         let triage_backlog_counts = crate::team::status::triage_backlog_counts(
             &self.config.project_root,
             &self.config.members,
         );
-        let pending_inbox_total: usize = pending_inbox_counts.values().sum();
+        let inbox_root = crate::team::inbox::inboxes_root(&self.config.project_root);
+        let pending_inbox_total: usize = self
+            .config
+            .members
+            .iter()
+            .filter(|member| member.role_type != RoleType::User)
+            .map(|member| {
+                crate::team::inbox::pending_message_count(&inbox_root, &member.name).unwrap_or(0)
+            })
+            .sum();
         let triage_total: usize = triage_backlog_counts.values().sum();
 
         let mut state_counts = BTreeMap::new();
