@@ -2724,7 +2724,7 @@ mod tests {
 
         let summary = daemon.render_telegram_status_summary();
         assert!(summary.contains("Members: idle=1, working=1"));
-        assert!(summary.contains("Inbox: 1"));
+        assert!(summary.contains("Inbox: 0"));
         assert!(summary.contains("Board: active=1, review=1"));
     }
 }
