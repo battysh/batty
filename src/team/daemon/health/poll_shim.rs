@@ -681,6 +681,39 @@ impl TeamDaemon {
                 }
                 debug!(member = member_name, command, reason, "shim error");
             }
+
+            Event::QuotaBlocked {
+                message,
+                retry_at_epoch_secs,
+                retry_at_label,
+            } => {
+                let label = retry_at_label.as_deref().unwrap_or("unknown");
+                let _ = append_shim_event_log(
+                    &self.config.project_root,
+                    member_name,
+                    &format!("<- quota_blocked until={label}: {message}"),
+                );
+                warn!(
+                    member = member_name,
+                    retry_at = label,
+                    "backend quota blocked — pausing dispatch"
+                );
+                self.backend_health.insert(
+                    member_name.to_string(),
+                    crate::agent::BackendHealth::QuotaExhausted,
+                );
+                self.record_orchestrator_action(format!(
+                    "quota: {member_name} backend blocked until {label} — {message}"
+                ));
+                self.emit_event(crate::team::events::TeamEvent::backend_quota_exhausted(
+                    member_name,
+                    &message,
+                ));
+                // retry_at_epoch_secs is reserved for future scheduling;
+                // current logic simply holds the QuotaExhausted status until the
+                // next restart or operator intervention.
+                let _ = retry_at_epoch_secs;
+            }
         }
 
         Ok(())
