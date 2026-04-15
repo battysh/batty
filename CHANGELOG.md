@@ -2,6 +2,35 @@
 
 All notable changes to Batty are documented here.
 
+## 0.11.11 — 2026-04-15
+
+Preserve unmerged engineer commits across every destructive branch reset.
+
+### Fixes
+
+- **Dispatch reconciliation must preserve commits ahead of main** (#659)
+  — every `git checkout -B <branch> <base>` that would rewrite a branch
+  ref now first archives any commits the branch carried ahead of its
+  target to a `preserved/<slug>-<timestamp>` backup branch. Covers the
+  three reset paths that previously discarded unmerged work:
+  - `reset_worktree_to_base_with_options_for` — archives `base_branch`
+    before recreating it from `main`. Supplements the existing
+    `PreservedBeforeReset` HEAD archive (which still runs when
+    `current_branch == base_branch`) by also covering stale commits
+    from prior sessions.
+  - `reset_worktree_to_base_if_clean` — archives `base_branch` before
+    the background clean-reset path so health-check reconciliation no
+    longer drops completed-but-unmerged task work.
+  - `ensure_worktree_branch_for_dispatch` — archives the `expected_branch`
+    before overwriting it from the dispatch start ref, so dispatches that
+    re-point a branch to `main`/`origin/main` keep whatever the branch
+    already had.
+
+  The helper (`archive_branch_if_commits_ahead`) is a no-op when the
+  branch is missing or has zero commits ahead of the reset target, uses
+  a unique suffix when a timestamp collides with an existing archive, and
+  logs commit count + archive name on success. (`src/worktree.rs`)
+
 ## 0.11.10 — 2026-04-15
 
 Quota-retry gating across the four daemon subsystems that misread a
