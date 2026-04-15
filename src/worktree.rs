@@ -892,6 +892,14 @@ pub fn ensure_worktree_branch_for_dispatch(
         });
     }
 
+    // #659: archive commits ahead of the start ref on `expected_branch` before
+    // the destructive `checkout -B expected_branch <start_ref>` below.
+    let _ = archive_branch_if_commits_ahead(
+        worktree_path,
+        expected_branch,
+        selection.ref_name.as_str(),
+        "dispatch/branch-reset",
+    );
     crate::team::task_loop::log_worktree_mutation_audit(
         worktree_path,
         "dispatch/branch-reset",
@@ -979,7 +987,9 @@ pub fn reset_worktree_to_base_with_options_for(
     if !reason.reset_performed() {
         return Ok(reason);
     }
-    if reason == WorktreeResetReason::PreservedBeforeReset && current_branch == base_branch {
+    let already_archived_head =
+        reason == WorktreeResetReason::PreservedBeforeReset && current_branch == base_branch;
+    if already_archived_head {
         let archived_branch = archive_preserved_base_branch_head(worktree_path, base_branch)?;
         info!(
             worktree = %worktree_path.display(),
@@ -987,6 +997,13 @@ pub fn reset_worktree_to_base_with_options_for(
             archived_branch,
             "archived preserved base-branch work before reset"
         );
+    } else {
+        // #659: guard destructive `checkout -B <base_branch> main` by archiving
+        // any commits already on `base_branch` that are ahead of main. This
+        // covers the case where `base_branch` already had unmerged commits from
+        // a prior session (e.g. completed task work that hasn't been merged
+        // yet) and the branch ref is about to be rewritten to `main`.
+        let _ = archive_branch_if_commits_ahead(worktree_path, base_branch, "main", subsystem);
     }
 
     crate::team::task_loop::log_worktree_mutation_audit(
@@ -1095,6 +1112,9 @@ pub fn reset_worktree_to_base_if_clean(
     }
 
     let _ = run_git(worktree_path, ["merge", "--abort"]);
+    // #659: archive commits ahead of main on `base_branch` before the
+    // destructive `checkout -B base_branch main` below.
+    let _ = archive_branch_if_commits_ahead(worktree_path, base_branch, "main", subsystem);
     crate::team::task_loop::log_worktree_mutation_audit(
         worktree_path,
         subsystem,
@@ -1131,6 +1151,82 @@ fn archive_preserved_base_branch_head(worktree_path: &Path, base_branch: &str) -
         );
     }
     Ok(branch)
+}
+
+/// Archive a branch to `preserved/<slug>-<timestamp>` if it has commits ahead
+/// of `base_ref`. Returns `Ok(None)` when the branch is missing or has no
+/// commits ahead; otherwise returns `Ok(Some(<archive_branch>))`.
+///
+/// Used to preserve engineer work before any destructive `git checkout -B
+/// <branch> <base>` that would rewrite the branch ref. See issue #659.
+pub(crate) fn archive_branch_if_commits_ahead(
+    worktree_path: &Path,
+    branch_name: &str,
+    base_ref: &str,
+    subsystem: &str,
+) -> Result<Option<String>> {
+    if !ref_exists(worktree_path, &format!("refs/heads/{branch_name}"))? {
+        return Ok(None);
+    }
+    let range = format!("{base_ref}..{branch_name}");
+    let ahead = match rev_list_count(worktree_path, range.as_str()) {
+        Ok(n) => n,
+        Err(e) => {
+            warn!(
+                subsystem,
+                worktree = %worktree_path.display(),
+                branch = branch_name,
+                base_ref,
+                error = %e,
+                "failed to count commits ahead; skipping archive"
+            );
+            return Ok(None);
+        }
+    };
+    if ahead == 0 {
+        return Ok(None);
+    }
+    let slug = branch_name.replace('/', "-");
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let mut archive_branch = format!("preserved/{slug}-{stamp}");
+    let mut suffix: u32 = 0;
+    while ref_exists(worktree_path, &format!("refs/heads/{archive_branch}"))? {
+        suffix += 1;
+        archive_branch = format!("preserved/{slug}-{stamp}-{suffix}");
+        if suffix > 100 {
+            bail!(
+                "exhausted preserve-branch suffixes for '{}' in {}",
+                branch_name,
+                worktree_path.display()
+            );
+        }
+    }
+    let create = run_git(
+        worktree_path,
+        ["branch", archive_branch.as_str(), branch_name],
+    )?;
+    if !create.status.success() {
+        bail!(
+            "failed to archive branch '{}' as '{}' in {}: {}",
+            branch_name,
+            archive_branch,
+            worktree_path.display(),
+            String::from_utf8_lossy(&create.stderr).trim()
+        );
+    }
+    info!(
+        subsystem,
+        worktree = %worktree_path.display(),
+        branch = branch_name,
+        base_ref,
+        commits_ahead = ahead,
+        archive = %archive_branch,
+        "archived branch commits ahead of base before destructive reset (#659)"
+    );
+    Ok(Some(archive_branch))
 }
 
 fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
@@ -2023,5 +2119,288 @@ mod tests {
         );
         let _ = run_git(tmp.path(), ["branch", "-D", "eng-main/test-eng"]);
         let _ = run_git(tmp.path(), ["branch", "-D", preserved_branch.as_str()]);
+    }
+
+    // #659 coverage: destructive resets must archive commits ahead of their
+    // reset target onto a `preserved/<slug>-<stamp>` branch rather than
+    // discarding them.
+
+    fn preserved_branches_for(repo_root: &Path, slug: &str) -> Vec<String> {
+        let output = run_git(
+            repo_root,
+            [
+                "for-each-ref",
+                "--format=%(refname:short)",
+                "refs/heads/preserved/",
+            ],
+        )
+        .unwrap();
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(str::to_string)
+            .filter(|r| r.starts_with(&format!("preserved/{slug}-")))
+            .collect()
+    }
+
+    #[test]
+    fn reset_worktree_to_base_archives_base_branch_commits_ahead() {
+        let Some(tmp) = init_repo() else {
+            return;
+        };
+        let wt_path = tmp.path().join("wt");
+        git(
+            tmp.path(),
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "eng-main/659-fix",
+                wt_path.to_str().unwrap(),
+                "main",
+            ],
+        );
+        fs::write(wt_path.join("feature.txt"), "committed\n").unwrap();
+        git(&wt_path, &["add", "feature.txt"]);
+        git(
+            &wt_path,
+            &["commit", "-q", "-m", "feature commit ahead of main"],
+        );
+        let pre_reset_tip =
+            String::from_utf8_lossy(&run_git(&wt_path, ["rev-parse", "HEAD"]).unwrap().stdout)
+                .trim()
+                .to_string();
+
+        let reason = reset_worktree_to_base_with_options(
+            &wt_path,
+            "eng-main/659-fix",
+            "wip: auto-save before worktree reset",
+            Duration::from_secs(5),
+            PreserveFailureMode::SkipReset,
+        )
+        .unwrap();
+
+        assert_eq!(reason, WorktreeResetReason::CleanReset);
+
+        let preserved = preserved_branches_for(tmp.path(), "eng-main-659-fix");
+        assert!(
+            !preserved.is_empty(),
+            "expected preserved branch for commits ahead, found none"
+        );
+        let archive_tip = String::from_utf8_lossy(
+            &run_git(tmp.path(), ["rev-parse", preserved[0].as_str()])
+                .unwrap()
+                .stdout,
+        )
+        .trim()
+        .to_string();
+        assert_eq!(
+            archive_tip, pre_reset_tip,
+            "preserved branch must point at pre-reset tip"
+        );
+        let feature_on_archive = run_git(
+            tmp.path(),
+            ["show", &format!("{}:feature.txt", preserved[0])],
+        )
+        .unwrap();
+        assert!(
+            feature_on_archive.status.success(),
+            "preserved branch should carry the committed file"
+        );
+
+        let _ = run_git(
+            tmp.path(),
+            ["worktree", "remove", "--force", wt_path.to_str().unwrap()],
+        );
+        let _ = run_git(tmp.path(), ["branch", "-D", "eng-main/659-fix"]);
+        for p in preserved {
+            let _ = run_git(tmp.path(), ["branch", "-D", p.as_str()]);
+        }
+    }
+
+    #[test]
+    fn reset_worktree_to_base_noop_archive_when_no_commits_ahead() {
+        let Some(tmp) = init_repo() else {
+            return;
+        };
+        let wt_path = tmp.path().join("wt");
+        git(
+            tmp.path(),
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "eng-main/clean",
+                wt_path.to_str().unwrap(),
+                "main",
+            ],
+        );
+
+        let reason = reset_worktree_to_base_with_options(
+            &wt_path,
+            "eng-main/clean",
+            "wip: auto-save before worktree reset",
+            Duration::from_secs(5),
+            PreserveFailureMode::SkipReset,
+        )
+        .unwrap();
+
+        assert_eq!(reason, WorktreeResetReason::CleanReset);
+        let preserved = preserved_branches_for(tmp.path(), "eng-main-clean");
+        assert!(
+            preserved.is_empty(),
+            "no archive should be created when branch has 0 commits ahead, got {preserved:?}"
+        );
+
+        let _ = run_git(
+            tmp.path(),
+            ["worktree", "remove", "--force", wt_path.to_str().unwrap()],
+        );
+        let _ = run_git(tmp.path(), ["branch", "-D", "eng-main/clean"]);
+    }
+
+    #[test]
+    fn reset_worktree_to_base_if_clean_archives_commits_ahead() {
+        let Some(tmp) = init_repo() else {
+            return;
+        };
+        let wt_path = tmp.path().join("wt");
+        git(
+            tmp.path(),
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "eng-main/clean-ahead",
+                wt_path.to_str().unwrap(),
+                "main",
+            ],
+        );
+        fs::write(wt_path.join("ahead.txt"), "committed\n").unwrap();
+        git(&wt_path, &["add", "ahead.txt"]);
+        git(&wt_path, &["commit", "-q", "-m", "committed work"]);
+
+        let reason = reset_worktree_to_base_if_clean(
+            &wt_path,
+            "eng-main/clean-ahead",
+            "test/reset-if-clean",
+        )
+        .unwrap();
+        assert_eq!(reason, WorktreeResetReason::CleanReset);
+
+        let preserved = preserved_branches_for(tmp.path(), "eng-main-clean-ahead");
+        assert!(
+            !preserved.is_empty(),
+            "reset_worktree_to_base_if_clean must archive commits ahead"
+        );
+        let preserved_file =
+            run_git(tmp.path(), ["show", &format!("{}:ahead.txt", preserved[0])]).unwrap();
+        assert!(preserved_file.status.success());
+
+        let _ = run_git(
+            tmp.path(),
+            ["worktree", "remove", "--force", wt_path.to_str().unwrap()],
+        );
+        let _ = run_git(tmp.path(), ["branch", "-D", "eng-main/clean-ahead"]);
+        for p in preserved {
+            let _ = run_git(tmp.path(), ["branch", "-D", p.as_str()]);
+        }
+    }
+
+    #[test]
+    fn ensure_worktree_branch_for_dispatch_archives_expected_branch_commits_ahead() {
+        let Some(tmp) = init_repo() else {
+            return;
+        };
+        // Create the target expected branch with commits ahead of main.
+        git(tmp.path(), &["branch", "eng-1-1-659", "main"]);
+        git(tmp.path(), &["checkout", "eng-1-1-659"]);
+        fs::write(tmp.path().join("expected.txt"), "work\n").unwrap();
+        git(tmp.path(), &["add", "expected.txt"]);
+        git(
+            tmp.path(),
+            &["commit", "-q", "-m", "prior work on expected"],
+        );
+        git(tmp.path(), &["checkout", "main"]);
+
+        // Create the worktree on a different branch (will need to be reset).
+        let wt_path = tmp.path().join("wt");
+        git(
+            tmp.path(),
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "eng-1-1-500",
+                wt_path.to_str().unwrap(),
+                "main",
+            ],
+        );
+
+        let reset = ensure_worktree_branch_for_dispatch(&wt_path, "eng-1-1-659").unwrap();
+        assert!(reset.changed);
+        assert_eq!(git_current_branch(&wt_path).unwrap(), "eng-1-1-659");
+
+        let preserved = preserved_branches_for(tmp.path(), "eng-1-1-659");
+        assert!(
+            !preserved.is_empty(),
+            "ensure_worktree_branch_for_dispatch must archive commits ahead on expected branch"
+        );
+        let preserved_file = run_git(
+            tmp.path(),
+            ["show", &format!("{}:expected.txt", preserved[0])],
+        )
+        .unwrap();
+        assert!(
+            preserved_file.status.success(),
+            "preserved branch should carry the committed file on expected branch"
+        );
+
+        let _ = run_git(
+            tmp.path(),
+            ["worktree", "remove", "--force", wt_path.to_str().unwrap()],
+        );
+        let _ = run_git(tmp.path(), ["branch", "-D", "eng-1-1-500"]);
+        let _ = run_git(tmp.path(), ["branch", "-D", "eng-1-1-659"]);
+        for p in preserved {
+            let _ = run_git(tmp.path(), ["branch", "-D", p.as_str()]);
+        }
+    }
+
+    #[test]
+    fn archive_branch_if_commits_ahead_assigns_unique_names_for_concurrent_engineers() {
+        let Some(tmp) = init_repo() else {
+            return;
+        };
+        git(tmp.path(), &["checkout", "-b", "eng-1-1-999"]);
+        fs::write(tmp.path().join("eng1.txt"), "eng1\n").unwrap();
+        git(tmp.path(), &["add", "eng1.txt"]);
+        git(tmp.path(), &["commit", "-q", "-m", "eng1 work"]);
+        git(tmp.path(), &["checkout", "main"]);
+
+        let first = archive_branch_if_commits_ahead(tmp.path(), "eng-1-1-999", "main", "test")
+            .unwrap()
+            .expect("first archive should succeed");
+        let second = archive_branch_if_commits_ahead(tmp.path(), "eng-1-1-999", "main", "test")
+            .unwrap()
+            .expect("second archive should succeed with unique suffix");
+        assert_ne!(
+            first, second,
+            "concurrent archives on the same tip must produce distinct branch names"
+        );
+
+        let _ = run_git(tmp.path(), ["branch", "-D", "eng-1-1-999"]);
+        let _ = run_git(tmp.path(), ["branch", "-D", first.as_str()]);
+        let _ = run_git(tmp.path(), ["branch", "-D", second.as_str()]);
+    }
+
+    #[test]
+    fn archive_branch_if_commits_ahead_skips_missing_branch() {
+        let Some(tmp) = init_repo() else {
+            return;
+        };
+        let result =
+            archive_branch_if_commits_ahead(tmp.path(), "nonexistent-branch", "main", "test")
+                .unwrap();
+        assert!(result.is_none(), "missing branch should return None");
     }
 }
