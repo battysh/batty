@@ -276,7 +276,8 @@ fn persisted_profile_matches_task(task: &Task, record: &PersistedTaskProfile) ->
         return true;
     }
 
-    let hinted_dirs: HashSet<String> = task_hint_paths(task)
+    let hinted_dirs: HashSet<String> = crate::task::task_file_hints(task)
+        .unwrap_or_default()
         .into_iter()
         .filter_map(|path| parent_dir(&path))
         .collect();
@@ -694,7 +695,7 @@ fn task_has_conflict_signal(task: &Task) -> bool {
 }
 
 fn task_profile_paths(task: &Task) -> Result<HashSet<String>> {
-    let mut paths = task_hint_paths(task);
+    let mut paths: HashSet<String> = crate::task::task_file_hints(task)?.into_iter().collect();
     for path in load_changed_paths(task.source_path.as_path())? {
         paths.insert(path);
     }
@@ -702,27 +703,11 @@ fn task_profile_paths(task: &Task) -> Result<HashSet<String>> {
 }
 
 fn task_hint_directories(task: &Task) -> HashSet<String> {
-    task_hint_paths(task)
+    crate::task::task_file_hints(task)
+        .unwrap_or_default()
         .into_iter()
         .filter_map(|path| parent_dir(&path))
         .collect()
-}
-
-fn task_hint_paths(task: &Task) -> HashSet<String> {
-    task.description
-        .split_whitespace()
-        .filter_map(clean_task_path_token)
-        .collect()
-}
-
-fn clean_task_path_token(token: &str) -> Option<String> {
-    let cleaned = token.trim_matches(|ch: char| {
-        matches!(
-            ch,
-            '"' | '\'' | ',' | ':' | ';' | '(' | ')' | '[' | ']' | '`'
-        )
-    });
-    parent_dir(cleaned).map(|_| cleaned.to_string())
 }
 
 fn load_changed_paths(path: &Path) -> Result<Vec<String>> {
