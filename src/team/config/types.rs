@@ -249,6 +249,8 @@ pub struct WorkflowPolicy {
     pub auto_archive_done_after_secs: Option<u64>,
     #[serde(default)]
     pub capability_overrides: HashMap<String, Vec<String>>,
+    #[serde(default)]
+    pub file_level_locks: bool,
     #[serde(default = "default_stall_threshold_secs")]
     pub stall_threshold_secs: u64,
     #[serde(default = "default_max_stall_restarts")]
@@ -356,6 +358,7 @@ impl Default for WorkflowPolicy {
             review_timeout_overrides: HashMap::new(),
             auto_archive_done_after_secs: None,
             capability_overrides: HashMap::new(),
+            file_level_locks: false,
             stall_threshold_secs: default_stall_threshold_secs(),
             max_stall_restarts: default_max_stall_restarts(),
             health_check_interval_secs: default_health_check_interval_secs(),

@@ -45,6 +45,7 @@ fn parse_minimal_config() {
     assert_eq!(config.workflow_policy.stale_in_progress_hours, 4);
     assert_eq!(config.workflow_policy.aged_todo_hours, 48);
     assert_eq!(config.workflow_policy.stale_review_hours, 1);
+    assert!(!config.workflow_policy.file_level_locks);
 }
 
 #[test]

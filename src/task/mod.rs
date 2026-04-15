@@ -132,6 +132,12 @@ struct Frontmatter {
     completed: Option<String>,
 }
 
+#[derive(Debug, Deserialize, Default)]
+struct TaskFilesFrontmatter {
+    #[serde(default)]
+    files: Vec<String>,
+}
+
 fn default_status() -> String {
     "backlog".to_string()
 }
@@ -364,6 +370,56 @@ fn render_frontmatter_content(mapping: &Mapping, body: &str) -> Result<String> {
     updated.push_str("---\n");
     updated.push_str(body);
     Ok(updated)
+}
+
+fn extract_declared_files_frontmatter(task_path: &Path) -> Result<Vec<String>> {
+    if task_path.as_os_str().is_empty() || !task_path.exists() {
+        return Ok(Vec::new());
+    }
+
+    let content = std::fs::read_to_string(task_path)
+        .with_context(|| format!("failed to read task file: {}", task_path.display()))?;
+    let (frontmatter, _) = split_frontmatter(&content)?;
+    let parsed: TaskFilesFrontmatter =
+        serde_yaml::from_str(frontmatter).context("failed to parse task file frontmatter")?;
+    Ok(parsed.files)
+}
+
+fn clean_file_hint_token(token: &str) -> Option<String> {
+    let cleaned = token.trim_matches(|ch: char| {
+        matches!(
+            ch,
+            '"' | '\'' | ',' | ':' | ';' | '(' | ')' | '[' | ']' | '`'
+        )
+    });
+    let cleaned = cleaned.trim_end_matches('.');
+    if cleaned.is_empty() {
+        return None;
+    }
+
+    let has_parent = PathBuf::from(cleaned)
+        .parent()
+        .is_some_and(|parent| !parent.as_os_str().is_empty());
+    if has_parent || cleaned.contains('*') || cleaned.contains('?') {
+        Some(cleaned.to_string())
+    } else {
+        None
+    }
+}
+
+fn extract_body_file_hints(body: &str) -> Vec<String> {
+    body.split_whitespace()
+        .filter_map(clean_file_hint_token)
+        .collect()
+}
+
+pub(crate) fn task_file_hints(task: &Task) -> Result<Vec<String>> {
+    let mut files = extract_declared_files_frontmatter(task.source_path.as_path())?;
+    files.extend(extract_body_file_hints(&task.description));
+    files.retain(|file| !file.trim().is_empty());
+    files.sort();
+    files.dedup();
+    Ok(files)
 }
 
 fn normalize_task_frontmatter_content(
@@ -640,6 +696,68 @@ Body.
             task.blocked.is_some(),
             "blocked: true must produce a Some(...) value"
         );
+    }
+
+    #[test]
+    fn task_file_hints_include_frontmatter_files_and_body_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        let task_path = tmp.path().join("101-locks.md");
+        fs::write(
+            &task_path,
+            "---\nid: 101\ntitle: lock\nstatus: todo\npriority: high\nfiles:\n  - src/app.rs\n  - src/**/*.rs\nclass: standard\n---\n\nChange src/lib.rs and docs/guide.md.\n",
+        )
+        .unwrap();
+
+        let task = Task::from_file(&task_path).unwrap();
+        let hints = task_file_hints(&task).unwrap();
+
+        assert_eq!(
+            hints,
+            vec![
+                "docs/guide.md".to_string(),
+                "src/**/*.rs".to_string(),
+                "src/app.rs".to_string(),
+                "src/lib.rs".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn task_file_hints_support_root_level_globs() {
+        let task = Task {
+            id: 1,
+            title: "root glob".to_string(),
+            status: "todo".to_string(),
+            priority: "high".to_string(),
+            claimed_by: None,
+            claimed_at: None,
+            claim_ttl_secs: None,
+            claim_expires_at: None,
+            last_progress_at: None,
+            claim_warning_sent_at: None,
+            claim_extensions: None,
+            last_output_bytes: None,
+            blocked: None,
+            tags: Vec::new(),
+            depends_on: Vec::new(),
+            review_owner: None,
+            blocked_on: None,
+            worktree_path: None,
+            branch: None,
+            commit: None,
+            artifacts: Vec::new(),
+            next_action: None,
+            scheduled_for: None,
+            cron_schedule: None,
+            cron_last_run: None,
+            completed: None,
+            description: "Touch *.rs and Cargo.toml.".to_string(),
+            batty_config: None,
+            source_path: PathBuf::new(),
+        };
+
+        let hints = task_file_hints(&task).unwrap();
+        assert_eq!(hints, vec!["*.rs".to_string()]);
     }
 
     #[test]

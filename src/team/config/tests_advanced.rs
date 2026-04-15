@@ -513,6 +513,7 @@ fn parse_workflow_policy_defaults_all_applied() {
     assert!(p.review_timeout_overrides.is_empty());
     assert!(p.auto_archive_done_after_secs.is_none());
     assert!(p.capability_overrides.is_empty());
+    assert!(!p.file_level_locks);
     assert_eq!(p.stall_threshold_secs, 300);
     assert_eq!(p.max_stall_restarts, 2);
     assert_eq!(p.health_check_interval_secs, 60);
@@ -551,6 +552,22 @@ roles:
     assert_eq!(allocation.load_penalty, 5);
     assert_eq!(allocation.conflict_penalty, 34);
     assert_eq!(allocation.experience_bonus, 2);
+}
+
+#[test]
+fn parse_workflow_policy_file_level_locks_override() {
+    let yaml = r#"
+name: test
+workflow_policy:
+  file_level_locks: true
+roles:
+  - name: worker
+    role_type: engineer
+    agent: codex
+"#;
+
+    let config: TeamConfig = serde_yaml::from_str(yaml).unwrap();
+    assert!(config.workflow_policy.file_level_locks);
 }
 
 #[test]

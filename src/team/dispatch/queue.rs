@@ -1,10 +1,11 @@
 //! Dispatch queue population, processing, and task selection.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::Path;
 use std::time::Instant;
 
 use anyhow::Result;
+use regex::Regex;
 use tracing::{debug, info, warn};
 
 use super::super::super::policy::check_wip_limit;
@@ -92,6 +93,87 @@ fn normalize_predicted_path(path: &str) -> String {
         .to_string()
 }
 
+fn has_glob_magic(path: &str) -> bool {
+    path.contains('*') || path.contains('?')
+}
+
+fn glob_to_regex(pattern: &str) -> Option<Regex> {
+    let mut regex = String::from("^");
+    let mut chars = pattern.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '*' => {
+                if chars.peek() == Some(&'*') {
+                    chars.next();
+                    if chars.peek() == Some(&'/') {
+                        chars.next();
+                        regex.push_str("(?:.*/)?");
+                    } else {
+                        regex.push_str(".*");
+                    }
+                } else {
+                    regex.push_str("[^/]*");
+                }
+            }
+            '?' => regex.push_str("[^/]"),
+            '.' | '+' | '(' | ')' | '[' | ']' | '{' | '}' | '^' | '$' | '|' | '\\' => {
+                regex.push('\\');
+                regex.push(ch);
+            }
+            _ => regex.push(ch),
+        }
+    }
+    regex.push('$');
+    Regex::new(&regex).ok()
+}
+
+fn glob_matches_path(pattern: &str, path: &str) -> bool {
+    if !has_glob_magic(pattern) {
+        return pattern == path;
+    }
+    glob_to_regex(pattern)
+        .map(|regex| regex.is_match(path))
+        .unwrap_or(false)
+}
+
+fn glob_literal_prefix(pattern: &str) -> Option<&str> {
+    let idx = pattern
+        .char_indices()
+        .find_map(|(idx, ch)| matches!(ch, '*' | '?').then_some(idx))
+        .unwrap_or(pattern.len());
+    let prefix = pattern[..idx].trim_end_matches('/');
+    (!prefix.is_empty()).then_some(prefix)
+}
+
+fn paths_overlap(left: &str, right: &str) -> bool {
+    match (has_glob_magic(left), has_glob_magic(right)) {
+        (false, false) => left == right,
+        (true, false) => glob_matches_path(left, right),
+        (false, true) => glob_matches_path(right, left),
+        (true, true) => {
+            if left == right {
+                return true;
+            }
+            match (glob_literal_prefix(left), glob_literal_prefix(right)) {
+                (Some(left_prefix), Some(right_prefix)) => {
+                    left_prefix.starts_with(right_prefix) || right_prefix.starts_with(left_prefix)
+                }
+                _ => true,
+            }
+        }
+    }
+}
+
+fn describe_overlap(left: &str, right: &str) -> String {
+    match (has_glob_magic(left), has_glob_magic(right)) {
+        (false, false) => left.to_string(),
+        (true, false) => right.to_string(),
+        (false, true) => left.to_string(),
+        (true, true) if left == right => left.to_string(),
+        (true, true) => format!("{left} <> {right}"),
+    }
+}
+
 pub fn predicted_files(task: &crate::task::Task, project_root: &Path) -> Vec<String> {
     let mut paths = predict_task_file_paths(project_root, task)
         .unwrap_or_default()
@@ -124,16 +206,15 @@ pub fn predicted_files(task: &crate::task::Task, project_root: &Path) -> Vec<Str
 }
 
 fn overlapping_files(candidate_paths: &[String], active_paths: &[String]) -> Vec<String> {
-    let candidate_set: HashSet<&String> = candidate_paths.iter().collect();
-    let active_set: HashSet<&String> = active_paths.iter().collect();
-    let overlaps: HashSet<String> = candidate_set
-        .intersection(&active_set)
-        .map(|path| (*path).clone())
-        .collect();
-
-    let mut overlaps: Vec<String> = overlaps.into_iter().collect();
-    overlaps.sort();
-    overlaps
+    let mut overlaps = BTreeSet::new();
+    for candidate in candidate_paths {
+        for active in active_paths {
+            if paths_overlap(candidate, active) {
+                overlaps.insert(describe_overlap(candidate, active));
+            }
+        }
+    }
+    overlaps.into_iter().collect()
 }
 
 pub fn find_overlapping_tasks(
@@ -204,6 +285,7 @@ impl TeamDaemon {
         board_dir: &Path,
         candidate: &crate::task::Task,
         conflicts: &[OverlapConflict],
+        persist_dependency: bool,
     ) -> Result<bool> {
         if conflicts.is_empty() {
             return Ok(false);
@@ -225,13 +307,28 @@ impl TeamDaemon {
                 )
             })
             .collect::<Vec<_>>();
-        let updated_dependencies =
-            append_task_dependencies(board_dir, candidate.id, &blocking_task_ids)?;
-        let details = format!(
-            "serialized task #{} behind {} due to predicted file overlap",
-            candidate.id,
-            overlap_details.join("; ")
-        );
+        let updated_dependencies = if persist_dependency {
+            Some(append_task_dependencies(
+                board_dir,
+                candidate.id,
+                &blocking_task_ids,
+            )?)
+        } else {
+            None
+        };
+        let details = if persist_dependency {
+            format!(
+                "serialized task #{} behind {} due to predicted file overlap",
+                candidate.id,
+                overlap_details.join("; ")
+            )
+        } else {
+            format!(
+                "deferred task #{} in file_lock_wait behind {} due to predicted file overlap",
+                candidate.id,
+                overlap_details.join("; ")
+            )
+        };
         self.emit_event(TeamEvent::dispatch_overlap_prevented(
             candidate.id,
             &blocking_task_ids,
@@ -241,7 +338,8 @@ impl TeamDaemon {
         info!(
             task_id = candidate.id,
             blocking = ?updated_dependencies,
-            "dispatch queue: serialized overlapping task before dispatch"
+            persist_dependency,
+            "dispatch queue: prevented overlapping dispatch"
         );
         Ok(true)
     }
@@ -306,6 +404,7 @@ impl TeamDaemon {
             .iter()
             .map(|entry| entry.engineer.clone())
             .collect();
+        let mut file_locked_task_ids = HashSet::new();
 
         let manual_cooldown =
             Duration::from_secs(self.config.team_config.board.dispatch_manual_cooldown_secs);
@@ -320,7 +419,9 @@ impl TeamDaemon {
         let profiles = load_engineer_profiles(self.project_root(), &all_engineers, &board_tasks)?;
 
         loop {
-            let available_tasks = available_dispatch_tasks(&board_dir, &queued_task_ids)?;
+            let mut unavailable_task_ids = queued_task_ids.clone();
+            unavailable_task_ids.extend(file_locked_task_ids.iter().copied());
+            let available_tasks = available_dispatch_tasks(&board_dir, &unavailable_task_ids)?;
             if available_tasks.is_empty() {
                 break;
             }
@@ -332,6 +433,7 @@ impl TeamDaemon {
                     .collect();
             let mut selected_task = None;
             let mut least_conflicted: Option<(crate::task::Task, Vec<OverlapConflict>)> = None;
+            let file_level_locks_enabled = self.config.team_config.workflow_policy.file_level_locks;
 
             // Skip overlap check when all engineers use worktrees — conflicts
             // are handled at merge time (cherry-pick), not dispatch time.
@@ -342,9 +444,10 @@ impl TeamDaemon {
                 .iter()
                 .filter(|r| r.role_type == crate::team::config::RoleType::Engineer)
                 .all(|r| r.use_worktrees);
+            let skip_overlap_checks = all_engineers_use_worktrees && !file_level_locks_enabled;
 
             for task in available_tasks {
-                if all_engineers_use_worktrees {
+                if skip_overlap_checks {
                     selected_task = Some(task);
                     break;
                 }
@@ -364,6 +467,12 @@ impl TeamDaemon {
                     ));
                 }
 
+                if file_level_locks_enabled {
+                    self.serialize_overlapping_candidate(&board_dir, &task, &conflicts, false)?;
+                    file_locked_task_ids.insert(task.id);
+                    continue;
+                }
+
                 let replace = least_conflicted
                     .as_ref()
                     .is_none_or(|(_, existing)| conflicts.len() < existing.len());
@@ -375,7 +484,7 @@ impl TeamDaemon {
             let task = if let Some(task) = selected_task {
                 task
             } else if let Some((task, conflicts)) = least_conflicted {
-                self.serialize_overlapping_candidate(&board_dir, &task, &conflicts)?;
+                self.serialize_overlapping_candidate(&board_dir, &task, &conflicts, true)?;
                 continue;
             } else {
                 break;
@@ -943,6 +1052,38 @@ mod tests {
             format!("---\nid: {id}\ntitle: {title}\nstatus: {status}\npriority: high\n");
         if let Some(claimed_by) = claimed_by {
             content.push_str(&format!("claimed_by: {claimed_by}\n"));
+        }
+        content.push_str("class: standard\n---\n\n");
+        content.push_str(body);
+        content.push('\n');
+        std::fs::write(tasks_dir.join(format!("{id:03}-{title}.md")), content).unwrap();
+    }
+
+    fn write_task_with_files(
+        project_root: &Path,
+        id: u32,
+        title: &str,
+        status: &str,
+        claimed_by: Option<&str>,
+        files: &[&str],
+        body: &str,
+    ) {
+        let tasks_dir = project_root
+            .join(".batty")
+            .join("team_config")
+            .join("board")
+            .join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+        let mut content =
+            format!("---\nid: {id}\ntitle: {title}\nstatus: {status}\npriority: high\n");
+        if let Some(claimed_by) = claimed_by {
+            content.push_str(&format!("claimed_by: {claimed_by}\n"));
+        }
+        if !files.is_empty() {
+            content.push_str("files:\n");
+            for file in files {
+                content.push_str(&format!("  - {file}\n"));
+            }
         }
         content.push_str("class: standard\n---\n\n");
         content.push_str(body);
@@ -1598,6 +1739,84 @@ mod tests {
     }
 
     #[test]
+    fn test_predicted_files_from_frontmatter_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_task_with_files(
+            tmp.path(),
+            31,
+            "frontmatter-paths",
+            "todo",
+            None,
+            &["src/app.rs", "src/**/*.rs"],
+            "Use the declared file list.",
+        );
+        let task = crate::task::Task::from_file(
+            &tmp.path()
+                .join(".batty")
+                .join("team_config")
+                .join("board")
+                .join("tasks")
+                .join("031-frontmatter-paths.md"),
+        )
+        .unwrap();
+
+        let predicted = predicted_files(&task, tmp.path());
+        assert!(predicted.contains(&"src/**/*.rs".to_string()));
+        assert!(predicted.contains(&"src/app.rs".to_string()));
+    }
+
+    #[test]
+    fn test_find_overlapping_with_frontmatter_glob() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_task_with_files(
+            tmp.path(),
+            40,
+            "active-glob",
+            "in-progress",
+            Some("eng-2"),
+            &["src/**/*.rs"],
+            "Broad source lock.",
+        );
+        write_task_with_body(
+            tmp.path(),
+            41,
+            "candidate-file",
+            "todo",
+            None,
+            "Change src/app.rs only.",
+        );
+
+        let mut active = None;
+        let mut candidate = None;
+        for task in crate::task::load_tasks_from_dir(
+            &tmp.path()
+                .join(".batty")
+                .join("team_config")
+                .join("board")
+                .join("tasks"),
+        )
+        .unwrap()
+        {
+            match task.id {
+                40 => active = Some(task),
+                41 => candidate = Some(task),
+                _ => {}
+            }
+        }
+
+        let conflicts = find_overlapping_tasks(
+            &candidate.expect("candidate task"),
+            &[active.expect("active task")],
+            tmp.path(),
+        );
+        assert_eq!(conflicts.len(), 1);
+        assert_eq!(
+            conflicts[0].conflicting_files,
+            vec!["src/app.rs".to_string()]
+        );
+    }
+
+    #[test]
     fn test_predicted_files_from_tags() {
         let tmp = tempfile::tempdir().unwrap();
         let tasks_dir = tmp
@@ -1925,5 +2144,73 @@ mod tests {
         assert_eq!(conflict.task_id, "42");
         assert_eq!(conflict.conflicting_files, vec!["src/team/daemon.rs"]);
         assert_eq!(conflict.in_progress_engineer, "eng-2");
+    }
+
+    #[test]
+    fn file_level_locks_defer_then_release_overlapping_work_for_worktree_teams() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_task_with_body(
+            tmp.path(),
+            60,
+            "active-overlap",
+            "in-progress",
+            Some("eng-2"),
+            "Modify src/app.rs only.",
+        );
+        write_task_with_files(
+            tmp.path(),
+            61,
+            "waiting-overlap",
+            "todo",
+            None,
+            &["src/*.rs"],
+            "Lock should wait without rewriting dependencies.",
+        );
+
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![
+                manager_member("mgr", None),
+                engineer_member("eng-1", Some("mgr"), true),
+                engineer_member("eng-2", Some("mgr"), true),
+            ])
+            .workflow_policy(crate::team::config::WorkflowPolicy {
+                file_level_locks: true,
+                ..crate::team::config::WorkflowPolicy::default()
+            })
+            .states(HashMap::from([
+                ("eng-1".to_string(), MemberState::Idle),
+                ("eng-2".to_string(), MemberState::Working),
+            ]))
+            .build();
+
+        daemon.enqueue_dispatch_candidates().unwrap();
+        assert!(daemon.dispatch_queue.is_empty());
+
+        let waiting_task = crate::task::Task::from_file(
+            &tmp.path()
+                .join(".batty")
+                .join("team_config")
+                .join("board")
+                .join("tasks")
+                .join("061-waiting-overlap.md"),
+        )
+        .unwrap();
+        assert!(
+            waiting_task.depends_on.is_empty(),
+            "file-level wait should not rewrite task dependencies"
+        );
+
+        write_task_with_body(
+            tmp.path(),
+            60,
+            "active-overlap",
+            "done",
+            Some("eng-2"),
+            "Modify src/app.rs only.",
+        );
+
+        daemon.enqueue_dispatch_candidates().unwrap();
+        assert_eq!(daemon.dispatch_queue.len(), 1);
+        assert_eq!(daemon.dispatch_queue[0].task_id, 61);
     }
 }
