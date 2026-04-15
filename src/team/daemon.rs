@@ -48,7 +48,7 @@ use super::task_cmd;
 use super::task_loop::next_unclaimed_task;
 use super::task_loop::{
     branch_is_merged_into, current_worktree_branch, engineer_base_branch_name,
-    preserve_worktree_with_commit, setup_engineer_worktree,
+    preserve_worktree_with_commit_for, setup_engineer_worktree,
 };
 use super::verification::VerificationState;
 use super::watcher::{SessionWatcher, WatcherState};
@@ -374,10 +374,11 @@ impl TeamDaemon {
             return false;
         }
 
-        match preserve_worktree_with_commit(
+        match preserve_worktree_with_commit_for(
             &worktree_dir,
             commit_message,
             Duration::from_secs(policy.graceful_shutdown_timeout_secs),
+            "restart-or-shutdown preservation",
         ) {
             Ok(saved) => {
                 if saved {
@@ -730,10 +731,11 @@ impl TeamDaemon {
                 .workflow_policy
                 .graceful_shutdown_timeout_secs,
         );
-        match preserve_worktree_with_commit(
+        match preserve_worktree_with_commit_for(
             worktree_dir,
             "wip: auto-save before restart [batty]",
             timeout,
+            reason,
         ) {
             Ok(true) => info!(
                 member = member_name,

@@ -132,12 +132,13 @@ fn reset_claimed_worktree_to_base(
 ) -> Result<crate::worktree::WorktreeResetReason> {
     let branch = current_worktree_branch(work_dir).unwrap_or_else(|_| base_branch.to_string());
     let commit_message = format!("wip: auto-save before worktree reset [{branch}]");
-    crate::worktree::reset_worktree_to_base_with_options(
+    crate::worktree::reset_worktree_to_base_with_options_for(
         work_dir,
         base_branch,
         &commit_message,
         Duration::from_secs(5),
         crate::worktree::PreserveFailureMode::SkipReset,
+        "state-reconciliation/claimed-lane-reset",
     )
     .map_err(|error| anyhow::anyhow!("{error}"))
 }
@@ -1195,10 +1196,11 @@ impl TeamDaemon {
                 "wip: auto-save before branch recovery from {} to {}",
                 mismatch.current_branch, mismatch.expected_branch
             );
-            match crate::team::task_loop::preserve_worktree_with_commit(
+            match crate::team::task_loop::preserve_worktree_with_commit_for(
                 &worktree_dir,
                 &auto_save_message,
                 Duration::from_secs(10),
+                "state-reconciliation/branch-recovery",
             ) {
                 Ok(true) => {
                     self.record_orchestrator_action(format!(

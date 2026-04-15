@@ -843,16 +843,25 @@ fn worktree_gate_blocks_dirty_worktrees() {
 
     daemon.maybe_auto_dispatch().unwrap();
 
-    // Worktree auto-recovery cleans dirty files and resets to base branch,
-    // so the entry stays in the queue with failures cleared for retry.
+    // Dirty idle worktrees are left untouched and re-queued with an
+    // actionable preservation blocker instead of being auto-mutated.
     assert_eq!(daemon.dispatch_queue.len(), 1);
     assert_eq!(
-        daemon.dispatch_queue[0].validation_failures, 0,
-        "auto-recovery should clear failure count after successful reset"
+        daemon.dispatch_queue[0].validation_failures, 2,
+        "dirty worktree recovery should record the readiness failure and the skipped reset"
     );
     assert!(
-        daemon.dispatch_queue[0].last_failure.is_none(),
-        "auto-recovery should clear failure message after successful reset"
+        daemon.dispatch_queue[0]
+            .last_failure
+            .as_deref()
+            .unwrap_or("")
+            .contains("could not safely auto-save dirty worktree"),
+        "dirty worktree recovery should retain the preservation blocker"
+    );
+    assert!(
+        crate::team::test_support::git_stdout(&worktree_dir, &["status", "--short"])
+            .contains("?? DIRTY.txt"),
+        "dirty file should remain untouched for manual recovery"
     );
 }
 
