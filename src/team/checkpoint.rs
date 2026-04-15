@@ -250,6 +250,7 @@ pub fn remove_preserved_lane_record(project_root: &Path, role: &str) {
     let _ = std::fs::remove_file(path);
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn write_dirty_lane_snapshot(
     project_root: &Path,
     worktree_dir: &Path,

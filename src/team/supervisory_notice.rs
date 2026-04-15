@@ -156,9 +156,8 @@ pub(crate) fn classify_supervisory_pressure_normalized(body: &str) -> Option<Sup
         Some(SupervisoryPressure::ReviewBacklog)
     } else if body.starts_with("triage backlog detected:") {
         Some(SupervisoryPressure::TriageBacklog)
-    } else if body.starts_with("dispatch recovery needed:") {
-        Some(classify_recovery_pressure(body))
-    } else if body.contains("utilization recovery")
+    } else if body.starts_with("dispatch recovery needed:")
+        || body.contains("utilization recovery")
         || body.starts_with("utilization gap detected:")
         || body.starts_with("architect utilization")
     {
