@@ -2,6 +2,27 @@
 
 All notable changes to Batty are documented here.
 
+## 0.11.9 — 2026-04-15
+
+Daemon-exit classification so the watchdog stops restarting on hard failures.
+
+### Fixes
+
+- **Watchdog circuit-breaks immediately on unrecoverable exits** (#665)
+  — `record_watchdog_crash` now takes a `DaemonExitObservation` with a
+  classified `exit_category`. Tmux deaths, missing team config, and
+  other pre-flight failures trip the breaker on the first occurrence
+  instead of after N restart attempts. The watchdog also reads the
+  most recent `daemon_exit` event to learn *why* the daemon died and
+  threads that through to status output and telemetry.
+  (`src/team/daemon_mgmt.rs`, `src/team/events.rs`, `src/team/status.rs`,
+  `src/team/daemon/poll.rs`, `src/team/daemon/telemetry.rs`, `src/tmux.rs`)
+- **`batty status` surfaces the last daemon exit reason** — when the
+  daemon is stopped, the watchdog health line now includes the exit
+  category and the human-readable reason so operators don't have to
+  grep daemon.log to find out what crashed.
+  (`src/team/status.rs`)
+
 ## 0.11.8 — 2026-04-15
 
 Worktree-mutation safety and nightly fuzz CI fix.
