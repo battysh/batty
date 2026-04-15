@@ -4,6 +4,7 @@ use std::process::Command;
 use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result, bail};
+use chrono::Local;
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
@@ -77,6 +78,7 @@ pub(crate) struct AgentHealthSummary {
     pub(crate) task_elapsed_secs: Option<u64>,
     pub(crate) stall_summary: Option<String>,
     pub(crate) stall_reason: Option<String>,
+    pub(crate) quota_blocked_until_ts: Option<u64>,
     pub(crate) backend_health: crate::agent::BackendHealth,
 }
 
@@ -140,6 +142,8 @@ struct PersistedDaemonHealthState {
     active_tasks: HashMap<String, u32>,
     #[serde(default)]
     retry_counts: HashMap<String, u32>,
+    #[serde(default)]
+    quota_blocks: HashMap<String, crate::team::daemon::QuotaBlock>,
     #[serde(default)]
     main_smoke_state: Option<MainSmokeState>,
     #[serde(default)]
@@ -416,7 +420,12 @@ pub(crate) fn build_team_status_rows(
                 .get(&member.name)
                 .cloned()
                 .unwrap_or_default();
-            let state = if session_running && state == "idle" && review_backlog > 0 {
+            let health = agent_health.get(&member.name).cloned().unwrap_or_default();
+            let state = if let Some(until_ts) = health.quota_blocked_until_ts {
+                format!("quota-blocked until {}", format_status_minute_label(until_ts))
+            } else if health.backend_health == crate::agent::BackendHealth::QuotaExhausted {
+                "quota-blocked".to_string()
+            } else if session_running && state == "idle" && review_backlog > 0 {
                 "reviewing".to_string()
             } else if session_running && state == "idle" && triage_backlog > 0 {
                 "triaging".to_string()
@@ -424,7 +433,6 @@ pub(crate) fn build_team_status_rows(
                 state
             };
 
-            let health = agent_health.get(&member.name).cloned().unwrap_or_default();
             let signal = merge_status_signal(
                 signal,
                 branch_mismatches.get(&member.name).cloned(),
@@ -745,6 +753,17 @@ pub(crate) fn agent_health_by_member(
             .unwrap_or(*retry_count);
     }
 
+    let now = now_unix();
+    for (member, block) in daemon_state.quota_blocks {
+        let active = block.until_ts.is_none_or(|until_ts| until_ts > now);
+        if !active {
+            continue;
+        }
+        let health = health_by_member.entry(member).or_default();
+        health.backend_health = crate::agent::BackendHealth::QuotaExhausted;
+        health.quota_blocked_until_ts = block.until_ts;
+    }
+
     let mut restart_events = HashMap::<String, u32>::new();
     let mut latest_assignment_ts = HashMap::<String, u64>::new();
     let mut latest_assignment_ts_by_task = HashMap::<(String, u32), u64>::new();
@@ -860,6 +879,7 @@ pub(crate) fn agent_health_by_member(
                             let new_state = reason.split('→').next_back().unwrap_or("healthy");
                             let health_val = match new_state {
                                 "degraded" => crate::agent::BackendHealth::Degraded,
+                                "quota_exhausted" => crate::agent::BackendHealth::QuotaExhausted,
                                 "unreachable" => crate::agent::BackendHealth::Unreachable,
                                 _ => crate::agent::BackendHealth::Healthy,
                             };
@@ -883,7 +903,6 @@ pub(crate) fn agent_health_by_member(
         health.restart_count = health.restart_count.max(event_count);
     }
 
-    let now = now_unix();
     for (member, task_id) in daemon_state.active_tasks {
         let assigned_ts = latest_assignment_ts_by_task
             .get(&(member.clone(), task_id))
@@ -898,6 +917,14 @@ pub(crate) fn agent_health_by_member(
     }
 
     health_by_member
+}
+
+fn format_status_minute_label(unix_secs: u64) -> String {
+    use std::time::{Duration, UNIX_EPOCH};
+
+    let dt = UNIX_EPOCH + Duration::from_secs(unix_secs);
+    let datetime: chrono::DateTime<Local> = dt.into();
+    datetime.format("%Y-%m-%d %H:%M").to_string()
 }
 
 fn load_persisted_daemon_health_state(path: &Path) -> Result<Option<PersistedDaemonHealthState>> {
@@ -4576,6 +4603,31 @@ mod tests {
             health.get("eng-1").unwrap().backend_health,
             crate::agent::BackendHealth::Healthy,
         );
+    }
+
+    #[test]
+    fn agent_health_by_member_reads_quota_block_from_daemon_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        let retry_at = now_unix() + 3600;
+        let daemon_state = serde_json::json!({
+            "quota_blocks": {
+                "eng-1": {
+                    "until_ts": retry_at,
+                    "reason": "You've hit your usage limit."
+                }
+            }
+        });
+        fs::create_dir_all(tmp.path().join(".batty")).unwrap();
+        fs::write(
+            daemon_state_path(tmp.path()),
+            serde_json::to_vec_pretty(&daemon_state).unwrap(),
+        )
+        .unwrap();
+
+        let health = agent_health_by_member(tmp.path(), &[engineer("eng-1")]);
+        let eng_1 = health.get("eng-1").unwrap();
+        assert_eq!(eng_1.backend_health, crate::agent::BackendHealth::QuotaExhausted);
+        assert_eq!(eng_1.quota_blocked_until_ts, Some(retry_at));
     }
 
     #[test]

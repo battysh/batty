@@ -60,6 +60,14 @@ use dispatch::DispatchQueueEntry;
 const STALLED_MID_TURN_MARKER: &str = "stalled mid-turn";
 const STALLED_MID_TURN_RETRY_BACKOFF_SECS: [u64; 2] = [30, 60];
 
+fn format_unix_minute_label(unix_secs: u64) -> String {
+    use std::time::{Duration as StdDuration, UNIX_EPOCH};
+
+    let dt = UNIX_EPOCH + StdDuration::from_secs(unix_secs);
+    let datetime: chrono::DateTime<chrono::Local> = dt.into();
+    datetime.format("%Y-%m-%d %H:%M").to_string()
+}
+
 #[path = "daemon/agent_handle.rs"]
 pub(super) mod agent_handle;
 #[path = "daemon/automation.rs"]
@@ -243,6 +251,8 @@ pub struct TeamDaemon {
     pub(super) manual_assign_cooldowns: HashMap<String, Instant>,
     /// Per-member agent backend health state.
     pub(super) backend_health: HashMap<String, BackendHealth>,
+    /// Members paused because the backend reported a quota or billing limit.
+    pub(super) quota_blocks: HashMap<String, QuotaBlock>,
     /// Rolling capture history used to detect narration loops.
     pub(super) narration_tracker: health::narration::NarrationTracker,
     /// Per-session output tracking used for proactive context-pressure handling.
@@ -272,6 +282,13 @@ pub struct TeamDaemon {
     pub(super) last_shim_health_check: Instant,
     /// Serial daemon-owned merge queue for auto-merge execution.
     pub(super) merge_queue: MergeQueue,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct QuotaBlock {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) until_ts: Option<u64>,
+    pub(crate) reason: String,
 }
 
 #[cfg(any(test, feature = "scenario-test"))]
@@ -595,6 +612,7 @@ impl TeamDaemon {
             telemetry_db,
             manual_assign_cooldowns: HashMap::new(),
             backend_health: HashMap::new(),
+            quota_blocks: HashMap::new(),
             narration_tracker: health::narration::NarrationTracker::new(
                 narration_detection_enabled,
                 narration_threshold_polls,
@@ -634,6 +652,57 @@ impl TeamDaemon {
 
         self.recent_escalations.insert(key, now);
         false
+    }
+
+    pub(crate) fn quota_block_for(&self, member_name: &str) -> Option<&QuotaBlock> {
+        self.quota_blocks.get(member_name).filter(|block| {
+            block
+                .until_ts
+                .is_none_or(|until_ts| until_ts > now_unix())
+        })
+    }
+
+    pub(crate) fn is_member_quota_blocked(&self, member_name: &str) -> bool {
+        self.quota_block_for(member_name).is_some()
+    }
+
+    pub(crate) fn quota_block_label(&self, member_name: &str) -> Option<String> {
+        let block = self.quota_block_for(member_name)?;
+        Some(match block.until_ts {
+            Some(until_ts) => format!(
+                "quota-blocked until {}",
+                format_unix_minute_label(until_ts)
+            ),
+            None => "quota-blocked".to_string(),
+        })
+    }
+
+    pub(crate) fn refresh_quota_blocks(&mut self) {
+        let now = now_unix();
+        let expired: Vec<String> = self
+            .quota_blocks
+            .iter()
+            .filter_map(|(member, block)| {
+                block.until_ts
+                    .filter(|until_ts| *until_ts <= now)
+                    .map(|_| member.clone())
+            })
+            .collect();
+
+        for member_name in expired {
+            self.quota_blocks.remove(&member_name);
+            if self.backend_health.get(&member_name) == Some(&BackendHealth::QuotaExhausted) {
+                self.backend_health.remove(&member_name);
+            }
+            if let Some(handle) = self.shim_handles.get_mut(&member_name) {
+                handle.apply_state_change(crate::shim::protocol::ShimState::Idle);
+            }
+            self.states.insert(member_name.clone(), MemberState::Idle);
+            self.update_automation_timers_for_state(&member_name, MemberState::Idle);
+            self.record_orchestrator_action(format!(
+                "quota: lifted backend quota block for {member_name}"
+            ));
+        }
     }
 
     pub(super) fn member_nudge_text(&self, member: &MemberInstance) -> Option<String> {

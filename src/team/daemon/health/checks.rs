@@ -402,9 +402,13 @@ impl TeamDaemon {
             .collect();
 
         for (member_name, agent_name) in &checks {
-            let mut new_health =
-                agent::health_check_by_name(agent_name).unwrap_or(BackendHealth::Healthy);
+            let mut new_health = if self.is_member_quota_blocked(member_name) {
+                BackendHealth::QuotaExhausted
+            } else {
+                agent::health_check_by_name(agent_name).unwrap_or(BackendHealth::Healthy)
+            };
             if *agent_name == "claude"
+                && new_health != BackendHealth::QuotaExhausted
                 && let Some(credentials_path) = claude_credentials_path()
                 && !claude_oauth_healthy(&credentials_path)
             {

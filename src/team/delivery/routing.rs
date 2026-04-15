@@ -401,6 +401,10 @@ impl TeamDaemon {
     }
 
     pub(in crate::team) fn member_ready_for_delivery(&self, member_name: &str) -> bool {
+        if self.is_member_quota_blocked(member_name) {
+            return false;
+        }
+
         if let Some(handle) = self.shim_handles.get(member_name) {
             if handle.is_terminal() {
                 return false;
@@ -700,6 +704,17 @@ impl TeamDaemon {
         recipient: &str,
         body: &str,
     ) -> Result<MessageDelivery> {
+        if self.is_member_quota_blocked(recipient) {
+            let root = inbox::inboxes_root(&self.config.project_root);
+            let msg = inbox::InboxMessage::new_send(from, recipient, body);
+            inbox::deliver_to_inbox(&root, &msg).map_err(|error| DeliveryError::InboxQueue {
+                recipient: recipient.to_string(),
+                detail: error.to_string(),
+            })?;
+            self.record_message_routed(from, recipient);
+            return Ok(MessageDelivery::InboxQueued);
+        }
+
         if let Some(channel) = self.channels.get(recipient) {
             let _ = channel;
             return self.deliver_channel_message(from, recipient, body);

@@ -254,6 +254,7 @@ impl TeamDaemon {
         self.nudges.remove(name);
         self.last_standup.remove(name);
         self.backend_health.remove(name);
+        self.quota_blocks.remove(name);
         self.last_uncommitted_warn.remove(name);
         self.pending_delivery_queue.remove(name);
 

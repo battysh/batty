@@ -152,6 +152,7 @@ impl TeamDaemon {
         self.current_tick_errors.clear();
 
         self.poll_cycle_count = self.poll_cycle_count.saturating_add(1);
+        self.refresh_quota_blocks();
 
         // -- Recoverable subsystems: log-and-skip with consecutive-failure tracking --
         self.run_recoverable_step("poll_shim_handles", |daemon| daemon.poll_shim_handles());
