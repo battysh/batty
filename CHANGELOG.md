@@ -2,6 +2,53 @@
 
 All notable changes to Batty are documented here.
 
+## 0.11.12 — 2026-04-15
+
+Unwedge Working engineers stuck on stale branches with dirty worktrees;
+board hygiene pass closes stale/resolved stability tickets.
+
+### Fixes
+
+- **Branch-recovery-blocked self-heal for Working engineers** (#666) —
+  `maybe_align_engineer_worktree_with_task` no longer gates on
+  `MemberState::Idle`. The self-heal path (auto-commit WIP on the stale
+  branch, then checkout the authoritative lane) now runs for Working
+  members too, so lanes stop getting wedged on `"automatic branch recovery
+  blocked: dirty worktree"` when the engineer happens to be mid-session.
+  The auto-save commit is non-destructive — the stale branch retains every
+  byte of user work — and the upstream `audit_due` cooldown still
+  rate-limits how often the path runs. New regression test:
+  `reconcile_active_tasks_self_heals_working_engineer_on_stale_branch`.
+
+### Board hygiene
+
+Closed stale or already-implemented tickets uncovered during the 2026-04-15
+board-drain pass:
+
+- #629 (auto-repair legacy telemetry schemas) — already shipped via
+  `SchemaColumn`-driven column-aware `repair_legacy_schema` in
+  `src/team/telemetry_db.rs`; stuck only on a stale automation-injected
+  block_reason from an unrelated worktree preservation incident that
+  #659 has since addressed.
+- #649 (suppress manager patch attempts on /tmp) — no production code
+  path produces `/tmp/nether-earth-task*` paths; integration worktrees
+  live under `.batty/integration-worktrees/` exclusively and
+  `worktree_path` frontmatter is project-root-relative. The reported
+  logs are manager-agent internal (codex session hallucination), not a
+  batty source bug.
+- #668 (proactive context-exhaustion handoff) — already fully
+  implemented: `Event::ContextApproaching` from the shim triggers
+  `handle_context_pressure_warning(_, _, _, 80)` which calls
+  `preserve_handoff` before context_handoff_enabled restart.
+- #669 (tact_check couples task identity to title-derived filenames) —
+  `tact_check` uses `load_tasks_from_dir` (ID-keyed); title references
+  in `src/team/tact/parser.rs` are for generated-task dedup, not file
+  lookup. Stale.
+- #658 (agent-mission inbox control-plane design) — unblocked from a
+  stale verification-failure block_reason (those tests pass on current
+  main); demoted to backlog/medium because the tactical fix in #650 has
+  resolved the operational urgency.
+
 ## 0.11.11 — 2026-04-15
 
 Preserve unmerged engineer commits across every destructive branch reset.

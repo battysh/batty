@@ -1156,9 +1156,21 @@ impl TeamDaemon {
         else {
             return Ok(());
         };
-        if !member.use_worktrees || self.states.get(engineer) != Some(&MemberState::Idle) {
+        if !member.use_worktrees {
             return Ok(());
         }
+        // Self-heal runs for both Idle and Working members (#666). Previously
+        // we skipped when the member was Working, to avoid interrupting a live
+        // session — but that left engineers permanently wedged when a branch
+        // mismatch appeared on a non-idle lane: the "branch recovery blocked"
+        // signal would re-emit every monitor tick with no healing action,
+        // because the engineer's state was still Working despite the lane
+        // being unable to make progress. Auto-saving dirty work as a wip
+        // commit before switching branches is non-destructive — the stale
+        // branch retains every byte of user work, and the session either
+        // picks up on the right branch or restarts naturally. The
+        // `audit_due` gate upstream already rate-limits how often this path
+        // runs, so the cost of letting it run while Working is bounded.
 
         let worktree_dir = self.worktree_dir(engineer);
         if !worktree_dir.exists() {
@@ -4423,6 +4435,80 @@ thread 'tmux::tests::split_window_horizontal_creates_new_pane' panicked at src/t
                 .iter()
                 .filter(|e| e.event == "state_reconciliation")
                 .collect::<Vec<_>>(),
+        );
+    }
+
+    #[test]
+    fn reconcile_active_tasks_self_heals_working_engineer_on_stale_branch() {
+        // Regression for #666: a Working engineer stuck on the wrong branch
+        // with a dirty worktree used to be skipped by the self-heal path
+        // (which only ran for Idle members). That left engineers wedged
+        // re-emitting "branch recovery blocked" every monitor tick with no
+        // healing action. The fix: self-heal runs for Working members too,
+        // auto-saving dirty work on the stale branch before switching.
+        let _path_lock = PATH_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "reconcile-stale-branch-working");
+        let manager = MemberInstance {
+            name: "manager".to_string(),
+            role_name: "manager".to_string(),
+            role_type: RoleType::Manager,
+            agent: Some("claude".to_string()),
+            prompt: None,
+            reports_to: None,
+            use_worktrees: false,
+            ..Default::default()
+        };
+        let engineer = MemberInstance {
+            name: "eng-1".to_string(),
+            role_name: "eng".to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("codex".to_string()),
+            prompt: None,
+            reports_to: Some("manager".to_string()),
+            use_worktrees: true,
+            ..Default::default()
+        };
+        let mut daemon = TestDaemonBuilder::new(repo.as_path())
+            .members(vec![manager, engineer])
+            // The key difference from the existing regression test: Working, not Idle.
+            .states(HashMap::from([(
+                "eng-1".to_string(),
+                MemberState::Working,
+            )]))
+            .build();
+
+        let team_config_dir = repo.join(".batty").join("team_config");
+        let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
+        let base_branch = engineer_base_branch_name("eng-1");
+        setup_engineer_worktree(&repo, &worktree_dir, &base_branch, &team_config_dir).unwrap();
+        git_ok(&worktree_dir, &["checkout", "-b", "eng-1/41"]);
+        std::fs::write(worktree_dir.join("scratch.txt"), "stale working work\n").unwrap();
+        git_ok(&worktree_dir, &["add", "scratch.txt"]);
+
+        write_owned_task_file_with_context(
+            &repo,
+            42,
+            "authoritative-task",
+            "in-progress",
+            "eng-1",
+            "eng-1/42",
+            ".batty/worktrees/eng-1",
+        );
+
+        daemon.reconcile_active_tasks().unwrap();
+
+        // Branch recovery completed despite Working state.
+        assert_eq!(
+            current_worktree_branch(&worktree_dir).unwrap(),
+            "eng-1/42",
+            "branch should have been recovered even while Working"
+        );
+        // Dirty work preserved as a commit on the stale branch.
+        let log_on_41 = git_stdout(&worktree_dir, &["log", "--oneline", "eng-1/41", "-1"]);
+        assert!(
+            log_on_41.contains("auto-save before branch recovery"),
+            "eng-1/41 tip should be the auto-save commit while Working, was:\n{log_on_41}",
         );
     }
 
