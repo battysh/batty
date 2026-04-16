@@ -4472,10 +4472,7 @@ thread 'tmux::tests::split_window_horizontal_creates_new_pane' panicked at src/t
         let mut daemon = TestDaemonBuilder::new(repo.as_path())
             .members(vec![manager, engineer])
             // The key difference from the existing regression test: Working, not Idle.
-            .states(HashMap::from([(
-                "eng-1".to_string(),
-                MemberState::Working,
-            )]))
+            .states(HashMap::from([("eng-1".to_string(), MemberState::Working)]))
             .build();
 
         let team_config_dir = repo.join(".batty").join("team_config");

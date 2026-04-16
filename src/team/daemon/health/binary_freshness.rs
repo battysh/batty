@@ -319,17 +319,15 @@ mod tests {
         let repo = tmp.path();
         init_repo(repo);
         commit_file_with_time(repo, "src/foo.rs", "fn a() {}", 1_700_000_000);
-        commit_file_with_time(
-            repo,
-            "docs/changelog.md",
-            "# Changelog\n",
-            1_700_001_000,
-        );
+        commit_file_with_time(repo, "docs/changelog.md", "# Changelog\n", 1_700_001_000);
 
         // HEAD ts is 1800s newer than binary, but the commit only touched
         // docs/**, so src-path filtering should report fresh.
         let report = evaluate_with_stamps(repo, 1_700_000_000, 1_700_001_800, 600).unwrap();
-        assert!(report.fresh, "docs-only commit should not mark binary stale");
+        assert!(
+            report.fresh,
+            "docs-only commit should not mark binary stale"
+        );
         assert_eq!(report.commits_behind, 0);
     }
 
@@ -378,8 +376,7 @@ mod tests {
         init_repo(repo);
         commit_file_with_time(repo, "src/foo.rs", "fn a() {}", 1_700_000_000);
 
-        let result =
-            evaluate_binary_freshness(&repo.join("does-not-exist"), repo).unwrap();
+        let result = evaluate_binary_freshness(&repo.join("does-not-exist"), repo).unwrap();
         assert!(result.is_none());
     }
 
