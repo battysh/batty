@@ -266,7 +266,7 @@ pub(crate) fn supervisory_pending_pressure(
     member_name: &str,
 ) -> Result<SupervisoryPressureSnapshot> {
     let mut snapshot = SupervisoryPressureSnapshot::default();
-    for message in inbox::pending_messages(inbox_root, member_name)? {
+    for message in crate::team::inbox_tiered::pending_messages_union(inbox_root, member_name)? {
         snapshot.add_notice_body(&message.body);
     }
     Ok(snapshot)

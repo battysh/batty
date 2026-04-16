@@ -46,6 +46,7 @@ pub mod grafana;
 pub mod harness;
 pub mod hierarchy;
 pub mod inbox;
+pub mod inbox_tiered;
 pub mod layout;
 pub mod learnings;
 pub use daemon_mgmt::*;

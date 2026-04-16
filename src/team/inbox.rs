@@ -423,6 +423,20 @@ pub enum MessageCategory {
     Nudge = 4,
 }
 
+impl MessageCategory {
+    /// Queue tier subdirectory name for this category. Used by the tiered
+    /// inbox layout (#658). Kept here so `inbox_tiered` can depend on
+    /// `inbox` without a circular dep.
+    pub fn queue_tier(&self) -> &'static str {
+        match self {
+            Self::Escalation | Self::Blocker => "priority",
+            Self::ReviewRequest => "work",
+            Self::Status => "content",
+            Self::Nudge => "telemetry",
+        }
+    }
+}
+
 /// Classify a message body into a category.
 pub fn classify_message(msg: &InboxMessage) -> MessageCategory {
     let body = normalized_body(&msg.body);

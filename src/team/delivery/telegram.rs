@@ -301,6 +301,7 @@ mod tests {
             last_shim_health_check: Instant::now(),
             merge_queue: crate::team::daemon::MergeQueue::default(),
             last_binary_freshness_check: Instant::now(),
+            last_tiered_inbox_sweep: Instant::now(),
         }
     }
 

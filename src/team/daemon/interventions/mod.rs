@@ -129,7 +129,7 @@ impl TeamDaemon {
             .map(|member| member.role_type);
         match role_type {
             Some(RoleType::Architect | RoleType::Manager) => {
-                match inbox::pending_messages(inbox_root, member_name) {
+                match crate::team::inbox_tiered::pending_messages_union(inbox_root, member_name) {
                     Ok(messages) => messages.into_iter().any(|message| {
                         !matches!(
                             classify_supervisory_pressure_normalized(&normalized_body(
@@ -150,7 +150,10 @@ impl TeamDaemon {
                     }
                 }
             }
-            _ => match inbox::pending_message_count(inbox_root, member_name) {
+            _ => match crate::team::inbox_tiered::pending_message_count_union(
+                inbox_root,
+                member_name,
+            ) {
                 Ok(count) => count > 0,
                 Err(error) => {
                     warn!(member = %member_name, error = %error, "failed to count pending inbox before automation");
