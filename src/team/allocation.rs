@@ -222,7 +222,7 @@ fn build_engineer_profiles_with_history(
                     profile,
                     task.id,
                     task.tags.iter().cloned(),
-                    task_profile_paths(task)?.into_iter(),
+                    task_profile_paths(task)?,
                     task_has_conflict_signal(task),
                 );
             }

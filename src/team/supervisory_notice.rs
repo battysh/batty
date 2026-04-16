@@ -367,48 +367,42 @@ pub(crate) fn supervisory_pressure_snapshots(
                         }
                     }
                 }
-                RoleType::Architect => {
+                RoleType::Architect
                     if !engineer_names.is_empty()
-                        && !all_engineers_have_active_tasks(&engineer_names, &tasks)
-                    {
-                        let working_engineers = engineer_names
+                        && !all_engineers_have_active_tasks(&engineer_names, &tasks) =>
+                {
+                    let working_engineers = engineer_names
+                        .iter()
+                        .filter(|name| !activity.get(*name).copied().unwrap_or_default().idle)
+                        .count();
+                    if working_engineers < engineer_names.len().div_ceil(2) {
+                        let idle_active = engineer_names
                             .iter()
-                            .filter(|name| !activity.get(*name).copied().unwrap_or_default().idle)
+                            .filter(|name| activity.get(*name).copied().unwrap_or_default().idle)
+                            .filter(|name| {
+                                tasks.iter().any(|task| {
+                                    task.claimed_by.as_deref() == Some(name.as_str())
+                                        && task_needs_supervisory_recovery(task)
+                                })
+                            })
                             .count();
-                        if working_engineers < engineer_names.len().div_ceil(2) {
-                            let idle_active = engineer_names
-                                .iter()
-                                .filter(|name| {
-                                    activity.get(*name).copied().unwrap_or_default().idle
-                                })
-                                .filter(|name| {
-                                    tasks.iter().any(|task| {
-                                        task.claimed_by.as_deref() == Some(name.as_str())
-                                            && task_needs_supervisory_recovery(task)
-                                    })
-                                })
-                                .count();
-                            snapshot
-                                .add_pressure(SupervisoryPressure::IdleActiveRecovery, idle_active);
+                        snapshot.add_pressure(SupervisoryPressure::IdleActiveRecovery, idle_active);
 
-                            let idle_unassigned = engineer_names
-                                .iter()
-                                .filter(|name| {
-                                    activity.get(*name).copied().unwrap_or_default().idle
+                        let idle_unassigned = engineer_names
+                            .iter()
+                            .filter(|name| activity.get(*name).copied().unwrap_or_default().idle)
+                            .filter(|name| {
+                                !tasks.iter().any(|task| {
+                                    task.claimed_by.as_deref() == Some(name.as_str())
+                                        && task_needs_supervisory_recovery(task)
                                 })
-                                .filter(|name| {
-                                    !tasks.iter().any(|task| {
-                                        task.claimed_by.as_deref() == Some(name.as_str())
-                                            && task_needs_supervisory_recovery(task)
-                                    })
-                                })
-                                .count();
-                            if idle_unassigned > 0 && !dispatchable_task_ids.is_empty() {
-                                snapshot.add_pressure(
-                                    SupervisoryPressure::DispatchGap,
-                                    idle_unassigned.min(dispatchable_task_ids.len()),
-                                );
-                            }
+                            })
+                            .count();
+                        if idle_unassigned > 0 && !dispatchable_task_ids.is_empty() {
+                            snapshot.add_pressure(
+                                SupervisoryPressure::DispatchGap,
+                                idle_unassigned.min(dispatchable_task_ids.len()),
+                            );
                         }
                     }
                 }
