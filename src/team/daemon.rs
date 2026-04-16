@@ -723,7 +723,7 @@ impl TeamDaemon {
     pub(in crate::team) fn member_backend_parked(&self, member_name: &str) -> bool {
         if matches!(
             self.backend_health.get(member_name),
-            Some(BackendHealth::QuotaExhausted)
+            Some(BackendHealth::QuotaExhausted | BackendHealth::AuthRequired)
         ) {
             return true;
         }

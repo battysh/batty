@@ -888,14 +888,32 @@ fn effective_context_limit_tokens(model: Option<&str>, used_tokens: u64) -> u64 
     // pick up when it ships).
     let bumped = 1_000_000;
     if bumped > nominal {
-        tracing::warn!(
-            model = ?model,
-            used_tokens,
-            nominal_limit = nominal,
-            bumped_limit = bumped,
-            "shim nominal context limit exceeded; bumping to 1M-context tier \
-             (SDK likely reported a stripped model name for a 1M variant)"
-        );
+        // Log the bump once per shim lifetime at warn level (retains
+        // observability of the SDK reporting a stripped model name) and
+        // thereafter at debug level. Without this guard, a busy agent
+        // produced 68 identical WARN lines in a single session which
+        // drowned out every other operator signal in the daemon log.
+        static BUMP_LOGGED: std::sync::atomic::AtomicBool =
+            std::sync::atomic::AtomicBool::new(false);
+        if !BUMP_LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            tracing::warn!(
+                model = ?model,
+                used_tokens,
+                nominal_limit = nominal,
+                bumped_limit = bumped,
+                "shim nominal context limit exceeded; bumping to 1M-context tier \
+                 (SDK likely reported a stripped model name for a 1M variant); \
+                 subsequent bumps in this shim will log at debug"
+            );
+        } else {
+            tracing::debug!(
+                model = ?model,
+                used_tokens,
+                nominal_limit = nominal,
+                bumped_limit = bumped,
+                "shim context limit bumped to 1M tier (deduplicated)"
+            );
+        }
     }
     bumped
 }

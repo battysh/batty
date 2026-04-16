@@ -37,7 +37,9 @@ impl TeamDaemon {
         Ok(actions)
     }
 
-    fn auto_doctor_reset_orphaned_in_progress(&mut self) -> Result<Vec<AutoFixAction>> {
+    pub(in super::super) fn auto_doctor_reset_orphaned_in_progress(
+        &mut self,
+    ) -> Result<Vec<AutoFixAction>> {
         let tasks = self.load_board_tasks()?;
         let mut actions = Vec::new();
 

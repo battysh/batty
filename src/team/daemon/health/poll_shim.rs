@@ -420,7 +420,22 @@ impl TeamDaemon {
                     member_name, exit_code, last_lines
                 ));
 
-                if self.config.team_config.auto_respawn_on_crash {
+                if self.member_backend_parked(member_name) {
+                    // Backend is parked (quota exhausted or auth required).
+                    // Respawning the shim would just burn retries against the
+                    // same non-recoverable condition, which is exactly the
+                    // failure mode we observed in the field (140x auth
+                    // retries against a dead refresh token). Record the
+                    // crash and wait for an operator to unpark the member.
+                    self.record_member_crashed(member_name, false);
+                    info!(
+                        member = member_name,
+                        "skipping shim respawn — backend parked; waiting for operator"
+                    );
+                    self.record_orchestrator_action(format!(
+                        "lifecycle: skipped shim respawn for {member_name} — backend parked"
+                    ));
+                } else if self.config.team_config.auto_respawn_on_crash {
                     self.record_member_crashed(member_name, true);
                     let respawn = if self.should_cold_respawn_codex_member(member_name, &last_lines)
                     {
@@ -714,6 +729,32 @@ impl TeamDaemon {
                     "quota: {member_name} backend blocked until {label} — {message}"
                 ));
                 self.emit_event(crate::team::events::TeamEvent::backend_quota_exhausted(
+                    member_name,
+                    &message,
+                ));
+            }
+
+            Event::AuthRequired { message } => {
+                let _ = append_shim_event_log(
+                    &self.config.project_root,
+                    member_name,
+                    &format!("<- auth_required: {message}"),
+                );
+                warn!(
+                    member = member_name,
+                    "backend auth required — pausing dispatch until operator re-logs in"
+                );
+                // AuthRequired is non-recoverable without human action. Park
+                // the member and stop any respawn attempts until an operator
+                // resolves the credential and manually clears the state.
+                self.backend_health.insert(
+                    member_name.to_string(),
+                    crate::agent::BackendHealth::AuthRequired,
+                );
+                self.record_orchestrator_action(format!(
+                    "auth: {member_name} backend requires re-login — {message}"
+                ));
+                self.emit_event(crate::team::events::TeamEvent::backend_auth_required(
                     member_name,
                     &message,
                 ));

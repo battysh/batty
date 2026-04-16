@@ -413,7 +413,10 @@ fn run_codex_exec(
     let stdout = child.stdout.take().unwrap();
     let stderr = child.stderr.take().unwrap();
 
-    // stderr reader (log only)
+    // stderr reader (log only). Non-recoverable auth failures are detected
+    // in the structured `turn.failed` / `error` events below — the codex
+    // CLI surfaces the same message there, so we don't need to race the
+    // stderr thread against the stdout JSONL path.
     let shim_id_err = shim_id.to_string();
     let pty_log_err = pty_log.map(Arc::clone);
     thread::spawn(move || {
@@ -511,6 +514,26 @@ fn run_codex_exec(
                     .unwrap_or_else(|| "unknown error".to_string());
                 eprintln!("[shim-codex {shim_id}] turn failed: {error_msg}");
 
+                // Non-recoverable auth failure: the codex refresh token has
+                // been consumed. No amount of respawning fixes this — a
+                // human must re-login. Park the shim Idle and surface an
+                // AuthRequired event so the daemon stops dispatching.
+                if detect_auth_required(&error_msg) {
+                    let mut st = state.lock().unwrap();
+                    st.pending_message_id = None;
+                    st.state = ShimState::Idle;
+                    st.state_changed_at = Instant::now();
+                    let drain = drain_queue_errors(&mut st.message_queue, ShimState::Idle);
+                    drop(st);
+
+                    let _ = evt_channel.send(&Event::AuthRequired { message: error_msg });
+                    for event in drain {
+                        let _ = evt_channel.send(&event);
+                    }
+                    let _ = child.wait();
+                    return;
+                }
+
                 // Check for context exhaustion
                 if common::detect_context_exhausted(&error_msg) {
                     let mut st = state.lock().unwrap();
@@ -565,6 +588,25 @@ fn run_codex_exec(
                     .map(|e| e.message.clone())
                     .unwrap_or_else(|| "stream error".to_string());
                 eprintln!("[shim-codex {shim_id}] error event: {error_msg}");
+
+                // Non-recoverable auth failure short-circuits before quota
+                // detection so we never treat a dead refresh token as a
+                // transient billing issue.
+                if detect_auth_required(&error_msg) {
+                    let mut st = state.lock().unwrap();
+                    st.pending_message_id = None;
+                    st.state = ShimState::Idle;
+                    st.state_changed_at = Instant::now();
+                    let drain = drain_queue_errors(&mut st.message_queue, ShimState::Idle);
+                    drop(st);
+
+                    let _ = evt_channel.send(&Event::AuthRequired { message: error_msg });
+                    for event in drain {
+                        let _ = evt_channel.send(&event);
+                    }
+                    let _ = child.wait();
+                    return;
+                }
 
                 // Detect quota/billing exhaustion — emit a specific event so
                 // the daemon can pause dispatch and alert the human.
@@ -675,6 +717,45 @@ fn run_codex_exec(
 struct QuotaBlock {
     retry_at_epoch_secs: Option<u64>,
     retry_at_label: Option<String>,
+}
+
+/// Detect the non-recoverable codex auth-credential error. The refresh token
+/// can only be used once; once that single use has been consumed (typically by
+/// another concurrent codex process), no amount of respawning can recover —
+/// a human has to `codex login` again. Keep the matcher narrow so that
+/// transient network-level auth failures still flow through the normal retry
+/// paths.
+fn detect_auth_required(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("refresh token was already used")
+        || (lower.contains("failed to refresh token") && lower.contains("log out and sign in"))
+}
+
+#[cfg(test)]
+mod detect_auth_required_tests {
+    use super::detect_auth_required;
+
+    #[test]
+    fn matches_refresh_token_already_used() {
+        assert!(detect_auth_required(
+            "Your access token could not be refreshed because your refresh token was already used. \
+             Please log out and sign in again."
+        ));
+    }
+
+    #[test]
+    fn matches_generic_failed_to_refresh_with_login_hint() {
+        assert!(detect_auth_required(
+            "Failed to refresh token: please log out and sign in again"
+        ));
+    }
+
+    #[test]
+    fn ignores_unrelated_errors() {
+        assert!(!detect_auth_required("stream error"));
+        assert!(!detect_auth_required("usage limit reached"));
+        assert!(!detect_auth_required("context length exceeded"));
+    }
 }
 
 fn detect_quota_block(message: &str) -> Option<QuotaBlock> {

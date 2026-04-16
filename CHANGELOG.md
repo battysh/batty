@@ -2,6 +2,36 @@
 
 All notable changes to Batty are documented here.
 
+## 0.11.16 — 2026-04-16
+
+Field-reliability pass from a long `~/nether_earth_remake` run:
+non-recoverable auth failures, logspam, and lingering orphan claims
+now heal on their own instead of waiting for human intervention.
+
+### Fixes
+
+- **Codex refresh-token failure now parks the backend instead of
+  looping** — `shim/runtime_codex.rs` adds `detect_auth_required()`,
+  matching `turn.failed` / `error` payloads that mention a reused
+  refresh token or a "log out and sign in again" hint. The shim
+  emits a new `Event::AuthRequired`, which flips
+  `BackendHealth::AuthRequired` and gates the daemon's crash-respawn
+  path via `member_backend_parked()`. Previously a single bad
+  refresh token could spawn 140+ retries in a few minutes; now the
+  shim halts cleanly and the operator is notified.
+- **Context-bump warnings deduplicated in the SDK shim**
+  (`shim/runtime_sdk.rs`) — the 1M-context bump log now fires once
+  per process at `warn!`; subsequent bumps drop to `debug!`. A
+  single shim session had been emitting 68 identical WARN lines in
+  production logs; this cuts the noise without losing the first
+  signal.
+- **Orphaned in-progress tasks are reclaimed on daemon startup**
+  (`team/daemon/poll.rs`) — `auto_doctor_reset_orphaned_in_progress`
+  now runs immediately after state restoration instead of only
+  every 10 poll cycles. Prevents tasks from staying "overdue" for
+  an hour or more after a daemon restart when the active-task map
+  has been cleared.
+
 ## 0.11.15 — 2026-04-16
 
 Tiered inbox control plane lands behind a feature flag, turning the
