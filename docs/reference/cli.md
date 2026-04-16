@@ -766,6 +766,7 @@ Options:
           - software:  Human + tech lead + 2 eng managers + 8 developers — full product team (11 panes)
           - cleanroom: Clean-room workflow: decompiler + spec-writer + test-writer + implementer (4 panes)
           - batty:     Batty self-development: human + architect + manager + 4 Rust engineers (6 panes)
+          - python:    Python-focused team with pytest-aware engineer prompts (5 panes)
 
       --from <FROM>
           Copy team config from $HOME/.batty/templates/<name>/
@@ -1937,6 +1938,9 @@ Usage: batty start [OPTIONS]
 Options:
       --attach
           Auto-attach to the tmux session after startup
+
+  -q, --quiet
+          Suppress informational output (errors still print)
 
   -v, --verbose...
           Verbosity level (-v, -vv, -vvv)
