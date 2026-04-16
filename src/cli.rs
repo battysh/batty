@@ -57,6 +57,9 @@ pub enum Command {
         /// Auto-attach to the tmux session after startup
         #[arg(long, default_value_t = false)]
         attach: bool,
+        /// Suppress informational output (errors still print)
+        #[arg(short, long, default_value_t = false)]
+        quiet: bool,
     },
 
     /// Stop the team daemon and kill the tmux session
@@ -802,6 +805,8 @@ pub enum InitTemplate {
     Cleanroom,
     /// Batty self-development: human + architect + manager + 4 Rust engineers (6 panes)
     Batty,
+    /// Python-focused team with pytest-aware engineer prompts (5 panes)
+    Python,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -1389,7 +1394,10 @@ mod tests {
     fn start_subcommand_defaults() {
         let cli = Cli::parse_from(["batty", "start"]);
         match cli.command {
-            Command::Start { attach } => assert!(!attach),
+            Command::Start { attach, quiet } => {
+                assert!(!attach);
+                assert!(!quiet);
+            }
             other => panic!("expected start command, got {other:?}"),
         }
     }
@@ -1398,7 +1406,22 @@ mod tests {
     fn start_subcommand_with_attach() {
         let cli = Cli::parse_from(["batty", "start", "--attach"]);
         match cli.command {
-            Command::Start { attach } => assert!(attach),
+            Command::Start { attach, quiet } => {
+                assert!(attach);
+                assert!(!quiet);
+            }
+            other => panic!("expected start command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn start_subcommand_with_quiet() {
+        let cli = Cli::parse_from(["batty", "start", "-q"]);
+        match cli.command {
+            Command::Start { attach, quiet } => {
+                assert!(!attach);
+                assert!(quiet);
+            }
             other => panic!("expected start command, got {other:?}"),
         }
     }
@@ -2989,6 +3012,7 @@ mod tests {
             ("software", InitTemplate::Software),
             ("cleanroom", InitTemplate::Cleanroom),
             ("batty", InitTemplate::Batty),
+            ("python", InitTemplate::Python),
         ] {
             let cli = Cli::parse_from(["batty", "init", "--template", arg]);
             match cli.command {
