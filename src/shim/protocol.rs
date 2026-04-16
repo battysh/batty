@@ -116,6 +116,12 @@ pub enum Event {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         retry_at_label: Option<String>,
     },
+    /// Backend authentication is non-recoverable — a human must re-login
+    /// before the agent can continue. Emitted when the shim detects a
+    /// refresh-token or credential error that respawning cannot fix.
+    AuthRequired {
+        message: String,
+    },
     ScreenCapture {
         content: String,
         cursor_row: u16,

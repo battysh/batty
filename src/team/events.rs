@@ -769,6 +769,14 @@ impl TeamEvent {
         }
     }
 
+    pub fn backend_auth_required(role: &str, reason: &str) -> Self {
+        Self {
+            role: Some(role.into()),
+            reason: Some(reason.into()),
+            ..Self::base("backend_auth_required")
+        }
+    }
+
     pub fn agent_spawned(role: &str) -> Self {
         Self {
             role: Some(role.into()),

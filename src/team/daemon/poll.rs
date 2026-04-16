@@ -54,6 +54,26 @@ impl TeamDaemon {
             );
             self.active_tasks.clear();
         }
+
+        // Reclaim orphaned in-progress tasks right away, instead of waiting
+        // for the next auto-doctor sweep (which only runs every 10 poll
+        // cycles). After a daemon restart, the board may carry tasks still
+        // marked in-progress and claimed by an engineer whose active
+        // assignment the daemon no longer tracks; leaving them claimed
+        // blocks dispatch until auto-doctor rediscovers them.
+        match self.auto_doctor_reset_orphaned_in_progress() {
+            Ok(actions) if !actions.is_empty() => {
+                info!(
+                    reclaimed = actions.len(),
+                    "startup: reclaimed orphaned in-progress tasks"
+                );
+            }
+            Ok(_) => {}
+            Err(error) => {
+                warn!(error = %error, "startup: failed to reclaim orphaned in-progress tasks");
+            }
+        }
+
         self.persist_runtime_state(false)?;
 
         let started_at = Instant::now();

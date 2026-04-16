@@ -35,6 +35,10 @@ pub enum BackendHealth {
     Unreachable,
     /// Backend quota/billing limit exhausted — agent cannot work until credits are added.
     QuotaExhausted,
+    /// Backend auth credentials are invalid — a human must re-login before the
+    /// agent can work again. Signalled by, e.g. codex's "refresh token was
+    /// already used" error which cannot be resolved by respawning the shim.
+    AuthRequired,
 }
 
 impl BackendHealth {
@@ -43,6 +47,7 @@ impl BackendHealth {
             Self::Healthy => "healthy",
             Self::Degraded => "degraded",
             Self::QuotaExhausted => "quota_exhausted",
+            Self::AuthRequired => "auth_required",
             Self::Unreachable => "unreachable",
         }
     }
