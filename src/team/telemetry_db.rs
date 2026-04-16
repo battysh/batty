@@ -168,7 +168,12 @@ pub fn open_readonly(project_root: &Path) -> Result<Option<Connection>> {
         &db_path,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )
-    .with_context(|| format!("failed to open telemetry db (read-only) at {}", db_path.display()))?;
+    .with_context(|| {
+        format!(
+            "failed to open telemetry db (read-only) at {}",
+            db_path.display()
+        )
+    })?;
     // Short busy timeout — CLI should never block on a daemon write lock.
     conn.pragma_update(None, "busy_timeout", "2000")?;
     Ok(Some(conn))
