@@ -147,9 +147,31 @@ pub fn open(project_root: &Path) -> Result<Connection> {
 
     // WAL mode for better concurrent read/write performance.
     conn.pragma_update(None, "journal_mode", "WAL")?;
+    // Prevent indefinite blocking when the daemon holds a write lock (#676).
+    conn.pragma_update(None, "busy_timeout", "5000")?;
 
     init_schema(&conn)?;
     Ok(conn)
+}
+
+/// Open the telemetry database in read-only mode for CLI queries (#676).
+///
+/// Skips schema initialization (which requires a write lock) to avoid
+/// blocking when the daemon is actively writing. Returns `None` if the
+/// database file doesn't exist yet.
+pub fn open_readonly(project_root: &Path) -> Result<Option<Connection>> {
+    let db_path = project_root.join(".batty").join(DB_FILENAME);
+    if !db_path.exists() {
+        return Ok(None);
+    }
+    let conn = Connection::open_with_flags(
+        &db_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .with_context(|| format!("failed to open telemetry db (read-only) at {}", db_path.display()))?;
+    // Short busy timeout — CLI should never block on a daemon write lock.
+    conn.pragma_update(None, "busy_timeout", "2000")?;
+    Ok(Some(conn))
 }
 
 /// Open an in-memory database (for tests).

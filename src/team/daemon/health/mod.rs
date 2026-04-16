@@ -18,6 +18,7 @@ use anyhow::{Context, Result};
 use tracing::warn;
 
 mod auto_doctor;
+pub(crate) mod binary_freshness;
 mod checks;
 pub mod context;
 mod context_exhaustion;

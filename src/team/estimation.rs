@@ -181,10 +181,9 @@ pub(crate) fn compute_etas(
         return HashMap::new();
     }
 
-    let conn = match super::telemetry_db::open(project_root) {
-        Ok(conn) => conn,
-        Err(error) => {
-            warn!(error = %error, "failed to open telemetry db for estimation");
+    let conn = match super::telemetry_db::open_readonly(project_root) {
+        Ok(Some(conn)) => conn,
+        Ok(None) | Err(_) => {
             return active_task_ids
                 .iter()
                 .map(|(id, _)| (*id, "n/a".to_string()))

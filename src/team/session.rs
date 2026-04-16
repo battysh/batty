@@ -421,8 +421,9 @@ pub fn team_status(project_root: &Path, json: bool, detail: bool, health: bool) 
     };
 
     let engineer_profiles = if detail {
-        crate::team::telemetry_db::open(project_root)
+        crate::team::telemetry_db::open_readonly(project_root)
             .ok()
+            .flatten()
             .and_then(|conn| {
                 crate::team::telemetry_db::query_engineer_performance_profiles(&conn).ok()
             })
