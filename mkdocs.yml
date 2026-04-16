@@ -22,6 +22,7 @@ nav:
   - Reference:
       - CLI Reference: reference/cli.md
       - Runtime Config: reference/config.md
+      - Environment Variables: reference/environment-variables.md
       - Modules: reference/modules.md
   - Architecture: architecture.md
   - Testing: testing.md

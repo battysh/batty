@@ -2,6 +2,43 @@
 
 All notable changes to Batty are documented here.
 
+## 0.11.17 — 2026-04-16
+
+Closes the five outstanding `good first issue` items. No behavior
+regressions — each item either adds discoverability (error hints,
+docs, a log flag) or a new scaffold option.
+
+### Features
+
+- **Python team template** (#8) — `batty init --template python`
+  scaffolds a 5-pane team with a Python-native engineer prompt that
+  drives `pytest` / `ruff` / virtualenv activation. `InitTemplate`
+  grows a `Python` variant wired through `src/cli.rs`,
+  `src/main.rs`, and `src/team/init.rs`; new templates land at
+  `src/team/templates/team_python.yaml` and `python_engineer.md`.
+- **`--quiet` flag on `batty start`** (#10) — suppresses the
+  launch-time "detaching…" / "attached" banner when running under
+  supervisors or CI. Existing callers are unaffected; default is
+  `false`.
+
+### Fixes
+
+- **Friendlier error when tmux is not installed** (#7) — `tmux.rs`
+  maps `io::ErrorKind::NotFound` to the new
+  `TmuxError::NotInstalled` variant, whose `Display` impl prints a
+  one-line install hint (brew / apt / dnf) instead of the default
+  "No such file or directory".
+- **`BATTY_LOG` env var for log filtering** (#9) — `main.rs`
+  prefers `BATTY_LOG` over `RUST_LOG`, giving Batty-native users a
+  discoverable knob without losing the standard Rust fallback.
+
+### Docs
+
+- **Environment variables reference** (#11) — new
+  `docs/reference/environment-variables.md` consolidates every
+  `BATTY_*` knob in one table with defaults and examples. Linked
+  from the main navigation under Reference.
+
 ## 0.11.16 — 2026-04-16
 
 Field-reliability pass from a long `~/nether_earth_remake` run:

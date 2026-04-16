@@ -56,11 +56,16 @@ fn setup_tracing(verbose: u8) {
         _ => "trace",
     };
 
+    // Prefer `BATTY_LOG` (batty-native, discoverable), fall back to
+    // `RUST_LOG` (standard rust convention), else CLI verbosity.
+    let env_filter = match std::env::var("BATTY_LOG") {
+        Ok(value) if !value.trim().is_empty() => tracing_subscriber::EnvFilter::new(value),
+        _ => tracing_subscriber::EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(filter)),
+    };
+
     tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(filter)),
-        )
+        .with_env_filter(env_filter)
         .with_writer(std::io::stderr)
         .init();
 }
@@ -270,6 +275,7 @@ fn main() -> Result<()> {
                     cli::InitTemplate::Software => "software",
                     cli::InitTemplate::Cleanroom => "cleanroom",
                     cli::InitTemplate::Batty => "batty",
+                    cli::InitTemplate::Python => "python",
                 };
                 // Interactive prompts for project name and agent
                 let default_name = root
@@ -341,9 +347,9 @@ fn main() -> Result<()> {
             }
         }
 
-        Command::Start { attach } => {
+        Command::Start { attach, quiet } => {
             let session = team::start_team(&root, attach)?;
-            if !attach {
+            if !attach && !quiet {
                 println!("Team session started: {session}");
                 println!("Run `batty attach` to connect.");
             }

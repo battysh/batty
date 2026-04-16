@@ -1,0 +1,66 @@
+name: my-python-project
+use_shim: true
+auto_respawn_on_crash: true
+orchestrator_pane: true
+orchestrator_position: left
+
+board:
+  rotation_threshold: 20
+  auto_dispatch: false
+
+standup:
+  interval_secs: 600
+  output_lines: 40
+
+automation:
+  timeout_nudges: true
+  standups: true
+  triage_interventions: true
+  review_interventions: true
+  owned_task_interventions: true
+  manager_dispatch_interventions: true
+  architect_utilization_interventions: true
+  intervention_idle_grace_secs: 60
+
+automation_sender: human
+
+layout:
+  zones:
+    - name: architect
+      width_pct: 33
+    - name: managers
+      width_pct: 33
+    - name: engineers
+      width_pct: 34
+
+roles:
+  - name: human
+    role_type: user
+    channel: telegram
+    channel_config:
+      target: "<your-telegram-chat-id>"
+      provider: openclaw
+    talks_to: [architect]
+
+  - name: architect
+    role_type: architect
+    agent: claude
+    instances: 1
+    prompt: architect.md
+    talks_to: [human, manager]
+    nudge_interval_secs: 900
+
+  - name: manager
+    role_type: manager
+    agent: claude
+    instances: 1
+    prompt: manager.md
+    talks_to: [architect, engineer]
+
+  - name: engineer
+    role_type: engineer
+    agent: claude
+    instances: 3
+    prompt: python_engineer.md
+    talks_to: [manager]
+    use_worktrees: true

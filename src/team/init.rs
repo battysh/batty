@@ -80,6 +80,7 @@ pub fn init_team_with_overrides(
         "software" => include_str!("templates/team_software.yaml"),
         "cleanroom" => include_str!("templates/team_cleanroom.yaml"),
         "batty" => include_str!("templates/team_batty.yaml"),
+        "python" => include_str!("templates/team_python.yaml"),
         _ => include_str!("templates/team_simple.yaml"),
     };
     let mut yaml_content = yaml_content.to_string();
@@ -145,6 +146,14 @@ pub fn init_team_with_overrides(
             (
                 "batty_implementer.md",
                 include_str!("templates/batty_implementer.md"),
+            ),
+        ],
+        "python" => &[
+            ("architect.md", include_str!("templates/architect.md")),
+            ("manager.md", include_str!("templates/manager.md")),
+            (
+                "python_engineer.md",
+                include_str!("templates/python_engineer.md"),
             ),
         ],
         _ => &[

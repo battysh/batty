@@ -66,6 +66,15 @@ impl BoardError {
 
 #[derive(Debug, Error)]
 pub enum TmuxError {
+    #[error(
+        "tmux is not installed (or not in PATH).\n\
+         Batty requires tmux >= 3.1 to manage agent sessions.\n\n\
+         Install tmux:\n  \
+           macOS:   brew install tmux\n  \
+           Ubuntu:  sudo apt install tmux\n  \
+           Arch:    sudo pacman -S tmux"
+    )]
+    NotInstalled,
     #[error("failed to execute tmux command `{command}`: {source}")]
     Exec {
         command: String,

@@ -72,10 +72,13 @@ pub struct PaneDetails {
 }
 
 fn check_tmux_with_program(program: &str) -> Result<String> {
-    let output = Command::new(program)
-        .arg("-V")
-        .output()
-        .map_err(|error| TmuxError::exec("tmux -V", error))?;
+    let output = Command::new(program).arg("-V").output().map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            TmuxError::NotInstalled
+        } else {
+            TmuxError::exec("tmux -V", error)
+        }
+    })?;
 
     if !output.status.success() {
         return Err(TmuxError::command_failed(
