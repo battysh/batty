@@ -786,6 +786,26 @@ impl TeamEvent {
         }
     }
 
+    /// Emitted when the running daemon binary is older than the current
+    /// git HEAD of the batty source tree (#675).
+    pub fn daemon_binary_stale(
+        commits_behind: u32,
+        last_subject: &str,
+        last_hash: &str,
+        binary_mtime: i64,
+        head_ts: i64,
+    ) -> Self {
+        Self {
+            action_type: Some("reliability".into()),
+            restart_count: Some(commits_behind),
+            reason: Some(last_subject.into()),
+            details: Some(format!(
+                "{last_hash} binary_mtime={binary_mtime} head_ts={head_ts}"
+            )),
+            ..Self::base("daemon_binary_stale")
+        }
+    }
+
     pub fn agent_handoff(role: &str, task: &str, reason: &str, success: bool) -> Self {
         Self {
             role: Some(role.into()),

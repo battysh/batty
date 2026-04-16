@@ -73,7 +73,7 @@ mod dispatch;
 #[path = "daemon/error_handling.rs"]
 mod error_handling;
 #[path = "daemon/health/mod.rs"]
-mod health;
+pub(crate) mod health;
 #[path = "daemon/helpers.rs"]
 mod helpers;
 #[path = "daemon/hot_reload.rs"]
@@ -279,6 +279,8 @@ pub struct TeamDaemon {
     pub(super) last_shim_health_check: Instant,
     /// Serial daemon-owned merge queue for auto-merge execution.
     pub(super) merge_queue: MergeQueue,
+    /// When the last binary freshness check ran (#675). Gated to at most once per hour.
+    pub(super) last_binary_freshness_check: Instant,
 }
 
 #[cfg(any(test, feature = "scenario-test"))]
@@ -624,6 +626,8 @@ impl TeamDaemon {
             shim_handles: HashMap::new(),
             last_shim_health_check: Instant::now(),
             merge_queue: MergeQueue::default(),
+            // Start far enough in the past to trigger an immediate check at startup.
+            last_binary_freshness_check: Instant::now() - Duration::from_secs(7200),
         })
     }
 

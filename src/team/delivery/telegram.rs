@@ -300,6 +300,7 @@ mod tests {
             planning_cycle_active: false,
             last_shim_health_check: Instant::now(),
             merge_queue: crate::team::daemon::MergeQueue::default(),
+            last_binary_freshness_check: Instant::now(),
         }
     }
 

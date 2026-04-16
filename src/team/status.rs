@@ -2341,7 +2341,10 @@ pub(crate) fn workflow_metrics_section(
     let events_path = team_events_path(project_root);
 
     // Try SQLite telemetry DB first, fall back to JSONL events.
-    let db = crate::team::telemetry_db::open(project_root).ok();
+    // Use read-only opener to avoid blocking on the daemon's write lock (#676).
+    let db = crate::team::telemetry_db::open_readonly(project_root)
+        .ok()
+        .flatten();
     let events_fallback = if db.is_none() && events_path.is_file() {
         Some(events_path.as_path())
     } else {
@@ -2364,13 +2367,36 @@ pub(crate) fn workflow_metrics_section(
         events_fallback,
     ) {
         Ok(metrics) => {
-            let formatted = format_metrics(&metrics);
+            let mut formatted = format_metrics(&metrics);
+
+            // Append binary freshness line (#675).
+            let freshness_line = binary_freshness_status_line(project_root);
+            formatted.push('\n');
+            formatted.push_str(&freshness_line);
+
             Some((formatted, metrics))
         }
         Err(error) => {
             warn!(path = %board_dir.display(), error = %error, "failed to compute workflow metrics");
             None
         }
+    }
+}
+
+/// Compute the binary freshness status line for `batty status` (#675).
+fn binary_freshness_status_line(project_root: &Path) -> String {
+    let binary_path = match std::env::current_exe() {
+        Ok(path) => path,
+        Err(_) => return "Daemon Binary: unknown (cannot resolve exe)".to_string(),
+    };
+    let result = crate::team::daemon::health::binary_freshness::evaluate_binary_freshness(
+        &binary_path,
+        project_root,
+    );
+    match result {
+        Ok(Some(report)) => report.status_line(),
+        Ok(None) => "Daemon Binary: n/a".to_string(),
+        Err(_) => "Daemon Binary: unknown (check failed)".to_string(),
     }
 }
 

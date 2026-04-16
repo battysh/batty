@@ -1133,6 +1133,7 @@ mod tests {
             planning_cycle_active: false,
             last_shim_health_check: Instant::now(),
             merge_queue: crate::team::daemon::MergeQueue::default(),
+            last_binary_freshness_check: Instant::now(),
         };
 
         backdate_idle_grace(&mut daemon, "scientist");
@@ -1283,6 +1284,7 @@ mod tests {
             planning_cycle_active: false,
             last_shim_health_check: Instant::now(),
             merge_queue: crate::team::daemon::MergeQueue::default(),
+            last_binary_freshness_check: Instant::now(),
         };
 
         let root = inbox::inboxes_root(tmp.path());
@@ -1452,6 +1454,7 @@ mod tests {
             planning_cycle_active: false,
             last_shim_health_check: Instant::now(),
             merge_queue: crate::team::daemon::MergeQueue::default(),
+            last_binary_freshness_check: Instant::now(),
         };
 
         assert_eq!(daemon.automation_sender_for("eng-1"), "lead");

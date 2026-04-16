@@ -246,6 +246,10 @@ impl TeamDaemon {
         self.run_recoverable_step("check_backend_health", |daemon| {
             daemon.check_backend_health()
         });
+        self.run_recoverable_step("maybe_check_binary_freshness", |daemon| {
+            daemon.maybe_check_binary_freshness();
+            Ok(())
+        });
         self.run_recoverable_step("maybe_reconcile_stale_worktrees", |daemon| {
             daemon.maybe_reconcile_stale_worktrees()
         });

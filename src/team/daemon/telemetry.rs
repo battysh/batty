@@ -45,6 +45,49 @@ impl TeamDaemon {
         self.emit_event(TeamEvent::daemon_started());
     }
 
+    /// Check whether the running binary is stale relative to the git HEAD
+    /// of the batty source tree (#675). Gated to run at most once per hour.
+    pub(super) fn maybe_check_binary_freshness(&mut self) {
+        use std::time::{Duration, Instant};
+
+        const BINARY_FRESHNESS_INTERVAL: Duration = Duration::from_secs(3600);
+        if self.last_binary_freshness_check.elapsed() < BINARY_FRESHNESS_INTERVAL {
+            return;
+        }
+        self.last_binary_freshness_check = Instant::now();
+
+        let binary_path = match std::env::current_exe() {
+            Ok(path) => path,
+            Err(error) => {
+                debug!(error = %error, "cannot resolve current exe for binary freshness check");
+                return;
+            }
+        };
+        let repo_root = &self.config.project_root;
+        match super::health::binary_freshness::evaluate_binary_freshness(&binary_path, repo_root) {
+            Ok(Some(report)) => {
+                if report.fresh {
+                    info!("{}", report.status_line());
+                } else {
+                    warn!("{}", report.status_line());
+                    self.emit_event(TeamEvent::daemon_binary_stale(
+                        report.commits_behind,
+                        &report.last_subject,
+                        &report.last_hash,
+                        report.binary_mtime,
+                        report.head_ts,
+                    ));
+                }
+            }
+            Ok(None) => {
+                debug!("binary freshness check skipped (binary missing or not a git repo)");
+            }
+            Err(error) => {
+                debug!(error = %error, "binary freshness check failed");
+            }
+        }
+    }
+
     pub(super) fn record_daemon_heartbeat(&mut self, uptime_secs: u64) {
         self.emit_event(TeamEvent::daemon_heartbeat(uptime_secs));
     }
@@ -1021,6 +1064,7 @@ mod tests {
             planning_cycle_active: false,
             last_shim_health_check: Instant::now(),
             merge_queue: crate::team::daemon::MergeQueue::default(),
+            last_binary_freshness_check: Instant::now(),
         };
 
         let sent = Arc::new(Mutex::new(Vec::new()));
@@ -1495,6 +1539,7 @@ mod tests {
             planning_cycle_active: false,
             last_shim_health_check: Instant::now(),
             merge_queue: crate::team::daemon::MergeQueue::default(),
+            last_binary_freshness_check: Instant::now(),
         };
 
         daemon.poll_watchers().unwrap();

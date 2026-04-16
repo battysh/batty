@@ -2,6 +2,29 @@
 
 All notable changes to Batty are documented here.
 
+## 0.11.13 — 2026-04-15
+
+Binary freshness detection surfaces stale daemon binaries; read-only
+telemetry DB opener prevents `batty status` from blocking on daemon
+write locks.
+
+### Features
+
+- **Detect stale daemon binary vs main HEAD** (#675) — new
+  `binary_freshness` health module compares the running binary's mtime
+  against `git log HEAD -- src` commits. Reports "Daemon Binary: STALE —
+  N commits behind main" in `batty status` and emits
+  `daemon_binary_stale` events. 10-minute threshold avoids false alarms;
+  docs-only commits are filtered out. Hourly recheck via daemon tick.
+
+### Fixes
+
+- **`batty status` no longer blocks on daemon write locks** (#676) — CLI
+  status path now opens the telemetry SQLite DB in read-only mode
+  (`open_readonly`) with a 2-second busy timeout, skipping schema init.
+  The daemon's own connection gets a 5-second `busy_timeout` PRAGMA.
+  ETA estimation also uses the read-only opener.
+
 ## 0.11.12 — 2026-04-15
 
 Unwedge Working engineers stuck on stale branches with dirty worktrees;
