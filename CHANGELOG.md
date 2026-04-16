@@ -2,6 +2,26 @@
 
 All notable changes to Batty are documented here.
 
+## 0.11.14 — 2026-04-15
+
+Inbox control-plane design doc and worktree hygiene pass.
+
+### Design
+
+- **Tiered inbox queue design** (#658) — comprehensive design document
+  (`planning/inbox-control-plane-design.md`) proposing 4-tier message
+  queues (priority/work/content/telemetry) with per-tier TTLs, write-time
+  classification, and a 3-phase backwards-compatible migration path.
+  Includes catalog of all inbox message types with source-file references
+  and 5 follow-up implementation tickets.
+
+### Maintenance
+
+- **Worktree and stash hygiene** (#673) — pruned 17 stale worktree
+  entries, removed 5 abandoned worktrees with their branches, cleared 133
+  accumulated stashes, deleted 7 stale remote-tracking branches, and
+  removed 1 stale release worktree. Board cleaned of all resolved tasks.
+
 ## 0.11.13 — 2026-04-15
 
 Binary freshness detection surfaces stale daemon binaries; read-only
