@@ -112,11 +112,9 @@ impl ParityReport {
             .iter()
             .filter(|row| row.verified == VerificationStatus::Fail)
             .count();
-        let overall_parity_pct = if total_behaviors == 0 {
-            0
-        } else {
-            (verified_pass * 100) / total_behaviors
-        };
+        let overall_parity_pct = (verified_pass * 100)
+            .checked_div(total_behaviors)
+            .unwrap_or(0);
 
         ParitySummary {
             total_behaviors,

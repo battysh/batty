@@ -1276,7 +1276,7 @@ impl TeamDaemon {
             *class_counts.entry(entry.class.label()).or_default() += entry.duplicate_count;
         }
         let mut class_summary = class_counts.into_iter().collect::<Vec<_>>();
-        class_summary.sort_by(|(left, _), (right, _)| left.cmp(right));
+        class_summary.sort_by_key(|(left, _)| *left);
         let class_summary = class_summary
             .into_iter()
             .map(|(label, count)| format!("{label}={count}"))

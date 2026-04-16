@@ -174,11 +174,9 @@ pub fn build_test_timing_record(
     let (rolling_average_ms, regression_pct, regression_detected) = if window.len() == 5 {
         let total_ms: u64 = window.iter().map(|record| record.duration_ms).sum();
         let average_ms = total_ms / 5;
-        let pct = if average_ms == 0 {
-            None
-        } else {
-            Some(((duration_ms.saturating_sub(average_ms)) * 100 / average_ms) as u32)
-        };
+        let pct = (duration_ms.saturating_sub(average_ms) * 100)
+            .checked_div(average_ms)
+            .map(|v| v as u32);
         let detected = average_ms > 0 && duration_ms.saturating_mul(100) > average_ms * 120;
         (Some(average_ms), pct, detected)
     } else {

@@ -275,16 +275,15 @@ pub fn run_sdk(args: ShimArgs, channel: Channel) -> Result<()> {
 
                 "control_request" => {
                     // Auto-approve tool use requests
-                    if msg.request_subtype().as_deref() == Some("can_use_tool") {
-                        if let (Some(req_id), Some(ref tool_use_id)) =
+                    if msg.request_subtype().as_deref() == Some("can_use_tool")
+                        && let (Some(req_id), Some(ref tool_use_id)) =
                             (msg.request_id.as_ref(), msg.request_tool_use_id())
-                        {
-                            let resp = SdkControlResponse::approve_tool(req_id, tool_use_id);
-                            let ndjson = resp.to_ndjson();
-                            if let Ok(mut writer) = stdin_for_approve.lock() {
-                                let _ = writeln!(writer, "{ndjson}");
-                                let _ = writer.flush();
-                            }
+                    {
+                        let resp = SdkControlResponse::approve_tool(req_id, tool_use_id);
+                        let ndjson = resp.to_ndjson();
+                        if let Ok(mut writer) = stdin_for_approve.lock() {
+                            let _ = writeln!(writer, "{ndjson}");
+                            let _ = writer.flush();
                         }
                     }
                 }
