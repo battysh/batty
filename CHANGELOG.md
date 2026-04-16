@@ -2,6 +2,28 @@
 
 All notable changes to Batty are documented here.
 
+## 0.11.15 — 2026-04-16
+
+Tiered inbox control plane lands behind a feature flag, turning the
+0.11.14 design doc into a working implementation.
+
+### Features
+
+- **Tiered inbox queues implementation** (#658) — new
+  `src/team/inbox_tiered.rs` module adds a 4-tier Maildir layout
+  (priority/work/content/telemetry) with per-tier TTLs
+  (1h/30m/15m/5m by default). Gated by `workflow_policy.tiered_inboxes`
+  (default `false`), so the change is fully additive and non-breaking.
+  Write path uses `deliver_flag_aware` at 5 production call sites in
+  `delivery/routing.rs`; supervisor reads use `pending_messages_union`
+  in `daemon/interventions/mod.rs` and `supervisory_notice.rs` so both
+  layouts are safe to read regardless of flag state. Daemon tick
+  `maybe_sweep_tiered_inboxes` (60s cooldown, no-op when flag off)
+  expires per-tier backlog. Adds `queue_tier()` to `MessageCategory`
+  and 18 targeted tests; full library suite (3517 tests) stays green.
+  Follow-up work (tiered digest formatting, per-queue rate limits) is
+  deferred until real-world per-tier volume is observable.
+
 ## 0.11.14 — 2026-04-15
 
 Inbox control-plane design doc and worktree hygiene pass.

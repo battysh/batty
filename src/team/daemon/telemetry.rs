@@ -88,6 +88,59 @@ impl TeamDaemon {
         }
     }
 
+    /// Sweep expired messages from the tiered inbox sub-queues (#658).
+    ///
+    /// No-op unless `workflow_policy.tiered_inboxes` is enabled. Runs at
+    /// most once per `TIERED_INBOX_SWEEP_INTERVAL`. Each tier has its own
+    /// TTL (priority=1h, work=30m, content=15m, telemetry=5m by default).
+    pub(super) fn maybe_sweep_tiered_inboxes(&mut self) {
+        use std::time::{Duration, Instant};
+
+        if !self.config.team_config.workflow_policy.tiered_inboxes {
+            return;
+        }
+        const TIERED_INBOX_SWEEP_INTERVAL: Duration = Duration::from_secs(60);
+        if self.last_tiered_inbox_sweep.elapsed() < TIERED_INBOX_SWEEP_INTERVAL {
+            return;
+        }
+        self.last_tiered_inbox_sweep = Instant::now();
+
+        let inboxes_root = crate::team::inbox::inboxes_root(&self.config.project_root);
+        let ttls = crate::team::inbox_tiered::TieredTtlConfig::default();
+        let mut total_expired = 0usize;
+        for member in &self.config.members {
+            match crate::team::inbox_tiered::expire_tiered_queues(
+                &inboxes_root,
+                &member.name,
+                &ttls,
+            ) {
+                Ok(counts) => {
+                    if counts.total() > 0 {
+                        info!(
+                            member = member.name.as_str(),
+                            priority = counts.priority,
+                            work = counts.work,
+                            content = counts.content,
+                            telemetry = counts.telemetry,
+                            "tiered inbox sweep expired messages"
+                        );
+                        total_expired += counts.total();
+                    }
+                }
+                Err(error) => {
+                    warn!(
+                        member = member.name.as_str(),
+                        error = %error,
+                        "tiered inbox sweep failed"
+                    );
+                }
+            }
+        }
+        if total_expired > 0 {
+            debug!(total_expired, "tiered inbox sweep complete");
+        }
+    }
+
     pub(super) fn record_daemon_heartbeat(&mut self, uptime_secs: u64) {
         self.emit_event(TeamEvent::daemon_heartbeat(uptime_secs));
     }
@@ -1065,6 +1118,7 @@ mod tests {
             last_shim_health_check: Instant::now(),
             merge_queue: crate::team::daemon::MergeQueue::default(),
             last_binary_freshness_check: Instant::now(),
+            last_tiered_inbox_sweep: Instant::now(),
         };
 
         let sent = Arc::new(Mutex::new(Vec::new()));
@@ -1540,6 +1594,7 @@ mod tests {
             last_shim_health_check: Instant::now(),
             merge_queue: crate::team::daemon::MergeQueue::default(),
             last_binary_freshness_check: Instant::now(),
+            last_tiered_inbox_sweep: Instant::now(),
         };
 
         daemon.poll_watchers().unwrap();

@@ -183,6 +183,10 @@ impl TeamDaemon {
         self.run_recoverable_step("expire_stale_pending_messages", |daemon| {
             daemon.expire_stale_pending_messages()
         });
+        self.run_recoverable_step("maybe_sweep_tiered_inboxes", |daemon| {
+            daemon.maybe_sweep_tiered_inboxes();
+            Ok(())
+        });
 
         // -- Recoverable subsystems --
         self.run_recoverable_step("maybe_intervene_triage_backlog", |daemon| {

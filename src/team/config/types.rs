@@ -301,6 +301,12 @@ pub struct WorkflowPolicy {
     /// Number of PTY screen pages to include in the handoff summary.
     #[serde(default = "default_handoff_screen_history")]
     pub handoff_screen_history: usize,
+    /// Enable the tiered inbox layout (#658): messages route to per-priority
+    /// Maildir sub-queues (priority/work/content/telemetry) with per-tier
+    /// TTLs instead of a single flat queue. Default `false` — the flat
+    /// layout continues to be the canonical path during Phase 1 rollout.
+    #[serde(default)]
+    pub tiered_inboxes: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -381,6 +387,7 @@ impl Default for WorkflowPolicy {
             auto_merge: AutoMergePolicy::default(),
             context_handoff_enabled: default_context_handoff_enabled(),
             handoff_screen_history: default_handoff_screen_history(),
+            tiered_inboxes: false,
         }
     }
 }

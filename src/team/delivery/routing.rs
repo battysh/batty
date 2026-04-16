@@ -575,6 +575,7 @@ impl TeamDaemon {
 
         let recipients: Vec<String> = self.pending_delivery_queue.keys().cloned().collect();
         let inbox_root = inbox::inboxes_root(&self.config.project_root);
+        let tiered = self.config.team_config.workflow_policy.tiered_inboxes;
 
         for recipient in recipients {
             let Some(messages) = self.pending_delivery_queue.get_mut(&recipient) else {
@@ -615,7 +616,11 @@ impl TeamDaemon {
                         for msg in sender_msgs {
                             let inbox_msg =
                                 inbox::InboxMessage::new_send(&msg.from, &recipient, &msg.body);
-                            if let Err(error) = inbox::deliver_to_inbox(&inbox_root, &inbox_msg) {
+                            if let Err(error) = crate::team::inbox_tiered::deliver_flag_aware(
+                                &inbox_root,
+                                &inbox_msg,
+                                tiered,
+                            ) {
                                 warn!(
                                     from = msg.from.as_str(),
                                     to = recipient.as_str(),
@@ -649,7 +654,11 @@ impl TeamDaemon {
                             newest_preview,
                         );
                         let inbox_msg = inbox::InboxMessage::new_send(sender, &recipient, &digest);
-                        if let Err(error) = inbox::deliver_to_inbox(&inbox_root, &inbox_msg) {
+                        if let Err(error) = crate::team::inbox_tiered::deliver_flag_aware(
+                            &inbox_root,
+                            &inbox_msg,
+                            tiered,
+                        ) {
                             warn!(
                                 from = sender.as_str(),
                                 to = recipient.as_str(),
@@ -784,9 +793,12 @@ impl TeamDaemon {
         // All delivery falls through to inbox when shim channel is unavailable.
         let root = inbox::inboxes_root(&self.config.project_root);
         let msg = inbox::InboxMessage::new_send(from, recipient, body);
-        inbox::deliver_to_inbox(&root, &msg).map_err(|error| DeliveryError::InboxQueue {
-            recipient: recipient.to_string(),
-            detail: error.to_string(),
+        let tiered = self.config.team_config.workflow_policy.tiered_inboxes;
+        crate::team::inbox_tiered::deliver_flag_aware(&root, &msg, tiered).map_err(|error| {
+            DeliveryError::InboxQueue {
+                recipient: recipient.to_string(),
+                detail: error.to_string(),
+            }
         })?;
         self.record_message_routed(from, recipient);
         Ok(MessageDelivery::InboxQueued)
@@ -800,6 +812,7 @@ impl TeamDaemon {
         }
 
         let root = inbox::inboxes_root(&self.config.project_root);
+        let tiered = self.config.team_config.workflow_policy.tiered_inboxes;
         let mut remaining_commands = Vec::new();
         for cmd in commands {
             let result: Result<()> = (|| match &cmd {
@@ -821,7 +834,7 @@ impl TeamDaemon {
                         }
                     } else {
                         let inbox_msg = inbox::InboxMessage::new_send(from, to, msg);
-                        inbox::deliver_to_inbox(&root, &inbox_msg)?;
+                        crate::team::inbox_tiered::deliver_flag_aware(&root, &inbox_msg, tiered)?;
                         debug!(from, to, "legacy command routed to inbox");
                     }
                     Ok(())
@@ -832,7 +845,7 @@ impl TeamDaemon {
                     task,
                 } => {
                     let msg = inbox::InboxMessage::new_assign(from, engineer, task);
-                    inbox::deliver_to_inbox(&root, &msg)?;
+                    crate::team::inbox_tiered::deliver_flag_aware(&root, &msg, tiered)?;
                     debug!(engineer, "legacy assign routed to inbox");
                     Ok(())
                 }
