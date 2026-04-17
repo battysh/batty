@@ -2037,12 +2037,18 @@ impl TeamDaemon {
     }
 
     pub(super) fn tact_check(&mut self) -> Result<()> {
-        let cooldown = Duration::from_secs(
+        let base_cooldown = Duration::from_secs(
             self.config
                 .team_config
                 .workflow_policy
                 .planning_cycle_cooldown_secs,
         );
+        // #681: when recent planning cycles have produced zero new tasks,
+        // extend the cooldown linearly (1x → 6x) so a stuck board doesn't
+        // burn orchestrator tokens with empty cycles every few minutes.
+        // Resets to 1x as soon as a cycle creates any tasks.
+        let backoff_multiplier = 1 + self.planning_cycle_consecutive_empty.min(5);
+        let cooldown = base_cooldown * backoff_multiplier;
 
         let Some(architect) = self
             .config
@@ -2182,6 +2188,15 @@ impl TeamDaemon {
 
         match result {
             Ok(created) => {
+                // #681: track empty vs productive cycles so `tact_check` can
+                // back off the cadence when the architect keeps returning
+                // zero new tasks (blocked board, no dispatchable work).
+                if created == 0 {
+                    self.planning_cycle_consecutive_empty =
+                        self.planning_cycle_consecutive_empty.saturating_add(1);
+                } else {
+                    self.planning_cycle_consecutive_empty = 0;
+                }
                 self.record_tact_tasks_created(
                     &architect,
                     created as u32,
@@ -2189,7 +2204,11 @@ impl TeamDaemon {
                     true,
                     None,
                 );
-                info!(created, "applied planning cycle response");
+                info!(
+                    created,
+                    consecutive_empty = self.planning_cycle_consecutive_empty,
+                    "applied planning cycle response"
+                );
                 self.record_orchestrator_action(format!(
                     "planning: applied planning response and created {} tasks",
                     created

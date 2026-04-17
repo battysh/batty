@@ -272,13 +272,21 @@ fn available_dispatch_tasks(
             task.depends_on.iter().all(|dep_id| {
                 task_status_by_id
                     .get(dep_id)
-                    .is_none_or(|status| status == "done")
+                    .is_none_or(|status| dep_status_satisfied(status))
             })
         })
         .collect();
 
     available.sort_by_key(|task| (dispatch_priority_rank(&task.priority), task.id));
     Ok(available)
+}
+
+/// #681: A dependency in `done` or `archived` state is fully satisfied.
+/// Archived tasks are terminal (completed then cleaned up) and should
+/// unblock dependents the same way `done` does — otherwise downstream
+/// work stays stuck after a long-running project winds down.
+fn dep_status_satisfied(status: &str) -> bool {
+    matches!(status, "done" | "archived")
 }
 
 /// #677: A task matches the excluded tags list (case-insensitive) when any
@@ -563,7 +571,7 @@ impl TeamDaemon {
                 && task.depends_on.iter().all(|dep_id| {
                     task_status_by_id
                         .get(dep_id)
-                        .is_none_or(|status| status == "done")
+                        .is_none_or(|status| dep_status_satisfied(status))
                 })
         }))
     }
