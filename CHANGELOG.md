@@ -2,6 +2,39 @@
 
 All notable changes to Batty are documented here.
 
+## 0.11.46 — 2026-04-17
+
+Field-report fix: in batty-marketing after the v0.11.45 daemon
+restart at 12:06 UTC, engineers alex-dev-1-1 (Task #570) and
+sam-designer-1-1 (Task #572) — both holding `active_tasks` claims
+from before the restart — sat idle for 12+ minutes with
+`output_bytes=0 uptime_secs=760` and no inbox messages delivered
+since pre-restart. The intervention system eventually rescued them
+via owned-task prodding at 12:18 UTC, but that delay is pure
+token-waste the launcher should have prevented.
+
+Root cause: `spawn_all_agents(resume)` runs in `run()` BEFORE
+`restore_runtime_state()`, so `self.active_tasks` is empty during
+`prepare_member_launch` — the existing handoff-based prompt
+injection branch never fires for engineers whose claims survived
+the restart. SDK mode compounds the gap: the role prompt is wired
+into `--append-system-prompt` (a system prompt, not a user message),
+so a fresh shim has no stimulus to act on.
+
+### Fixes
+
+- **Engineers with pre-restart active_tasks now receive an explicit
+  resume prompt at daemon startup** (#707) — new
+  `enqueue_restart_resume_prompts()` pass in `poll.rs::run()` iterates
+  `self.active_tasks` after the orphan-reclaim block, loads each
+  engineer's claimed board task, and queues
+  `restart_assignment_message(task)` via `queue_message("daemon",
+  engineer, …)`. Gated on `resume && !is_hot_reload` so clean
+  `stop/start` cycles recover task context without waiting for
+  intervention backoff. Regression tests seed an owned task and
+  verify the inbox receives one "Continuing Task #N: …" message
+  per pre-restart claim.
+
 ## 0.11.45 — 2026-04-17
 
 Field-report fix: in batty-marketing jordan-pm reached `usage_pct=211`

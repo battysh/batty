@@ -74,6 +74,20 @@ impl TeamDaemon {
             }
         }
 
+        // #707: resume prompts for engineers still holding an active_task
+        // after the restart path above ran. Without this, fresh shim
+        // sessions spawned with only the role prompt (SDK mode wires it
+        // into --append-system-prompt; user messages arrive via stdin
+        // NDJSON) have no stimulus to continue their pre-restart work.
+        // Observed 2026-04-17 12:00 UTC post v0.11.45 deploy: alex-dev-1-1
+        // (#570) and sam-designer-1-1 (#572) each held pre-restart
+        // claims but produced 0 bytes of output for 12+ minutes because
+        // neither got any inbox delivery and the dispatcher skips
+        // already-claimed tasks.
+        if resume && !is_hot_reload {
+            self.enqueue_restart_resume_prompts();
+        }
+
         self.persist_runtime_state(false)?;
 
         let started_at = Instant::now();
@@ -159,6 +173,65 @@ impl TeamDaemon {
         }
         self.record_daemon_stopped(shutdown_reason, uptime);
         Ok(())
+    }
+
+    /// #707: after daemon restart, enqueue a resume prompt for each
+    /// engineer still holding an active_task. Without this, engineers
+    /// with pre-restart claims spawn into a fresh Claude session with
+    /// only the role prompt (wired via `--append-system-prompt` in SDK
+    /// mode; user messages arrive via stdin NDJSON) — no stimulus ever
+    /// arrives to resume the task because the dispatcher skips
+    /// already-claimed tasks and the manager can't know a restart just
+    /// happened. The task sits idle indefinitely.
+    ///
+    /// Uses the same `restart_assignment_message` format used by the
+    /// single-member restart path in `restart_member_with_task_context`,
+    /// so the engineer gets a consistent "continuing Task #N" brief.
+    pub(super) fn enqueue_restart_resume_prompts(&mut self) {
+        if self.active_tasks.is_empty() {
+            return;
+        }
+
+        let board_tasks_dir = self
+            .config
+            .project_root
+            .join(".batty")
+            .join("team_config")
+            .join("board")
+            .join("tasks");
+        let tasks = match crate::task::load_tasks_from_dir(&board_tasks_dir) {
+            Ok(tasks) => tasks,
+            Err(error) => {
+                warn!(error = %error, "failed to load tasks for restart resume prompts");
+                return;
+            }
+        };
+
+        let active: Vec<(String, u32)> = self
+            .active_tasks
+            .iter()
+            .map(|(engineer, task_id)| (engineer.clone(), *task_id))
+            .collect();
+
+        for (engineer, task_id) in active {
+            let Some(task) = tasks.iter().find(|task| task.id == task_id) else {
+                continue;
+            };
+            let message = Self::restart_assignment_message(task);
+            match self.queue_message("daemon", &engineer, &message) {
+                Ok(()) => info!(
+                    engineer = %engineer,
+                    task_id,
+                    "enqueued restart resume prompt for pre-existing active task"
+                ),
+                Err(error) => warn!(
+                    engineer = %engineer,
+                    task_id,
+                    error = %error,
+                    "failed to enqueue restart resume prompt"
+                ),
+            }
+        }
     }
 
     /// Run one iteration of the daemon's productive work without sleeping
@@ -537,7 +610,8 @@ impl TeamDaemon {
 
 #[cfg(test)]
 mod tests {
-    use crate::team::test_support::TestDaemonBuilder;
+    use crate::team::inbox;
+    use crate::team::test_support::{TestDaemonBuilder, engineer_member, write_owned_task_file};
 
     /// Ticket #636 acceptance test: invoking `tick()` on an empty daemon
     /// produces a `Default`-shaped report (cycle advances, no errors, all
@@ -575,5 +649,49 @@ mod tests {
         let second = daemon.tick();
         assert_eq!(second.cycle, 2, "second tick should bump cycle to 2");
         assert!(second.ok());
+    }
+
+    /// #707: ensures the daemon-restart resume-prompt path enqueues a
+    /// "continuing Task #N" message for each engineer still holding an
+    /// active_task after `restore_runtime_state`. Pre-fix, managers would
+    /// not see these tasks (no claim), fresh-session engineers had no
+    /// stimulus, and the dispatcher skipped already-claimed tasks — so
+    /// the task+claim pair sat idle forever.
+    #[test]
+    fn enqueue_restart_resume_prompts_queues_message_for_each_active_task() {
+        let tmp = tempfile::tempdir().unwrap();
+        let member_name = "eng-1";
+        write_owned_task_file(tmp.path(), 42, "resume-me", "in-progress", member_name);
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![engineer_member(member_name, Some("manager"), false)])
+            .build();
+        daemon.active_tasks.insert(member_name.to_string(), 42);
+
+        daemon.enqueue_restart_resume_prompts();
+
+        let messages =
+            inbox::pending_messages(&inbox::inboxes_root(tmp.path()), member_name).unwrap();
+        assert_eq!(
+            messages.len(),
+            1,
+            "expected one restart resume prompt in the engineer inbox"
+        );
+        let body = &messages[0].body;
+        assert!(
+            body.contains("Task #42"),
+            "resume prompt must reference the task id, got {body:?}"
+        );
+        assert!(
+            body.contains("Continuing"),
+            "resume prompt must use the restart_assignment_message phrasing, got {body:?}"
+        );
+    }
+
+    /// #707: empty-active-tasks fast path — no work, no I/O, no panic.
+    #[test]
+    fn enqueue_restart_resume_prompts_is_noop_when_no_active_tasks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = TestDaemonBuilder::new(tmp.path()).build();
+        daemon.enqueue_restart_resume_prompts();
     }
 }
