@@ -373,12 +373,49 @@ fn daemon_state_round_trip_preserves_runtime_fields() {
         pipeline_starvation_fired: true,
         optional_subsystem_backoff: HashMap::new(),
         optional_subsystem_disabled_remaining_secs: HashMap::new(),
+        planning_cycle_last_fired_elapsed_secs: Some(120),
+        planning_cycle_consecutive_empty: 3,
     };
 
     save_daemon_state(tmp.path(), &state).unwrap();
 
     let loaded = load_daemon_state(tmp.path()).unwrap();
     assert_eq!(loaded, state);
+}
+
+#[test]
+fn restore_runtime_state_preserves_planning_cycle_backoff_across_restart() {
+    // #687: before this fix, `planning_cycle_last_fired` and
+    // `planning_cycle_consecutive_empty` were in-memory only, so a
+    // daemon that had backed off to 6× cadence would reset to 1× on
+    // restart and immediately fire a fresh architect planning cycle
+    // on a board it had already learned was stuck, re-burning
+    // orchestrator tokens.
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(tmp.path().join(".batty").join("team_config")).unwrap();
+
+    // Save: daemon that last fired 120s ago with 4 empty cycles stacked.
+    let mut daemon = make_test_daemon(tmp.path(), vec![manager_member("manager", None)]);
+    daemon.planning_cycle_last_fired =
+        Some(std::time::Instant::now() - std::time::Duration::from_secs(120));
+    daemon.planning_cycle_consecutive_empty = 4;
+    daemon.persist_runtime_state(true).unwrap();
+
+    // Restore: fresh daemon picks up the backoff state instead of starting from zero.
+    let mut restored = make_test_daemon(tmp.path(), vec![manager_member("manager", None)]);
+    assert!(restored.planning_cycle_last_fired.is_none());
+    assert_eq!(restored.planning_cycle_consecutive_empty, 0);
+    restored.restore_runtime_state();
+    assert_eq!(restored.planning_cycle_consecutive_empty, 4);
+    let restored_elapsed = restored
+        .planning_cycle_last_fired
+        .expect("planning_cycle_last_fired should be restored from disk")
+        .elapsed();
+    assert!(
+        restored_elapsed.as_secs() >= 115 && restored_elapsed.as_secs() <= 130,
+        "expected restored last_fired elapsed to be ~120s, got {}s",
+        restored_elapsed.as_secs()
+    );
 }
 
 #[test]
@@ -5309,6 +5346,8 @@ fn save_daemon_state_returns_error_on_readonly_dir() {
             pipeline_starvation_fired: false,
             optional_subsystem_backoff: HashMap::new(),
             optional_subsystem_disabled_remaining_secs: HashMap::new(),
+            planning_cycle_last_fired_elapsed_secs: None,
+            planning_cycle_consecutive_empty: 0,
         };
 
         let result = save_daemon_state(tmp.path(), &state);
