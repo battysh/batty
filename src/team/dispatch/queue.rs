@@ -467,6 +467,29 @@ fn available_dispatch_tasks(
                 .as_deref()
                 .is_none_or(|name| !non_engineer_assignees.contains(name))
         })
+        // #703: same principle as #682 but for body-owner declarations.
+        // A task whose body reads `**Owner:** maya-lead` names the architect
+        // as the owner — it should live on Maya's plate, not an engineer's
+        // queue. `assignee:` on this task is empty so the #682 filter above
+        // passes it through, then `rank_dispatch_engineers` splices
+        // "maya-lead" into task tags for scoring, but no engineer has that
+        // role → tag_overlap scores 0 for all and the task lands on
+        // whichever engineer wins tiebreakers, who immediately refuses.
+        // Observed batty-marketing 2026-04-17 10:18:42 UTC: task #542
+        // (STRATEGY — Star-velocity Tue 04-21 mid-window gate decision,
+        // `**Owner:** maya-lead (this task)`) dispatched to sam-designer-1-1,
+        // burning a full claim + refuse turn on information sam had no
+        // context for. Only apply this filter when `assignee:` is unset —
+        // an explicit engineer assignee always wins over body prose.
+        .filter(|task| {
+            if task.assignee.is_some() {
+                return true;
+            }
+            match parse_body_owner_role(&task.description) {
+                Some(owner) => !non_engineer_assignees.contains(&owner),
+                None => true,
+            }
+        })
         .filter(|task| {
             task.depends_on.iter().all(|dep_id| {
                 task_status_by_id
@@ -1457,8 +1480,8 @@ mod tests {
         current_worktree_branch, engineer_base_branch_name, setup_engineer_worktree,
     };
     use crate::team::test_support::{
-        TestDaemonBuilder, engineer_member, git_ok, git_stdout, init_git_repo, manager_member,
-        write_open_task_file, write_owned_task_file,
+        TestDaemonBuilder, architect_member, engineer_member, git_ok, git_stdout, init_git_repo,
+        manager_member, write_open_task_file, write_owned_task_file,
     };
 
     fn write_task_with_priority(project_root: &Path, id: u32, title: &str, priority: &str) {
@@ -2241,6 +2264,105 @@ mod tests {
             daemon.dispatch_queue.is_empty(),
             "task must remain undispatched while named engineer is unavailable"
         );
+    }
+
+    #[test]
+    fn enqueue_dispatch_candidates_skips_tasks_whose_body_owner_names_non_engineer() {
+        // #703: a task whose body reads `**Owner:** maya-lead` names the
+        // architect as the owner — it belongs on Maya's plate, not an
+        // engineer's dispatch queue. `assignee:` frontmatter is unset
+        // (#682 filter passes it through), but under v0.11.41
+        // `rank_dispatch_engineers` splices "maya-lead" into task tags
+        // for scoring, no engineer has that role → tag_overlap scores 0
+        // for all and the task lands on whichever engineer wins
+        // tiebreakers, who immediately refuses. Observed batty-marketing
+        // 2026-04-17 10:18:42 UTC: task #542 (STRATEGY — Star-velocity
+        // Tue 04-21 mid-window gate decision, `**Owner:** maya-lead
+        // (this task)`) dispatched to sam-designer-1-1, burning a claim
+        // + refuse turn on a strategy task sam had no context for.
+        let tmp = tempfile::tempdir().unwrap();
+        write_task_with_body(
+            tmp.path(),
+            70,
+            "strategy-star-velocity-gate",
+            "todo",
+            None,
+            "**Owner:** maya-lead (this task), with input from jordan-pm \
+             and kai-devrel. Mid-window gate decision for launch.\n",
+        );
+        // Control task so the test also proves the filter is surgical —
+        // body-owner filter must not drop unrelated dispatchable work.
+        write_task_with_body(
+            tmp.path(),
+            71,
+            "engineer-candidate",
+            "todo",
+            None,
+            "Touch src/team/telemetry_db.rs only.\n",
+        );
+
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![
+                architect_member("maya-lead"),
+                manager_member("jordan-pm", Some("maya-lead")),
+                engineer_member("eng-1", Some("jordan-pm"), false),
+            ])
+            .states(HashMap::from([("eng-1".to_string(), MemberState::Idle)]))
+            .build();
+
+        daemon.enqueue_dispatch_candidates().unwrap();
+
+        assert_eq!(daemon.dispatch_queue.len(), 1);
+        assert_eq!(
+            daemon.dispatch_queue[0].task_id, 71,
+            "task with `**Owner:** maya-lead` body must be filtered out \
+             because maya-lead is a non-engineer member; only #71 should dispatch"
+        );
+    }
+
+    #[test]
+    fn enqueue_dispatch_candidates_allows_body_owner_when_it_names_an_engineer() {
+        // #703 surgical check: filter must only drop tasks whose body-owner
+        // names a non-engineer. A task explicitly routed to an engineer via
+        // `Owner: <engineer-role>` must still reach the dispatch queue — if
+        // the filter over-applies, all routing-cued tasks disappear.
+        let tmp = tempfile::tempdir().unwrap();
+        write_task_with_body(
+            tmp.path(),
+            80,
+            "engineer-owned",
+            "todo",
+            None,
+            "- Owner: priya-writer drafts; review by peer.\n",
+        );
+
+        let priya = MemberInstance {
+            name: "priya-writer-1-1".to_string(),
+            role_name: "priya-writer".to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("claude".to_string()),
+            reports_to: Some("jordan-pm".to_string()),
+            use_worktrees: false,
+            ..MemberInstance::default()
+        };
+
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![
+                architect_member("maya-lead"),
+                manager_member("jordan-pm", Some("maya-lead")),
+                priya,
+            ])
+            .states(HashMap::from([(
+                "priya-writer-1-1".to_string(),
+                MemberState::Idle,
+            )]))
+            .build();
+
+        daemon.enqueue_dispatch_candidates().unwrap();
+
+        assert_eq!(daemon.dispatch_queue.len(), 1);
+        assert_eq!(daemon.dispatch_queue[0].task_id, 80);
+        assert_eq!(daemon.dispatch_queue[0].engineer, "priya-writer-1-1");
     }
 
     #[test]

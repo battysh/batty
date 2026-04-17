@@ -2,6 +2,40 @@
 
 All notable changes to Batty are documented here.
 
+## 0.11.42 — 2026-04-17
+
+Field-report fix: in the batty-marketing observation window a task
+whose body named the architect as the owner was dispatched to an
+engineer and immediately auto-refused. At 10:18:42 UTC the dispatch
+loop assigned #542 ("STRATEGY — Star-velocity Tue 04-21 mid-window
+gate decision", body line 1 `**Owner:** maya-lead (this task)`) to
+`sam-designer-1-1` — a designer with no context for a strategy
+decision. `assignee:` frontmatter was unset, so the #682 filter
+passed the task through; `rank_dispatch_engineers` then spliced the
+`maya-lead` role into task tags for scoring, but no engineer carries
+that role, so tag_overlap scored 0 for every candidate and the task
+landed on whichever engineer won tiebreakers. Sam burned a claim +
+refuse turn on work that shouldn't have entered the dispatch pool
+at all.
+
+### Fixes
+
+- **Body-owner declarations naming non-engineers are now excluded
+  from dispatch** (#703) — `available_dispatch_tasks` in
+  `src/team/dispatch/queue.rs` gained a filter that runs
+  `parse_body_owner_role` against the task description and drops
+  the task when the parsed role matches a configured non-engineer
+  member (architect, manager, human). The filter only applies when
+  `assignee:` is unset, so an explicit engineer assignee still
+  wins. Complements #682 (frontmatter `assignee:` non-engineer
+  filter) — same wrong-role-dispatch family, different signal
+  source. Regression tests:
+  `enqueue_dispatch_candidates_skips_tasks_whose_body_owner_names_non_engineer`
+  covers the #542 shape; the companion
+  `enqueue_dispatch_candidates_allows_body_owner_when_it_names_an_engineer`
+  proves the filter is surgical (engineer-owner bodies still
+  dispatch).
+
 ## 0.11.41 — 2026-04-17
 
 Field-report fix: in the batty-marketing observation window the
