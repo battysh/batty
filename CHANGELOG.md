@@ -2,6 +2,27 @@
 
 All notable changes to Batty are documented here.
 
+## 0.11.25 — 2026-04-17
+
+Eighth-round field-report fix: architect planning cadence survives restart.
+
+### Fixes
+
+- **Planning-cycle backoff persists across daemon restart** (#687) —
+  `planning_cycle_last_fired` and `planning_cycle_consecutive_empty`
+  lived only in-memory on `TeamDaemon`, so a daemon that had learned
+  the board was stuck (and backed off to 6× cadence via #681) reset
+  both to zero on every restart. A fresh daemon then fired an architect
+  planning cycle ~6 seconds after startup on the same stuck board —
+  observed in `batty_marketing` at 03:56:52, 6 seconds after daemon
+  start. Both fields now round-trip through `PersistedDaemonState`
+  (`planning_cycle_last_fired_elapsed_secs: Option<u64>` +
+  `planning_cycle_consecutive_empty: u32`). `restore_runtime_state`
+  reconstructs the `Instant` by subtracting the saved elapsed from
+  `Instant::now()`, matching the pattern used for nudge idle state.
+  Regression test (`restore_runtime_state_preserves_planning_cycle_backoff_across_restart`)
+  covers the end-to-end restore path with a 120s-old, 4-empty state.
+
 ## 0.11.24 — 2026-04-17
 
 Seventh-round field-report fix: stop the cascade that resumes the moment

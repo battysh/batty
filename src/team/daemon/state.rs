@@ -39,6 +39,16 @@ pub(super) struct PersistedDaemonState {
     pub optional_subsystem_backoff: HashMap<String, u32>,
     #[serde(default)]
     pub optional_subsystem_disabled_remaining_secs: HashMap<String, u64>,
+    /// #687: seconds since `planning_cycle_last_fired` at save time (so the
+    /// cooldown window survives a daemon restart). None when the cycle has
+    /// never fired.
+    #[serde(default)]
+    pub planning_cycle_last_fired_elapsed_secs: Option<u64>,
+    /// #687: consecutive empty planning cycles at save time (drives the
+    /// architect planning-cadence backoff). Resets to 0 on any non-empty
+    /// cycle. Must survive restart or the backoff is lost.
+    #[serde(default)]
+    pub planning_cycle_consecutive_empty: u32,
 }
 
 impl TeamDaemon {
@@ -79,6 +89,19 @@ impl TeamDaemon {
             &state.optional_subsystem_backoff,
             &state.optional_subsystem_disabled_remaining_secs,
         );
+        // #687: restore planning-cycle backoff state across restarts.
+        // Without this, a daemon that had backed off to 6× cadence would
+        // reset to 1× on restart and immediately fire an architect
+        // planning cycle seconds later — re-wasting orchestrator tokens
+        // on an empty board the previous daemon had already learned was
+        // stuck.
+        self.planning_cycle_consecutive_empty = state.planning_cycle_consecutive_empty;
+        self.planning_cycle_last_fired =
+            state.planning_cycle_last_fired_elapsed_secs.map(|elapsed_secs| {
+                Instant::now()
+                    .checked_sub(Duration::from_secs(elapsed_secs))
+                    .unwrap_or_else(Instant::now)
+            });
     }
 
     pub(super) fn persist_runtime_state(&self, clean_shutdown: bool) -> Result<()> {
@@ -112,6 +135,12 @@ impl TeamDaemon {
             pipeline_starvation_fired: self.pipeline_starvation_fired,
             optional_subsystem_backoff,
             optional_subsystem_disabled_remaining_secs,
+            // #687: snapshot the architect planning-cycle backoff so it
+            // survives a daemon restart.
+            planning_cycle_last_fired_elapsed_secs: self
+                .planning_cycle_last_fired
+                .map(|t| t.elapsed().as_secs()),
+            planning_cycle_consecutive_empty: self.planning_cycle_consecutive_empty,
         };
         save_daemon_state(&self.config.project_root, &state)
     }
