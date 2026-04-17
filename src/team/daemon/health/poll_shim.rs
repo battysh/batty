@@ -270,6 +270,22 @@ impl TeamDaemon {
                     handle.apply_state_change(to);
                 }
 
+                // Drain pending messages on Idle transition. Previously this
+                // was only done on Event::Ready and on force-idle timeout, so
+                // a shim that went Working→Idle naturally would leave its
+                // pending queue stuck until the 600s expiry fallback fired.
+                if to == ShimState::Idle
+                    && self.pending_delivery_queue.contains_key(member_name)
+                {
+                    if let Err(error) = self.drain_pending_queue(member_name) {
+                        warn!(
+                            member = member_name,
+                            error = %error,
+                            "failed to drain pending queue after state change to idle"
+                        );
+                    }
+                }
+
                 let member_state = match to {
                     ShimState::Idle => MemberState::Idle,
                     ShimState::Working => MemberState::Working,
