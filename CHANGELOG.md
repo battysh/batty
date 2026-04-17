@@ -2,6 +2,25 @@
 
 All notable changes to Batty are documented here.
 
+## 0.11.27 — 2026-04-17
+
+Tenth-round field-report fix: slow empty cycles no longer re-fire on completion.
+
+### Fixes
+
+- **Cooldown anchor slides forward on empty cycles** (#688) — the
+  planning cooldown is measured from `planning_cycle_last_fired`, so a
+  10-minute empty cycle hits the 2× backoff boundary (600s for
+  consecutive_empty=1) exactly when it completes. The next tick sees
+  `elapsed >= cooldown` and fires a fresh cycle within the same tick.
+  Observed at 04:13:35 in batty_marketing: response applied →
+  consecutive_empty=1 → new planning cycle triggered 181ms later.
+  Empty-cycle paths now bump `last_fired` to `Instant::now()` on
+  completion so the next cycle gates on time-since-completion, not
+  time-since-fire. Productive cycles (created > 0) leave `last_fired`
+  alone so the architect can keep planning as fast as the pipeline
+  needs it.
+
 ## 0.11.26 — 2026-04-17
 
 Ninth-round field-report fix: persist planning-cycle state immediately
