@@ -1018,7 +1018,8 @@ impl TeamDaemon {
                 warn!(
                     task_id = task.id,
                     preserve_block,
-                    "orphaned review task #{} has no owner — moving back to todo", task.id
+                    "orphaned review task #{} has no owner — moving back to todo",
+                    task.id
                 );
                 if preserve_block {
                     let _ = crate::team::task_cmd::transition_task_preserving_block(
@@ -1030,11 +1031,8 @@ impl TeamDaemon {
                         &board_dir, task.id, "todo",
                     );
                 } else {
-                    let _ = crate::team::task_cmd::transition_task(
-                        &board_dir,
-                        task.id,
-                        "in-progress",
-                    );
+                    let _ =
+                        crate::team::task_cmd::transition_task(&board_dir, task.id, "in-progress");
                     let _ = crate::team::task_cmd::transition_task(&board_dir, task.id, "todo");
                 }
                 let _ = crate::team::task_cmd::unclaim_task(&board_dir, task.id);
@@ -1045,9 +1043,8 @@ impl TeamDaemon {
         }
 
         // Orphaned in-progress rescue: tasks in "in-progress" with no claimed_by.
-        let rescue_base_cooldown = Duration::from_secs(
-            self.config.team_config.board.orphan_rescue_cooldown_secs,
-        );
+        let rescue_base_cooldown =
+            Duration::from_secs(self.config.team_config.board.orphan_rescue_cooldown_secs);
         for task in &board_tasks {
             if task.status == "in-progress"
                 && task.claimed_by.is_none()
@@ -1141,7 +1138,8 @@ impl TeamDaemon {
                 warn!(
                     task_id = task.id,
                     preserve_block,
-                    "orphaned in-progress task #{} has no owner — moving back to todo", task.id
+                    "orphaned in-progress task #{} has no owner — moving back to todo",
+                    task.id
                 );
                 if preserve_block {
                     let _ = crate::team::task_cmd::transition_task_preserving_block(

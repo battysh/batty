@@ -1766,10 +1766,9 @@ mod tests {
         daemon.states.insert("priya".into(), MemberState::Working);
         // Transitioned to Working ~8 seconds ago — way below the 600s
         // threshold.
-        daemon.working_since.insert(
-            "priya".into(),
-            Instant::now() - Duration::from_secs(8),
-        );
+        daemon
+            .working_since
+            .insert("priya".into(), Instant::now() - Duration::from_secs(8));
 
         daemon
             .handle_context_pressure_stats("priya", 0, 1100, None)
@@ -1796,10 +1795,9 @@ mod tests {
         let mut daemon = TestDaemonBuilder::new(tmp.path()).build();
         insert_mock_handle(&mut daemon, "priya");
         daemon.states.insert("priya".into(), MemberState::Working);
-        daemon.working_since.insert(
-            "priya".into(),
-            Instant::now() - Duration::from_secs(601),
-        );
+        daemon
+            .working_since
+            .insert("priya".into(), Instant::now() - Duration::from_secs(601));
 
         // cold_respawn_plan will return None for the mock handle (no
         // session on disk), so this call short-circuits without

@@ -817,10 +817,9 @@ Body.
             cron_schedule: None,
             cron_last_run: None,
             completed: None,
-            description:
-                "**Acceptance:** tests pass. **Owner:** alex. Out of scope:** none. \
+            description: "**Acceptance:** tests pass. **Owner:** alex. Out of scope:** none. \
                  __Priya's__ outline** lands Fri. Touch src/foo.rs and *.md."
-                    .to_string(),
+                .to_string(),
             batty_config: None,
             source_path: PathBuf::new(),
         };

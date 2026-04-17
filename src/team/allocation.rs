@@ -402,9 +402,7 @@ pub fn explain_routing_for_task(
     // Observed in batty-marketing 2026-04-17: task #552 tagged
     // `kai-devrel` was dispatched to sam-designer because alex-dev had
     // 1 completion and others had 0, triggering the warmup fallback.
-    let has_explicit_tag_match = breakdowns
-        .iter()
-        .any(|breakdown| breakdown.tag_matches > 0);
+    let has_explicit_tag_match = breakdowns.iter().any(|breakdown| breakdown.tag_matches > 0);
     if telemetry_ready || !has_any_telemetry || has_explicit_tag_match {
         breakdowns.sort_by(compare_breakdowns);
         let chosen_engineer = breakdowns

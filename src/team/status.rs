@@ -2015,9 +2015,7 @@ fn compute_board_metrics(
         .collect();
     let engineer_runnable_count = dispatchable_tasks
         .iter()
-        .filter(|task| {
-            crate::team::resolver::is_engineer_dispatchable(task, &non_engineer_names)
-        })
+        .filter(|task| crate::team::resolver::is_engineer_dispatchable(task, &non_engineer_names))
         .count() as u32;
     let idle_with_runnable =
         compute_idle_with_runnable(board_dir, members, &tasks, engineer_runnable_count);
@@ -3527,11 +3525,7 @@ mod tests {
 
         let metrics = compute_metrics(
             &board_dir(tmp.path()),
-            &[
-                architect("maya-lead"),
-                engineer("eng-1"),
-                engineer("eng-2"),
-            ],
+            &[architect("maya-lead"), engineer("eng-1"), engineer("eng-2")],
         )
         .unwrap();
 

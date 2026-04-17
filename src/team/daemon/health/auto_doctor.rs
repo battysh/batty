@@ -50,11 +50,20 @@ impl TeamDaemon {
             let Some(engineer) = task.claimed_by.as_deref() else {
                 continue;
             };
-            let is_engineer =
-                self.config.members.iter().any(|member| {
-                    member.name == engineer && member.role_type == RoleType::Engineer
-                });
-            let has_matching_assignment = self.active_task_id(engineer) == Some(task.id);
+            // Resolve the raw claim to a canonical engineer instance name.
+            // Engineers often move tasks with `kanban-md move --claim <role>`
+            // using their role name (e.g. `alex-dev`), while the dispatcher
+            // writes the instance-scoped name (`alex-dev-1-1`). Without this
+            // resolution, auto-doctor sees the role-name claim as an unknown
+            // engineer and resets the in-progress task — wasting context on
+            // a correctly-assigned task. Fall back to role_name when exactly
+            // one engineer instance owns the role.
+            let resolved =
+                resolve_engineer_claim(&self.config.members, engineer).map(str::to_string);
+            let is_engineer = resolved.is_some();
+            let lookup_name: String = resolved.unwrap_or_else(|| engineer.to_string());
+            let lookup_name = lookup_name.as_str();
+            let has_matching_assignment = self.active_task_id(lookup_name) == Some(task.id);
             if is_engineer && has_matching_assignment {
                 continue;
             }
@@ -66,17 +75,16 @@ impl TeamDaemon {
             // used to drop the task back into the dispatch pool and cause
             // immediate misroutes to peers on the next tick — wasting
             // engineer context on a task that was intentionally parked.
-            if is_engineer && self.active_task_id(engineer).is_none() {
-                self.active_tasks
-                    .insert(engineer.to_string(), task.id);
+            if is_engineer && self.active_task_id(lookup_name).is_none() {
+                self.active_tasks.insert(lookup_name.to_string(), task.id);
                 let details = format!(
                     "re-attached in-progress task #{} to {} from board state (post hot-reload)",
-                    task.id, engineer
+                    task.id, lookup_name
                 );
                 self.log_auto_doctor_action(
                     "orphaned_in_progress_reattached",
                     Some(task.id),
-                    Some(engineer),
+                    Some(lookup_name),
                     details,
                     &mut actions,
                 );
@@ -87,8 +95,8 @@ impl TeamDaemon {
                 format!(
                     "reset orphaned in-progress task #{}, daemon active assignment for {} was {:?}",
                     task.id,
-                    engineer,
-                    self.active_task_id(engineer)
+                    lookup_name,
+                    self.active_task_id(lookup_name)
                 )
             } else {
                 format!(
@@ -101,7 +109,7 @@ impl TeamDaemon {
                 task.id,
                 "Reset by auto-doctor after daemon lost active ownership.",
             )?;
-            self.clear_active_task(engineer);
+            self.clear_active_task(lookup_name);
             // #684 / #686: same exponential-backoff dispatch-cooldown pattern
             // as runtime orphan rescue — repeated resets of the same task
             // stretch the quiet window instead of re-cascading every base window.
@@ -109,7 +117,7 @@ impl TeamDaemon {
             self.log_auto_doctor_action(
                 "orphaned_in_progress_reset",
                 Some(task.id),
-                Some(engineer),
+                Some(lookup_name),
                 details,
                 &mut actions,
             );
@@ -130,19 +138,26 @@ impl TeamDaemon {
             let Some(engineer) = task.claimed_by.as_deref() else {
                 continue;
             };
+            // Resolve role-name claims to their canonical instance so the
+            // progress check consults the correct worktree and the cleared
+            // entry matches the dispatcher's active_tasks key.
+            let lookup_name: String = resolve_engineer_claim(&self.config.members, engineer)
+                .map(str::to_string)
+                .unwrap_or_else(|| engineer.to_string());
+            let lookup_name = lookup_name.as_str();
             let Some(expires_at) =
                 task_claim_expiry(&task, self.claim_ttl_secs_for_priority(&task.priority))
             else {
                 continue;
             };
-            if expires_at > now || task_has_claim_progress(&task, &self.worktree_dir(engineer)) {
+            if expires_at > now || task_has_claim_progress(&task, &self.worktree_dir(lookup_name)) {
                 continue;
             }
 
             let details = format!(
                 "reclaimed stale claim for task #{} from {} after expiry at {}",
                 task.id,
-                engineer,
+                lookup_name,
                 expires_at.to_rfc3339()
             );
             crate::team::task_cmd::reclaim_task_claim(
@@ -150,11 +165,11 @@ impl TeamDaemon {
                 task.id,
                 "Reclaimed by auto-doctor after claim TTL expired with no progress.",
             )?;
-            self.clear_active_task(engineer);
+            self.clear_active_task(lookup_name);
             self.log_auto_doctor_action(
                 "stale_claim_reclaimed",
                 Some(task.id),
-                Some(engineer),
+                Some(lookup_name),
                 details,
                 &mut actions,
             );
@@ -326,6 +341,41 @@ impl TeamDaemon {
     }
 }
 
+/// Resolve a raw task claim string to the canonical engineer instance name.
+///
+/// Engineers often move their tasks with `kanban-md move --claim <role>` using
+/// the role name from `team.yaml` (e.g. `alex-dev`), while the dispatcher
+/// writes the instance-scoped name (e.g. `alex-dev-1-1`). Without
+/// canonicalization, auto-doctor sees the role-name claim as an unknown
+/// engineer and resets the task — re-queueing correctly-assigned work and
+/// burning engineer context.
+///
+/// Returns `Some(&name)` when a unique engineer instance can be resolved:
+/// first by exact `name` match, then by unique `role_name` match across
+/// engineer members. Returns `None` when the claim does not correspond to any
+/// engineer or when the role has multiple instances (ambiguous).
+fn resolve_engineer_claim<'a>(
+    members: &'a [crate::team::hierarchy::MemberInstance],
+    claim: &str,
+) -> Option<&'a str> {
+    if let Some(exact) = members
+        .iter()
+        .find(|member| member.name == claim && member.role_type == RoleType::Engineer)
+    {
+        return Some(exact.name.as_str());
+    }
+
+    let mut role_matches = members
+        .iter()
+        .filter(|member| member.role_name == claim && member.role_type == RoleType::Engineer);
+    let first = role_matches.next()?;
+    if role_matches.next().is_some() {
+        // Ambiguous: role has multiple instances, cannot pick one.
+        return None;
+    }
+    Some(first.name.as_str())
+}
+
 fn parse_rfc3339_utc(value: &str) -> Option<DateTime<Utc>> {
     chrono::DateTime::parse_from_rfc3339(value)
         .ok()
@@ -417,12 +467,35 @@ mod tests {
         assert_eq!(task.status, "in-progress");
         assert_eq!(task.claimed_by.as_deref(), Some("eng-1"));
         assert_eq!(daemon.active_tasks.get("eng-1"), Some(&17));
-        assert!(
-            actions
-                .iter()
-                .any(|action| action.action_type == "orphaned_in_progress_reattached"
-                    && action.task_id == Some(17))
-        );
+        assert!(actions.iter().any(|action| action.action_type
+            == "orphaned_in_progress_reattached"
+            && action.task_id == Some(17)));
+    }
+
+    #[test]
+    fn orphaned_task_claimed_by_role_name_reattaches_to_single_instance() {
+        // Reproduces the batty-marketing regression: engineers run
+        // `kanban-md move --claim alex-dev` (role name) while the dispatcher
+        // wrote `alex-dev-1-1` (instance). Auto-doctor used to treat the
+        // role-name claim as unknown and reset the in-progress task,
+        // churning correctly-assigned work.
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "auto_doctor_role_name_claim");
+        let mut daemon = auto_doctor_daemon(&repo, false);
+        // Engineer `eng-1` has role_name `eng`.
+        write_owned_task_file(&repo, 21, "role-name-claim", "in-progress", "eng");
+
+        set_cycle_ready(&mut daemon);
+        let actions = daemon.run_auto_doctor().unwrap();
+
+        let tasks = crate::task::load_tasks_from_dir(&daemon.board_dir().join("tasks")).unwrap();
+        let task = tasks.into_iter().find(|task| task.id == 21).unwrap();
+        assert_eq!(task.status, "in-progress");
+        assert_eq!(daemon.active_tasks.get("eng-1"), Some(&21));
+        assert!(actions.iter().any(|action| action.action_type
+            == "orphaned_in_progress_reattached"
+            && action.task_id == Some(21)
+            && action.engineer.as_deref() == Some("eng-1")));
     }
 
     #[test]
