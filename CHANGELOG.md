@@ -2,6 +2,31 @@
 
 All notable changes to Batty are documented here.
 
+## 0.11.54 — 2026-04-17
+
+Stop the dispatch-overlap predictor from parsing markdown bold
+as file paths. In batty-marketing, every serialize event was
+logging 30KB+ of garbage "predicted file overlap" pairs like
+`**Acceptance:** <> **Lineage:**`, `scope:** <> **Out`,
+`**Owner:** <> **Pillar`. Root cause: `clean_file_hint_token`
+treated any token containing `*` as a glob pattern, so every
+`**bold**`, `__underscore__`, and straddled-whitespace emphasis
+fragment (`**Out`, `scope:**`, `**#542`) in task bodies got
+harvested as a predicted file. Intersecting two tasks' hint
+sets then produced Cartesian noise in the log and, worse,
+serialized unrelated tasks behind each other whenever their
+bodies shared the same section-header vocabulary.
+
+### Fixes
+
+- **Reject markdown emphasis tokens from body file hints**
+  (`src/task/mod.rs`) — `clean_file_hint_token` now returns
+  `None` for any token that starts or ends with `**` or `__`.
+  Real globs (`*.rs`, `src/**/*.rs`) and real paths
+  (`src/app.rs`, `docs/guide.md`) still pass through unchanged.
+  Regression test `task_file_hints_reject_markdown_emphasis_tokens`
+  covers the batty-marketing failure shape.
+
 ## 0.11.53 — 2026-04-17
 
 Halt the orphan-rescue cascade that was silently walking
