@@ -83,6 +83,34 @@ const NON_ROLE_HYPHEN_TOKENS: &[&str] = &[
     "any-engineer",
 ];
 
+/// Seed tags derived from an engineer's `role_name` for `domain_tags`.
+///
+/// #708: #691 seeded the full `role_name` (`sam-designer`) but tasks
+/// tagged with natural-language tokens (`design`, `writing`) scored
+/// zero tag-overlap and fell through to alphabetical tiebreaker —
+/// observed 2026-04-17 12:27:30 UTC, task #572 tagged `design` was
+/// dispatched to alex-dev-1-1 instead of sam-designer-1-1. Fix: also
+/// seed the hyphen-suffix token (`designer`) and common word-family
+/// variants derived from `-er` noun-agent stemming (`design`,
+/// `designing`). Short stems (<3 chars) skipped to avoid noise.
+fn role_name_seed_tags(role_name: &str) -> Vec<String> {
+    let mut seeds = vec![role_name.to_string()];
+    let Some(suffix) = role_name.rsplit('-').next() else {
+        return seeds;
+    };
+    if suffix == role_name || suffix.is_empty() {
+        return seeds;
+    }
+    seeds.push(suffix.to_string());
+    if let Some(stem) = suffix.strip_suffix("er")
+        && stem.len() >= 3
+    {
+        seeds.push(stem.to_string());
+        seeds.push(format!("{stem}ing"));
+    }
+    seeds
+}
+
 /// Scan `text` for the first contiguous run of ASCII lowercase letters
 /// and `-` that contains a hyphen and is not on `NON_ROLE_HYPHEN_TOKENS`.
 fn first_role_token_after(text: &str) -> Option<String> {
@@ -822,7 +850,9 @@ impl TeamDaemon {
                 continue;
             }
             if let Some(profile) = profiles.get_mut(&member.name) {
-                profile.domain_tags.insert(member.role_name.clone());
+                for seed in role_name_seed_tags(&member.role_name) {
+                    profile.domain_tags.insert(seed);
+                }
             }
         }
 
@@ -1505,7 +1535,7 @@ mod tests {
 
     use super::{
         OverlapConflict, find_overlapping_tasks, parse_body_owner_role, predicted_files,
-        split_acyclic_blocking_ids,
+        role_name_seed_tags, split_acyclic_blocking_ids,
     };
     use crate::team::config::RoleType;
     use crate::team::hierarchy::MemberInstance;
@@ -2576,6 +2606,95 @@ mod tests {
             "task tagged with a role_name must prefer the engineer whose role_name matches, \
              not fall back to the first alphabetical peer"
         );
+    }
+
+    #[test]
+    fn dispatch_queue_seeds_role_name_word_family_variants() {
+        // #708: #691 seeded the full role_name (`sam-designer`) but tasks
+        // tagged with natural-language tokens (`design`, `writing`, `designer`)
+        // still scored 0 tag-overlap because exact-string match rejects them.
+        // Observed 2026-04-17 12:27:30 UTC in batty-marketing: task #572
+        // (tagged `[pillar-a, design, thread-a, hero, card-1]`) was dispatched
+        // to alex-dev-1-1 instead of sam-designer-1-1; alex released within
+        // 38 s. Fix: also seed the hyphen-suffix token and `-er` stem/gerund
+        // variants so `design` matches the engineer whose role_name is
+        // `sam-designer`.
+        let tmp = tempfile::tempdir().unwrap();
+        write_task_with_tags(
+            tmp.path(),
+            572,
+            "Card-1 peak-day hero",
+            &["pillar-a", "design", "thread-a", "hero", "card-1"],
+        );
+
+        let member_with_role = |name: &str, role_name: &str| MemberInstance {
+            name: name.to_string(),
+            role_name: role_name.to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("codex".to_string()),
+            reports_to: Some("mgr".to_string()),
+            use_worktrees: false,
+            ..MemberInstance::default()
+        };
+
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![
+                manager_member("mgr", None),
+                member_with_role("alex-dev-1-1", "alex-dev"),
+                member_with_role("kai-devrel-1-1", "kai-devrel"),
+                member_with_role("sam-designer-1-1", "sam-designer"),
+                member_with_role("priya-writer-1-1", "priya-writer"),
+            ])
+            .states(HashMap::from([
+                ("alex-dev-1-1".to_string(), MemberState::Idle),
+                ("kai-devrel-1-1".to_string(), MemberState::Idle),
+                ("sam-designer-1-1".to_string(), MemberState::Idle),
+                ("priya-writer-1-1".to_string(), MemberState::Idle),
+            ]))
+            .build();
+
+        daemon.enqueue_dispatch_candidates().unwrap();
+
+        assert_eq!(daemon.dispatch_queue.len(), 1);
+        assert_eq!(daemon.dispatch_queue[0].task_id, 572);
+        assert_eq!(
+            daemon.dispatch_queue[0].engineer, "sam-designer-1-1",
+            "task tagged `design` must prefer sam-designer over alphabetical \
+             alex-dev; role_name `sam-designer` seeds `designer` + `design` + \
+             `designing` into domain_tags"
+        );
+    }
+
+    #[test]
+    fn role_name_seed_tags_covers_hyphen_suffix_and_er_variants() {
+        assert_eq!(
+            role_name_seed_tags("sam-designer"),
+            vec![
+                "sam-designer".to_string(),
+                "designer".to_string(),
+                "design".to_string(),
+                "designing".to_string(),
+            ]
+        );
+        assert_eq!(
+            role_name_seed_tags("priya-writer"),
+            vec![
+                "priya-writer".to_string(),
+                "writer".to_string(),
+                "writ".to_string(),
+                "writing".to_string(),
+            ]
+        );
+        assert_eq!(
+            role_name_seed_tags("alex-dev"),
+            vec!["alex-dev".to_string(), "dev".to_string()]
+        );
+        assert_eq!(
+            role_name_seed_tags("kai-devrel"),
+            vec!["kai-devrel".to_string(), "devrel".to_string()]
+        );
+        // No hyphen → no suffix token; only self-seed.
+        assert_eq!(role_name_seed_tags("architect"), vec!["architect".to_string()]);
     }
 
     #[test]
