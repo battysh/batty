@@ -394,7 +394,18 @@ pub fn explain_routing_for_task(
         && breakdowns
             .iter()
             .all(|breakdown| breakdown.telemetry_completed_tasks >= 5);
-    if telemetry_ready || !has_any_telemetry {
+    // #692: an explicit task-tag → engineer-tag match is a hard routing
+    // signal and must bypass the telemetry-warmup gate. Without this,
+    // mixed telemetry (one engineer has a few completions, others have
+    // zero) falls back to alphabetical sort even when the task is
+    // explicitly tagged with a role_name — defeating the #691 seed.
+    // Observed in batty-marketing 2026-04-17: task #552 tagged
+    // `kai-devrel` was dispatched to sam-designer because alex-dev had
+    // 1 completion and others had 0, triggering the warmup fallback.
+    let has_explicit_tag_match = breakdowns
+        .iter()
+        .any(|breakdown| breakdown.tag_matches > 0);
+    if telemetry_ready || !has_any_telemetry || has_explicit_tag_match {
         breakdowns.sort_by(compare_breakdowns);
         let chosen_engineer = breakdowns
             .first()
@@ -876,6 +887,61 @@ mod tests {
         assert!(
             score_engineer_for_task(&light, &task(&[], ""), &policy())
                 > score_engineer_for_task(&busy, &task(&[], ""), &policy())
+        );
+    }
+
+    #[test]
+    fn explicit_tag_match_bypasses_telemetry_warmup_fallback() {
+        // #692: when telemetry is mixed (one engineer has some completions
+        // but others have zero), the warmup gate previously forced
+        // alphabetical fallback — defeating the #691 role_name seed.
+        // An explicit task-tag → engineer-tag match must take precedence
+        // over the warmup gate so role-tagged tasks route correctly
+        // during the first 5 completions of any engineer.
+        let engineers = vec![
+            "alex-dev-1-1".to_string(),
+            "kai-devrel-1-1".to_string(),
+            "sam-designer-1-1".to_string(),
+        ];
+        let profiles = HashMap::from([
+            (
+                "alex-dev-1-1".to_string(),
+                EngineerProfile {
+                    name: "alex-dev-1-1".to_string(),
+                    domain_tags: HashSet::from(["alex-dev".to_string()]),
+                    telemetry_completed_tasks: 2,
+                    ..EngineerProfile::default()
+                },
+            ),
+            (
+                "kai-devrel-1-1".to_string(),
+                EngineerProfile {
+                    name: "kai-devrel-1-1".to_string(),
+                    domain_tags: HashSet::from(["kai-devrel".to_string()]),
+                    telemetry_completed_tasks: 0,
+                    ..EngineerProfile::default()
+                },
+            ),
+            (
+                "sam-designer-1-1".to_string(),
+                EngineerProfile {
+                    name: "sam-designer-1-1".to_string(),
+                    domain_tags: HashSet::from(["sam-designer".to_string()]),
+                    telemetry_completed_tasks: 0,
+                    ..EngineerProfile::default()
+                },
+            ),
+        ]);
+
+        let ranked = rank_engineers_for_task(
+            &engineers,
+            &profiles,
+            &task(&["kai-devrel", "engagement"], ""),
+            &policy(),
+        );
+        assert_eq!(
+            ranked[0], "kai-devrel-1-1",
+            "tag match must override alphabetical warmup fallback"
         );
     }
 
