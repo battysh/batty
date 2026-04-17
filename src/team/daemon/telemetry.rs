@@ -289,6 +289,17 @@ impl TeamDaemon {
         reason: Option<&str>,
     ) {
         let task = task.into();
+        // #678: suppress repeat escalations for the same (role, task, reason)
+        // within a 10-minute window so watchdogs that re-examine the same
+        // signal every tick (stall, poll_shim, owned_tasks) don't produce a
+        // ping storm.
+        let dedup_key = format!(
+            "task_escalated:{role}:{task}:{reason}",
+            reason = reason.unwrap_or("-")
+        );
+        if self.suppress_recent_escalation(dedup_key, std::time::Duration::from_secs(600)) {
+            return;
+        }
         self.emit_event(TeamEvent::task_escalated(role, &task, reason));
     }
 

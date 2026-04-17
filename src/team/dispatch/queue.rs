@@ -251,6 +251,7 @@ pub fn find_overlapping_tasks(
 fn available_dispatch_tasks(
     board_dir: &Path,
     queued_task_ids: &HashSet<u32>,
+    excluded_tags: &[String],
 ) -> Result<Vec<crate::task::Task>> {
     let tasks = crate::task::load_tasks_from_dir(&board_dir.join("tasks"))?;
     let task_status_by_id: HashMap<u32, String> = tasks
@@ -266,6 +267,7 @@ fn available_dispatch_tasks(
         .filter(|task| task.blocked_on.is_none())
         .filter(|task| !task.is_schedule_blocked())
         .filter(|task| !queued_task_ids.contains(&task.id))
+        .filter(|task| !task_has_excluded_tag(task, excluded_tags))
         .filter(|task| {
             task.depends_on.iter().all(|dep_id| {
                 task_status_by_id
@@ -277,6 +279,21 @@ fn available_dispatch_tasks(
 
     available.sort_by_key(|task| (dispatch_priority_rank(&task.priority), task.id));
     Ok(available)
+}
+
+/// #677: A task matches the excluded tags list (case-insensitive) when any
+/// of its tags appears in the operator's `board.dispatch_excluded_tags`.
+/// Matched tasks are held off the dispatch queue until an operator claims
+/// them manually. Empty list means no filtering.
+fn task_has_excluded_tag(task: &crate::task::Task, excluded_tags: &[String]) -> bool {
+    if excluded_tags.is_empty() {
+        return false;
+    }
+    task.tags.iter().any(|task_tag| {
+        excluded_tags
+            .iter()
+            .any(|excluded| excluded.eq_ignore_ascii_case(task_tag))
+    })
 }
 
 impl TeamDaemon {
@@ -369,9 +386,13 @@ impl TeamDaemon {
         board_dir: &Path,
         queued_task_ids: &HashSet<u32>,
     ) -> Result<Option<crate::task::Task>> {
-        Ok(available_dispatch_tasks(board_dir, queued_task_ids)?
-            .into_iter()
-            .next())
+        Ok(available_dispatch_tasks(
+            board_dir,
+            queued_task_ids,
+            &self.config.team_config.board.dispatch_excluded_tags,
+        )?
+        .into_iter()
+        .next())
     }
 
     #[cfg(test)]
@@ -421,7 +442,11 @@ impl TeamDaemon {
         loop {
             let mut unavailable_task_ids = queued_task_ids.clone();
             unavailable_task_ids.extend(file_locked_task_ids.iter().copied());
-            let available_tasks = available_dispatch_tasks(&board_dir, &unavailable_task_ids)?;
+            let available_tasks = available_dispatch_tasks(
+                &board_dir,
+                &unavailable_task_ids,
+                &self.config.team_config.board.dispatch_excluded_tags,
+            )?;
             if available_tasks.is_empty() {
                 break;
             }

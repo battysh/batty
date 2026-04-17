@@ -1540,6 +1540,11 @@ impl TeamDaemon {
         if !tasks_dir.exists() {
             return Ok(());
         }
+        // #679: messaging below assumes a single git repo at `project_root`
+        // (branch, commits ahead of main, etc.). When the project isn't a
+        // git repo (or is a multi-repo parent), reframe the aging alert to
+        // avoid referencing branches that don't exist.
+        let project_is_git = self.is_git_repo && !self.is_multi_repo;
 
         let thresholds = crate::team::board::AgingThresholds {
             stale_in_progress_hours: self
@@ -1636,10 +1641,17 @@ impl TeamDaemon {
                 if liveness.dirty_worktree {
                     let checkpoint_sent = self.intervention_cooldowns.contains_key(&checkpoint_key);
                     if !checkpoint_sent {
-                        let body = format!(
-                            "Task #{} is still in progress and has dirty worktree changes, but the branch has no commits ahead of `main`.\nTask: {}\nNext step: create a checkpoint commit now so Batty does not escalate this lane as stale.\n```\ngit add -A\ngit commit -m \"wip: checkpoint task #{}\"\n```",
-                            task.task_id, task.title, task.task_id
-                        );
+                        let body = if project_is_git {
+                            format!(
+                                "Task #{} is still in progress and has dirty worktree changes, but the branch has no commits ahead of `main`.\nTask: {}\nNext step: create a checkpoint commit now so Batty does not escalate this lane as stale.\n```\ngit add -A\ngit commit -m \"wip: checkpoint task #{}\"\n```",
+                                task.task_id, task.title, task.task_id
+                            )
+                        } else {
+                            format!(
+                                "Task #{} is still in progress with uncommitted changes, but no progress signals have been observed during the cooldown window.\nTask: {}\nNext step: save a checkpoint of your work so Batty does not escalate this lane as stale.",
+                                task.task_id, task.title
+                            )
+                        };
                         let _ = self.queue_daemon_message(owner, &body);
                         self.record_orchestrator_action(format!(
                             "aging: requested checkpoint commit for task #{} ({owner})",
@@ -1673,11 +1685,20 @@ impl TeamDaemon {
                     ),
                     "commit_stale_with_dirty_work",
                 )
-            } else {
+            } else if project_is_git {
                 (
                     "progress_stale",
                     format!(
                         "progress stale after {}s with no commits ahead of main and no claim progress during the cooldown window",
+                        task.age_secs
+                    ),
+                    "progress_stale",
+                )
+            } else {
+                (
+                    "progress_stale",
+                    format!(
+                        "progress stale after {}s with no progress signals during the cooldown window",
                         task.age_secs
                     ),
                     "progress_stale",
@@ -1697,10 +1718,17 @@ impl TeamDaemon {
                 .map(str::to_string)
                 .or_else(|| first_manager_name(&self.config.members))
             {
-                let body = format!(
-                    "Task #{} has been in progress for {}s with no commits ahead of `main`.\nTask: {}\nOwner: {}\nReason: {}\nNext step: intervene, split the task, or confirm the engineer is still making progress.",
-                    task.task_id, task.age_secs, task.title, owner, manager_reason
-                );
+                let body = if project_is_git {
+                    format!(
+                        "Task #{} has been in progress for {}s with no commits ahead of `main`.\nTask: {}\nOwner: {}\nReason: {}\nNext step: intervene, split the task, or confirm the engineer is still making progress.",
+                        task.task_id, task.age_secs, task.title, owner, manager_reason
+                    )
+                } else {
+                    format!(
+                        "Task #{} has been in progress for {}s with no progress signals.\nTask: {}\nOwner: {}\nReason: {}\nNext step: intervene, split the task, or confirm the engineer is still making progress.",
+                        task.task_id, task.age_secs, task.title, owner, manager_reason
+                    )
+                };
                 let _ = self.queue_daemon_message(&recipient, &body);
             }
 

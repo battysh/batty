@@ -731,6 +731,15 @@ pub struct BoardConfig {
     pub dispatch_dedup_window_secs: u64,
     #[serde(default = "default_dispatch_manual_cooldown_secs")]
     pub dispatch_manual_cooldown_secs: u64,
+    /// Tags that disqualify a task from auto-dispatch to engineers. Case-insensitive.
+    ///
+    /// Default empty. Typical production use: `["planning", "design", "content", "ops"]`.
+    /// A task whose `tags` include any listed value is skipped by the
+    /// dispatch queue regardless of engineer idleness — it must be
+    /// claimed explicitly. Prevents engineer auto-claim of work
+    /// intended for non-engineering roles (#677).
+    #[serde(default)]
+    pub dispatch_excluded_tags: Vec<String>,
 }
 
 impl Default for BoardConfig {
@@ -744,6 +753,7 @@ impl Default for BoardConfig {
             dispatch_stabilization_delay_secs: default_dispatch_stabilization_delay_secs(),
             dispatch_dedup_window_secs: default_dispatch_dedup_window_secs(),
             dispatch_manual_cooldown_secs: default_dispatch_manual_cooldown_secs(),
+            dispatch_excluded_tags: Vec::new(),
         }
     }
 }
