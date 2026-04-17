@@ -2153,6 +2153,14 @@ impl TeamDaemon {
 
         self.planning_cycle_last_fired = Some(Instant::now());
         self.planning_cycle_active = true;
+        // #687 followup: persist immediately so a daemon restart within the
+        // heartbeat window (5 min) doesn't fire a duplicate planning cycle
+        // at the architect. Without this, hot-reload or manual restart
+        // seconds after a cycle fires sends the architect two prompts for
+        // the same "pipeline is dry" state, burning orchestrator tokens.
+        if let Err(error) = self.persist_runtime_state(false) {
+            warn!(error = %error, "failed to persist daemon state after planning cycle fire");
+        }
         info!(
             architect,
             idle_engineers = idle_engineer_count,
