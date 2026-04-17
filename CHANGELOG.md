@@ -2,6 +2,57 @@
 
 All notable changes to Batty are documented here.
 
+## 0.11.60 — 2026-04-17
+
+Stop the hourly dispatch→release cascade on human-parked tasks. When an
+engineer releases a task's claim (e.g. "park until Akim's Saturday
+daily-ping"), the #697 release-exclusion window is now exponential
+instead of fixed, mirroring the #686/#689 orphan-rescue backoff: 1×,
+2×, 4×, 8×, 16× the base `dispatch_release_exclusion_secs` (capped at
+16× to avoid a pinned-forever exclusion). The counter grows only while
+the release→dispatch→release loop is still cycling inside a 2× cascade
+window, and resets once the pair has actually been quiet for a full
+extra exclusion period.
+
+Observed 2026-04-17 on `batty-marketing` with task #597 (CI-badge
+repair, owner `alex-dev` awaiting Akim's Sat 2026-04-18 09:00 ET ping):
+every 3600s the fixed exclusion expired, dispatch re-gave the task to
+alex-dev, alex-dev read it (~20k tokens of context each time) and
+released it again 56 seconds later. With a 14-hour park window that was
+~14 wasted engineer turns. Under the new backoff the same cascade
+collapses to ~4 turns (1h + 2h + 4h + 8h ≈ 15h of total quiet before
+the 16× ceiling kicks in), while a legitimately recoverable parked
+task still eventually resurfaces.
+
+### Fixes
+
+- **Exponential backoff on `recently_released_by`**
+  (`src/team/daemon.rs`, `src/team/dispatch/queue.rs`,
+  `src/team/daemon/state.rs`) — introduce `ReleaseRecord { last_released_at,
+  count }` mirroring `RescueRecord`. `record_task_release_by` grows
+  `count` when the previous release is still inside the cascade window
+  (2× effective) and resets it otherwise. `is_release_excluded` uses
+  `record.effective_window(base)` instead of a fixed window.
+  `enqueue_dispatch_candidates` retains records through the full
+  cascade window so the counter doesn't evaporate the moment the
+  dispatch gate opens.
+- **Persisted `ReleaseRecord` round-trip across daemon restarts**
+  (`src/team/daemon/state.rs`) — new `PersistedReleaseRecord { last_released_elapsed_secs,
+  count }` serialises both the elapsed time and the cascade counter. A
+  custom `Deserialize` accepts the legacy pre-v0.11.60 bare-`u64` form
+  as `count = 1`, so a state file written by v0.11.59 continues to load
+  cleanly after upgrade.
+
+### Tests
+
+- `record_task_release_by_grows_exclusion_exponentially_on_repeat`
+  exercises the in-cascade-grows / past-cascade-resets branches and
+  confirms the effective window widens after the second release
+  (`src/team/dispatch/queue.rs`).
+- `restore_runtime_state_preserves_recently_released_by_across_restart`
+  now also asserts `count` survives the save/restore round-trip
+  (`src/team/daemon/tests.rs`).
+
 ## 0.11.59 — 2026-04-17
 
 Stop the Starting→Ready race where pending messages queued against a

@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use tracing::warn;
 
 use super::dispatch::DispatchQueueEntry;
@@ -28,6 +28,51 @@ pub(super) struct PersistedNudgeState {
 pub(super) struct PersistedRescueRecord {
     pub last_rescued_elapsed_secs: u64,
     pub count: u32,
+}
+
+/// #698: per-(task, engineer) release-exclusion record persisted across
+/// daemon restarts. Same motivation as `PersistedRescueRecord`: without
+/// this, a restart mid-cascade resets `count` to 1 and the next release
+/// reopens dispatch at the base window — re-starting the cascade.
+///
+/// Backwards-compatible Deserialize: state files written by v0.11.59 and
+/// earlier stored this field as a bare `u64` (elapsed seconds only).
+/// Treat the legacy form as `count = 1` so a restart across the v0.11.60
+/// boundary preserves in-flight exclusions without re-cascading.
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+pub(super) struct PersistedReleaseRecord {
+    pub last_released_elapsed_secs: u64,
+    pub count: u32,
+}
+
+impl<'de> Deserialize<'de> for PersistedReleaseRecord {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum LegacyOrFull {
+            Legacy(u64),
+            Full {
+                last_released_elapsed_secs: u64,
+                count: u32,
+            },
+        }
+        match LegacyOrFull::deserialize(deserializer)? {
+            LegacyOrFull::Legacy(secs) => Ok(Self {
+                last_released_elapsed_secs: secs,
+                count: 1,
+            }),
+            LegacyOrFull::Full {
+                last_released_elapsed_secs,
+                count,
+            } => Ok(Self {
+                last_released_elapsed_secs,
+                count,
+            }),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -64,13 +109,16 @@ pub(super) struct PersistedDaemonState {
     /// cascaded task earns) survives daemon restarts.
     #[serde(default)]
     pub recently_rescued_tasks: HashMap<u32, PersistedRescueRecord>,
-    /// #697: per-(task, engineer) release-exclusion records. Persisted
-    /// so a restart mid-cascade does not reset the exclusion window and
-    /// let the releasing engineer immediately re-receive the task.
-    /// Key format: `"task_id:engineer"` (string-keyed for JSON tuple
-    /// compatibility).
+    /// #697 / #698: per-(task, engineer) release-exclusion records.
+    /// Persisted so a restart mid-cascade does not reset the exclusion
+    /// window and let the releasing engineer immediately re-receive the
+    /// task. Key format: `"task_id:engineer"` (string-keyed for JSON
+    /// tuple compatibility). #698 also round-trips the cascade counter
+    /// so the exponentially-grown window survives a restart; the
+    /// `PersistedReleaseRecord` Deserialize accepts both the legacy
+    /// u64-only form (pre-v0.11.60) and the full struct form.
     #[serde(default)]
-    pub recently_released_by: HashMap<String, u64>,
+    pub recently_released_by: HashMap<String, PersistedReleaseRecord>,
 }
 
 impl TeamDaemon {
@@ -154,18 +202,26 @@ impl TeamDaemon {
                 )
             })
             .collect();
-        // #697: restore release-exclusion records so a releasing engineer
-        // is not immediately re-given the parked task after a restart.
+        // #697 / #698: restore release-exclusion records so a releasing
+        // engineer is not immediately re-given the parked task after a
+        // restart, and so the exponential-backoff counter survives
+        // mid-cascade.
         self.recently_released_by = state
             .recently_released_by
             .into_iter()
-            .filter_map(|(key, elapsed_secs)| {
+            .filter_map(|(key, persisted)| {
                 let (task_id_str, engineer) = key.split_once(':')?;
                 let task_id: u32 = task_id_str.parse().ok()?;
-                let released_at = Instant::now()
-                    .checked_sub(Duration::from_secs(elapsed_secs))
+                let last_released_at = Instant::now()
+                    .checked_sub(Duration::from_secs(persisted.last_released_elapsed_secs))
                     .unwrap_or_else(Instant::now);
-                Some(((task_id, engineer.to_string()), released_at))
+                Some((
+                    (task_id, engineer.to_string()),
+                    super::ReleaseRecord {
+                        last_released_at,
+                        count: persisted.count,
+                    },
+                ))
             })
             .collect();
     }
@@ -223,10 +279,13 @@ impl TeamDaemon {
             recently_released_by: self
                 .recently_released_by
                 .iter()
-                .map(|((task_id, engineer), released_at)| {
+                .map(|((task_id, engineer), record)| {
                     (
                         format!("{task_id}:{engineer}"),
-                        released_at.elapsed().as_secs(),
+                        PersistedReleaseRecord {
+                            last_released_elapsed_secs: record.last_released_at.elapsed().as_secs(),
+                            count: record.count,
+                        },
                     )
                 })
                 .collect(),
