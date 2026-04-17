@@ -72,66 +72,128 @@ fn split_acyclic_blocking_ids(
     Ok((safe, rejected))
 }
 
-/// Parse an explicit `Owner: <role>` token from a task body, returning the
-/// first role-name-looking token (lowercase letters + hyphens).
+/// Tokens that are hyphen-lowercase-shaped but are NOT engineer roles —
+/// architects use them as descriptive tags inside routing preambles.
+/// Guard so `first_role_token_after` doesn't mis-extract them as the owner.
+const NON_ROLE_HYPHEN_TOKENS: &[&str] = &[
+    "role-flexible",
+    "strategic-analysis",
+    "narrative-audit",
+    "north-star",
+    "any-engineer",
+];
+
+/// Scan `text` for the first contiguous run of ASCII lowercase letters
+/// and `-` that contains a hyphen and is not on `NON_ROLE_HYPHEN_TOKENS`.
+fn first_role_token_after(text: &str) -> Option<String> {
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        while i < bytes.len() && !bytes[i].is_ascii_lowercase() {
+            i += 1;
+        }
+        if i >= bytes.len() {
+            break;
+        }
+        let start = i;
+        while i < bytes.len() && (bytes[i].is_ascii_lowercase() || bytes[i] == b'-') {
+            i += 1;
+        }
+        // Trim trailing hyphens so tokens like `alex-dev-` (from the
+        // `alex-dev-1-1` instance-id shape) normalise to `alex-dev` instead
+        // of being rejected outright.
+        let token = text[start..i].trim_end_matches('-');
+        if token.contains('-')
+            && !token.starts_with('-')
+            && !NON_ROLE_HYPHEN_TOKENS.contains(&token)
+        {
+            return Some(token.to_string());
+        }
+    }
+    None
+}
+
+/// Parse an explicit routing-cue declaration from a task body, returning
+/// the first role-name-looking token (lowercase letters + hyphens) that
+/// follows the cue.
+///
+/// Recognised cues, ordered most-specific first:
+///
+/// - `Owner:` / `OWNER:` — canonical declaration (#695/#699)
+/// - `Route:` — imperative routing line (`- Route: dispatch to priya-writer.`)
+/// - `Primary:` — inside an `Owner routing` preamble
+///   (`Primary: priya-writer (narrative audit lens)`)
+/// - `Owner routing` — multi-phrase preamble without a direct colon-role
+///   pair; falls through to "first hyphen-role token in rest of line"
+/// - `route to` / `dispatch to` / `assign to` — inline prose imperatives
 ///
 /// #695: architects routinely author tasks whose frontmatter `tags:` are
 /// thematic (e.g. `[content, pillar-b, x, writing]`) but whose body prose
-/// names the actual owner role ("Owner: priya-writer drafts; kai-devrel
-/// schedules"). Without a route-seed from this prose, `tag_overlap` scores
-/// 0 for every engineer and the task lands on whichever engineer wins
-/// scoring tiebreakers — observed: task #553 ("Owner: priya-writer drafts")
-/// was dispatched to sam-designer-1-1 in batty-marketing.
+/// names the actual owner role. Without a route-seed from this prose,
+/// `tag_overlap` scores 0 for every engineer and the task lands on whichever
+/// engineer wins scoring tiebreakers — observed: task #553
+/// ("Owner: priya-writer drafts") dispatched to sam-designer-1-1.
 ///
 /// #699: Maya-style round headers wrap the owner declaration inside a
 /// prose preamble, e.g. `**Round-8 task from maya-lead. Owner: alex-dev.
-/// Skeptic-defuser …**`. The line doesn't START with `Owner:`, so the
-/// previous line-prefix parser missed these and the tasks got round-
-/// robined to the wrong role (observed 2026-04-17: #518/#524 tagged
-/// `Owner: alex-dev` dispatched to sam-designer and kai-devrel). Search
-/// for `Owner:` anywhere in the line, but only accept matches at a word
-/// boundary so `CoOwner:` or `DataOwner:` can't masquerade as the hint.
+/// Skeptic-defuser …**`. The line doesn't START with `Owner:` after
+/// markdown trimming, so the earlier line-prefix parser missed these and
+/// the tasks got round-robined to the wrong role.
+///
+/// #700: jordan-pm-authored tasks use richer routing syntax — "Owner
+/// routing: ...", "Route: dispatch to <role>", "Primary: <role>" — none of
+/// which surface `Owner:` as a literal substring with a role right after.
+/// Observed 2026-04-17 09:13:35 UTC: four-task wave where #547
+/// ("Owner routing: route to priya-writer") went to alex-dev, #548
+/// ("Primary: priya-writer … NOT Sam") went to sam-designer (explicitly
+/// excluded), #549 ("Route: dispatch to priya-writer") went to kai-devrel.
+/// jordan-pm then spent a full turn reassigning each via inbox —
+/// workaround but expensive. Expanded cue list catches these three
+/// patterns plus the generic inline-prose forms.
+///
+/// Word-boundary guard: the cue must be preceded by start-of-line, ASCII
+/// whitespace, or one of `- * _ ( [ . ; : ,` so longer compounds like
+/// `CoOwner:` / `DataOwner:` / `rerouter:` can't masquerade as cues.
 ///
 /// The returned role-name is merged into the task's tag set for the
 /// duration of one ranking call (see `rank_dispatch_engineers`), which
 /// triggers the #692 tag-match bypass so the matching engineer wins.
 fn parse_body_owner_role(body: &str) -> Option<String> {
+    const ROUTING_CUES: &[&str] = &[
+        "Owner:",
+        "OWNER:",
+        "Route:",
+        "Primary:",
+        "Owner routing",
+        "route to",
+        "dispatch to",
+        "assign to",
+    ];
     for line in body.lines() {
-        let mut search_from = 0;
-        while let Some(rel_idx) = line[search_from..].find("Owner:") {
-            let idx = search_from + rel_idx;
-            search_from = idx + "Owner:".len();
-            // Require a word boundary before "Owner:" so we don't match
-            // in the middle of a longer token. Start-of-line, whitespace,
-            // list markers, and markdown emphasis all qualify.
-            let boundary_ok = idx == 0
-                || line[..idx]
-                    .chars()
-                    .next_back()
-                    .map(|c| {
-                        c.is_whitespace()
-                            || matches!(c, '-' | '*' | '_' | '(' | '[' | '.' | ';' | ':' | ',')
-                    })
-                    .unwrap_or(true);
-            if !boundary_ok {
-                continue;
+        for cue in ROUTING_CUES {
+            let mut search_from = 0;
+            while let Some(rel_idx) = line[search_from..].find(cue) {
+                let idx = search_from + rel_idx;
+                search_from = idx + cue.len();
+                let boundary_ok = idx == 0
+                    || line[..idx]
+                        .chars()
+                        .next_back()
+                        .map(|c| {
+                            c.is_whitespace()
+                                || matches!(
+                                    c,
+                                    '-' | '*' | '_' | '(' | '[' | '.' | ';' | ':' | ','
+                                )
+                        })
+                        .unwrap_or(true);
+                if !boundary_ok {
+                    continue;
+                }
+                if let Some(role) = first_role_token_after(&line[search_from..]) {
+                    return Some(role);
+                }
             }
-            let rest = line[search_from..]
-                .trim_start()
-                .trim_start_matches('*')
-                .trim_start();
-            let role: String = rest
-                .chars()
-                .take_while(|c| c.is_ascii_lowercase() || *c == '-')
-                .collect();
-            if role.is_empty() || !role.contains('-') {
-                // Require at least one hyphen to match the repo's role_name
-                // shape (`priya-writer`, `kai-devrel`, `sam-designer`,
-                // `alex-dev`). Avoids false-positive extraction when the
-                // body writes something like "Owner: TBD".
-                continue;
-            }
-            return Some(role);
         }
     }
     None
@@ -2382,6 +2444,56 @@ mod tests {
         assert_eq!(
             parse_body_owner_role("CoOwner: rogue-role. Owner: real-role handles it."),
             Some("real-role".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_body_owner_role_finds_routing_cues_from_jordan_style_bodies() {
+        // #700 regression: jordan-pm-authored tasks use richer routing syntax
+        // than literal `Owner: <role>`. Observed 2026-04-17 09:13:35 UTC in
+        // batty-marketing — three-task wave misdispatched because the old
+        // parser never found `Owner:` as a substring with a role right after.
+        //
+        // #547 body: `**Owner routing**: content/submission task — route to
+        // priya-writer for draft, kai-devrel for PR submission ...`
+        assert_eq!(
+            parse_body_owner_role(
+                "**Owner routing**: content/submission task — route to priya-writer for draft, kai-devrel for PR submission (he holds the posting/publishing lane)."
+            ),
+            Some("priya-writer".to_string())
+        );
+        // #548 body: `**Owner routing**: Research + strategic-analysis task,
+        // role-flexible. Primary: priya-writer (narrative audit lens) OR
+        // kai-devrel ... NOT Sam, NOT Alex.`
+        //
+        // This covers three guards at once: `strategic-analysis`,
+        // `role-flexible`, and `narrative-audit` all live on
+        // `NON_ROLE_HYPHEN_TOKENS`, so `Primary:` correctly skips them and
+        // returns the real role `priya-writer`.
+        assert_eq!(
+            parse_body_owner_role(
+                "**Owner routing**: Research + strategic-analysis task, role-flexible. Primary: priya-writer (narrative audit lens) OR kai-devrel (community/conversion lens). NOT Sam (not visual), NOT Alex."
+            ),
+            Some("priya-writer".to_string())
+        );
+        // #549 body: `- Route: dispatch to priya-writer.`
+        assert_eq!(
+            parse_body_owner_role("- Route: dispatch to priya-writer."),
+            Some("priya-writer".to_string())
+        );
+        // jordan-pm's manual inbox-workaround format, used while the bug was
+        // live: `OWNER: alex-dev-1-1 (explicit ...)`. The trailing `-1-1`
+        // must not trip the parser — `first_role_token_after` stops at the
+        // first hyphen-role token, which is `alex-dev-1-1` (all lowercase /
+        // hyphen / digits? no, digits break the class → returns `alex-dev`).
+        assert_eq!(
+            parse_body_owner_role("OWNER: alex-dev-1-1 (explicit per Maya directive)."),
+            Some("alex-dev".to_string())
+        );
+        // Inline `assign to <role>` prose cue.
+        assert_eq!(
+            parse_body_owner_role("Please assign to kai-devrel for the release post."),
+            Some("kai-devrel".to_string())
         );
     }
 

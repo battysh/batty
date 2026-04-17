@@ -2,6 +2,44 @@
 
 All notable changes to Batty are documented here.
 
+## 0.11.39 — 2026-04-17
+
+Field-report fix: a second wrong-role dispatch incident in
+batty-marketing at 09:13:35 UTC showed that the #699 fix only
+covered the literal `Owner: <role>` shape. jordan-pm's tasks
+author routing hints with richer syntax — `**Owner routing**:
+... route to priya-writer ...`, `Primary: priya-writer`,
+`- Route: dispatch to priya-writer` — and none of these
+surface `Owner:` as a substring with a role right after. The
+three-task wave misdispatched: #547 ("route to priya-writer")
+to alex-dev, #548 ("Primary: priya-writer ... NOT Sam") to
+sam-designer (the explicitly-excluded engineer), #549
+("dispatch to priya-writer") to kai-devrel. jordan-pm then
+spent a full turn reassigning each via inbox — workaround,
+not fix. The #697 release-exclusion worked as intended
+(refusing engineers were not re-picked for their own task),
+but the underlying routing still landed on the wrong role.
+
+### Fixes
+
+- **Owner-role parser recognises `Route:`, `Primary:`, `Owner
+  routing`, and inline prose cues** (#700) — expanded
+  `ROUTING_CUES` in `parse_body_owner_role` to eight phrases:
+  `Owner:`, `OWNER:`, `Route:`, `Primary:`, `Owner routing`,
+  `route to`, `dispatch to`, `assign to`. Introduced
+  `first_role_token_after` helper that scans for the first
+  hyphenated lowercase token after each cue, with a
+  `NON_ROLE_HYPHEN_TOKENS` blacklist so descriptive compounds
+  (`role-flexible`, `strategic-analysis`, `narrative-audit`,
+  `north-star`, `any-engineer`) can't be mistaken for role
+  names. Token collection also trims trailing hyphens so
+  instance-id suffixes like `alex-dev-1-1` normalise to the
+  role `alex-dev` instead of being rejected for ending in `-`.
+  Regression test
+  `parse_body_owner_role_finds_routing_cues_from_jordan_style_bodies`
+  covers #547/#548/#549 body shapes verbatim plus the
+  manual-inbox `OWNER: alex-dev-1-1` workaround format.
+
 ## 0.11.38 — 2026-04-17
 
 Field-report fix: Maya-style round headers were defeating the
