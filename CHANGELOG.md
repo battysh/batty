@@ -2,6 +2,37 @@
 
 All notable changes to Batty are documented here.
 
+## 0.11.52 — 2026-04-17
+
+Close the WIP-limit rejection round-trip observed in batty-marketing.
+`batty assign` at the CLI boundary silently accepted assignments
+and delivered them to inboxes even when the target engineer
+already held in-progress / review work; the daemon then bounced
+the Assign message back with a WIP-limit rejection on the next
+routing tick. Each bounce cost two full turns of manager time —
+one to compose the rejected assignment, one to read and re-plan
+against the daemon-queued rejection. Observed 4× today: alex-dev
+at 08:43 and 09:27, sam-designer at 11:13 and 11:57 (all
+jordan-pm → engineer Assigns).
+
+### Fixes
+
+- **CLI `batty assign` rejects eagerly on WIP overflow** (#713) —
+  `assign_task` in `src/team/messaging.rs` now mirrors the
+  daemon-side WIP guard (routing.rs Assign branch): before
+  delivering to the inbox, it loads the board and bails with the
+  same rejection text the daemon would queue
+  (`"Assignment to <recipient> rejected (WIP limit): ..."`) when
+  the recipient already owns any `in-progress` or `review` task.
+  Managers now see the failure inline in the shim response from
+  their `batty assign` invocation and can pick a different
+  engineer on the same turn, skipping the inbox round trip.
+  Regression tests:
+  `assign_task_rejects_when_engineer_already_has_active_task`
+  (positive) +
+  `assign_task_allows_when_engineers_only_active_is_done_or_todo`
+  (negative — `done` claimed_by must not block new assignments).
+
 ## 0.11.51 — 2026-04-17
 
 Third follow-up to the #709/#711 "architect-owned task counted as
