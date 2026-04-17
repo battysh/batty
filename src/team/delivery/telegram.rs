@@ -297,6 +297,7 @@ mod tests {
             narration_rejection_counts: HashMap::new(),
             zero_diff_completion_counts: HashMap::new(),
             shim_handles: HashMap::new(),
+            working_since: HashMap::new(),
             planning_cycle_last_fired: None,
             planning_cycle_active: false,
             planning_cycle_consecutive_empty: 0,

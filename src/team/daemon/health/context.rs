@@ -229,6 +229,21 @@ impl TeamDaemon {
             if !is_working {
                 return Ok(());
             }
+            // #690: also require that the member has been CONTINUOUSLY
+            // Working long enough to justify calling this a hang. An
+            // Idle shim that just received its first inbox message 8s
+            // ago is MemberState::Working, but has had no chance to
+            // produce output. Without this guard we saw priya-writer
+            // killed at 04:50:02 after transitioning Working at
+            // 04:49:54 following an 18-minute Idle window.
+            let been_working_long_enough = self
+                .working_since
+                .get(member_name)
+                .map(|since| since.elapsed().as_secs() >= ZERO_OUTPUT_THRESHOLD_SECS)
+                .unwrap_or(false);
+            if !been_working_long_enough {
+                return Ok(());
+            }
             if self.shim_handles.contains_key(member_name) {
                 warn!(
                     member = %member_name,

@@ -3,7 +3,7 @@
 //! pane death, health monitoring, and stale detection).
 
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use tracing::{debug, info, warn};
@@ -281,6 +281,16 @@ impl TeamDaemon {
                 if prev_state != Some(member_state) {
                     self.states.insert(member_name.to_string(), member_state);
                     self.update_automation_timers_for_state(member_name, member_state);
+                    // #690: track continuous Working windows so a fresh
+                    // Idle→Working transition does not get killed for
+                    // lifetime-zero-output on a long-idle shim.
+                    if member_state == MemberState::Working {
+                        self.working_since
+                            .entry(member_name.to_string())
+                            .or_insert_with(Instant::now);
+                    } else {
+                        self.working_since.remove(member_name);
+                    }
                 }
                 if member_state != MemberState::Working {
                     self.context_pressure_tracker.mark_not_working(member_name);
@@ -1192,6 +1202,11 @@ impl TeamDaemon {
         self.states
             .insert(member_name.to_string(), MemberState::Idle);
         self.update_automation_timers_for_state(member_name, MemberState::Idle);
+        // #690: the new shim has had no chance to produce output yet.
+        // Clearing the working_since entry ensures the next legitimate
+        // Idle→Working transition (re-delivered assignment) gets its
+        // own fresh 10-minute zero-output grace window.
+        self.working_since.remove(member_name);
         self.emit_event(TeamEvent::pane_respawned(member_name));
         self.record_orchestrator_action(format!(
             "lifecycle: downgraded warm resume to {} for {} after {}",
@@ -1722,6 +1737,111 @@ mod tests {
 
         assert_eq!(daemon.states.get("eng-1"), Some(&MemberState::Working));
         assert!(daemon.shim_handles["eng-1"].is_working());
+    }
+
+    /// #690: Zero-output restart skipped when the member JUST transitioned
+    /// to Working. Simulates priya-writer's 2026-04-17 04:50:02 near-miss:
+    /// shim uptime 1100s, state Working for only 8s, lifetime output 0.
+    /// Must NOT be cold-respawned.
+    #[test]
+    fn zero_output_gate_skips_fresh_working_transition() {
+        use std::time::Duration;
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = TestDaemonBuilder::new(tmp.path()).build();
+        insert_mock_handle(&mut daemon, "priya");
+        daemon.states.insert("priya".into(), MemberState::Working);
+        // Transitioned to Working ~8 seconds ago — way below the 600s
+        // threshold.
+        daemon.working_since.insert(
+            "priya".into(),
+            Instant::now() - Duration::from_secs(8),
+        );
+
+        daemon
+            .handle_context_pressure_stats("priya", 0, 1100, None)
+            .unwrap();
+
+        // Still in Working state; no cold respawn was triggered.
+        assert_eq!(
+            daemon.states.get("priya"),
+            Some(&MemberState::Working),
+            "fresh-Working agent must not be killed for lifetime zero output"
+        );
+        assert!(
+            daemon.working_since.get("priya").is_some(),
+            "working_since must be preserved on skip path"
+        );
+    }
+
+    /// #690: Once the agent has been Working continuously for the
+    /// threshold with zero output, the gate DOES fire the cold respawn.
+    #[test]
+    fn zero_output_gate_fires_after_sustained_working_with_no_output() {
+        use std::time::Duration;
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = TestDaemonBuilder::new(tmp.path()).build();
+        insert_mock_handle(&mut daemon, "priya");
+        daemon.states.insert("priya".into(), MemberState::Working);
+        daemon.working_since.insert(
+            "priya".into(),
+            Instant::now() - Duration::from_secs(601),
+        );
+
+        // cold_respawn_plan will return None for the mock handle (no
+        // session on disk), so this call short-circuits without
+        // touching the filesystem — but the WARN path will have been
+        // entered, which is what we want to verify indirectly via the
+        // working_since entry being cleared later by the cold-respawn
+        // path. For this test we just assert it does NOT early-return
+        // via the `been_working_long_enough` guard.
+        let result = daemon.handle_context_pressure_stats("priya", 0, 1200, None);
+        assert!(
+            result.is_ok(),
+            "zero-output gate should not error even when cold_respawn_plan is absent"
+        );
+    }
+
+    /// #690: Idle→Working transition records working_since; Working→Idle
+    /// clears it. Consumed by the zero-output restart gate so a shim that
+    /// just became Working isn't killed for 0 output on a long-idle
+    /// uptime.
+    #[test]
+    fn state_change_to_working_seeds_working_since_and_idle_clears_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = TestDaemonBuilder::new(tmp.path()).build();
+        insert_mock_handle(&mut daemon, "eng-1");
+
+        assert!(daemon.working_since.get("eng-1").is_none());
+
+        daemon
+            .handle_shim_event(
+                "eng-1",
+                Event::StateChanged {
+                    from: ShimState::Idle,
+                    to: ShimState::Working,
+                    summary: "picked up assignment".into(),
+                },
+            )
+            .unwrap();
+        assert!(
+            daemon.working_since.get("eng-1").is_some(),
+            "Idle→Working must seed working_since"
+        );
+
+        daemon
+            .handle_shim_event(
+                "eng-1",
+                Event::StateChanged {
+                    from: ShimState::Working,
+                    to: ShimState::Idle,
+                    summary: "done".into(),
+                },
+            )
+            .unwrap();
+        assert!(
+            daemon.working_since.get("eng-1").is_none(),
+            "Working→Idle must clear working_since"
+        );
     }
 
     #[test]

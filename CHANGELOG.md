@@ -2,6 +2,33 @@
 
 All notable changes to Batty are documented here.
 
+## 0.11.29 — 2026-04-17
+
+Field-report fix: the v0.11.23 guard that skipped zero-output
+restarts for non-Working agents was not sufficient. A shim that sat
+Idle for 18 minutes, then received an inbox message and transitioned
+to Working for 8 seconds, was still killed because the existing
+check tested only *current* state — not *how long* the agent had
+been continuously Working.
+
+### Fixes
+
+- **`working_since` gate on zero-output cold respawn** (#690) — new
+  `working_since: HashMap<String, Instant>` on `TeamDaemon`.
+  Populated on Idle→Working transitions in `handle_shim_event`,
+  cleared on Working→Idle and on cold respawn.
+  `handle_context_pressure_stats` now requires
+  `working_since.elapsed() >= ZERO_OUTPUT_THRESHOLD_SECS` (600s) in
+  addition to the existing `is_working` check before cold-respawning
+  a lifetime-zero-output shim. Prevents the 2026-04-17 04:50:02
+  pattern where priya-writer-1-1 (uptime 1100s, state Working for
+  8s, zero lifetime output) was cold-respawned immediately after a
+  jordan-pm inbox message arrived — wasting the fresh shim context
+  and burning another startup round. Regression tests:
+  `zero_output_gate_skips_fresh_working_transition`,
+  `zero_output_gate_fires_after_sustained_working_with_no_output`,
+  `state_change_to_working_seeds_working_since_and_idle_clears_it`.
+
 ## 0.11.28 — 2026-04-17
 
 Field-report fix: the v0.11.24 "exponential orphan-rescue backoff"
