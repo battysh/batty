@@ -2,6 +2,39 @@
 
 All notable changes to Batty are documented here.
 
+## 0.11.43 — 2026-04-17
+
+Field-report fix: in batty-marketing, kai-devrel-1-1 drafted #528
+(PILLAR A T+24h check-in template) and moved it to review at
+~10:33 UTC for jordan-pm's audit. The very next reconciliation pass
+at 10:35:16 UTC saw `status=review`, `review_owner=None`,
+`actively_tracked` no longer contained #528 (the same pass had just
+cleared kai's `active_tasks` entry with reason "task entered
+review"), and bounced #528 back to todo. Jordan never got to audit —
+by the time the pass fired, the review was already dismantled. This
+was the second time in 12 minutes for #528 alone (also at 10:23:48),
+and the same pattern has recurred 28 times across the current
+daemon log, burning engineer redraft cycles on #498, #499, #504,
+#506, #513, #521, #523, #525, #526, #528, #529, #537, #553, etc.
+
+### Fixes
+
+- **Orphan-review rescue now respects a 10-minute grace window
+  before bouncing a fresh review** (#704) — `reconcile_active_tasks`
+  in `src/team/daemon/automation.rs` now skips review-state rescue
+  when the task file's mtime is within `REVIEW_RESCUE_GRACE_SECS`
+  (600 s). Kanban-md edits the task file on every transition, so
+  mtime is a reliable proxy for "last state change" — a task that
+  just moved into review has mtime within seconds and should not be
+  bounced until the manager/architect has had time to assign
+  themselves as `review_owner`. Stale reviews (file untouched for
+  longer than the grace window) continue to rescue exactly as
+  before. Regression tests:
+  `orphan_review_rescue_skips_freshly_transitioned_reviews` covers
+  the #528 shape, and `orphan_review_rescue_fires_on_stale_reviews`
+  back-dates mtime by 1 hour to prove the rescue still fires for
+  genuinely stale reviews.
+
 ## 0.11.42 — 2026-04-17
 
 Field-report fix: in the batty-marketing observation window a task

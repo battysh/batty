@@ -98,6 +98,16 @@ fn claim_time_held_secs(task: &crate::task::Task, now: DateTime<Utc>) -> Option<
         })
 }
 
+/// Seconds since a task file was last modified. Used as a proxy for
+/// "how long since the task's last state transition" — kanban-md edits
+/// the file on every transition, so mtime tracks the freshness of the
+/// current status. Returns `None` if the file is unreadable (treat as
+/// "unknown age" = not recently touched).
+fn task_file_age_secs(source_path: &std::path::Path) -> Option<u64> {
+    let modified = std::fs::metadata(source_path).ok()?.modified().ok()?;
+    modified.elapsed().ok().map(|d| d.as_secs())
+}
+
 fn current_review_task<'a>(
     tasks_by_id: &HashMap<u32, &'a crate::task::Task>,
     task_id: u32,
@@ -977,6 +987,27 @@ impl TeamDaemon {
                 && task.review_owner.is_none()
                 && !actively_tracked.contains(&task.id)
             {
+                // #704: grace period before bouncing a fresh review back to
+                // todo. Without this, the sequence was: engineer completes
+                // draft → moves task to review → same reconciliation pass
+                // clears the engineer's active_task (status=review) → the
+                // loop below sees no review_owner (manager hasn't picked it
+                // up yet) and bounces it. Observed batty-marketing
+                // 2026-04-17 10:35:16 UTC on task #528: kai drafted in ~3m,
+                // moved to review, orphan-rescue bounced it to todo before
+                // jordan-pm had a chance to audit. Same pattern hit #528 at
+                // 10:23:48, #526 at 08:49:12, #553 at 09:17:21, #525 at
+                // 06:14:37 — 28 events total in one daemon log. Use the
+                // task file's mtime as a proxy for "last state change":
+                // kanban-md edits the file on every transition, so a fresh
+                // review has mtime within seconds. Skip rescue until mtime
+                // is older than REVIEW_RESCUE_GRACE_SECS.
+                const REVIEW_RESCUE_GRACE_SECS: u64 = 600;
+                if task_file_age_secs(&task.source_path)
+                    .is_some_and(|age| age < REVIEW_RESCUE_GRACE_SECS)
+                {
+                    continue;
+                }
                 // #698: preserve engineer-set block metadata across rescue.
                 // Without this, the pair of `transition_task` calls below
                 // clears `blocked` / `block_reason` / `blocked_on` (via
