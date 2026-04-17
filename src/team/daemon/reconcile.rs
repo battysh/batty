@@ -244,6 +244,7 @@ impl TeamDaemon {
         // Phase 5: Clean up daemon state maps
         self.watchers.remove(name);
         self.states.remove(name);
+        self.working_since.remove(name);
         self.idle_started_at.remove(name);
         self.active_tasks.remove(name);
         self.retry_counts.remove(name);

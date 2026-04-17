@@ -330,6 +330,13 @@ pub struct TeamDaemon {
     pub(super) pending_delivery_queue: HashMap<String, Vec<PendingMessage>>,
     /// Per-agent shim handles (only populated when `use_shim` is true).
     pub(super) shim_handles: HashMap<String, agent_handle::AgentHandle>,
+    /// #690: When each member most recently transitioned Idle→Working.
+    /// Cleared when they transition back to Idle. Consulted by the
+    /// zero-output restart check so an agent that JUST became Working
+    /// (e.g. an inbox message arrived 8s before the poll tick) is not
+    /// killed for lifetime-zero-output on a shim that has been Idle
+    /// for the preceding 18 minutes.
+    pub(super) working_since: HashMap<String, Instant>,
     /// When the last shim health check (Ping) was sent.
     pub(super) last_shim_health_check: Instant,
     /// Serial daemon-owned merge queue for auto-merge execution.
@@ -683,6 +690,7 @@ impl TeamDaemon {
             zero_diff_completion_counts: HashMap::new(),
             pending_delivery_queue: HashMap::new(),
             shim_handles: HashMap::new(),
+            working_since: HashMap::new(),
             last_shim_health_check: Instant::now(),
             merge_queue: MergeQueue::default(),
             // Start far enough in the past to trigger an immediate check at startup.
