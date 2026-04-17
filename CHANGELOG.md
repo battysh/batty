@@ -2,6 +2,27 @@
 
 All notable changes to Batty are documented here.
 
+## 0.11.21 — 2026-04-17
+
+Fourth-round field-report fix: preserve valid in-progress claims across
+daemon restarts.
+
+### Fixes
+
+- **Auto-doctor re-attaches valid claims after hot-reload** (#683) — on
+  daemon restart (or any hot-reload) `active_tasks` is cleared, so every
+  in-progress task momentarily looks "orphaned" to the auto-doctor. The
+  previous behavior was to reset the claim and bounce the task back to
+  `todo`, which immediately re-dispatched it to another engineer on the
+  next tick — wasting the original engineer's context and, in the
+  observed `batty_marketing` cascade, escalating alex-dev-1-1 to the
+  1M-token context tier. Now when the claim is held by a valid engineer
+  role, the daemon re-attaches the task to that engineer's
+  `active_tasks` slot instead of resetting. Unknown-engineer claims
+  still reset to todo as before. New auto-doctor action type
+  `orphaned_in_progress_reattached`; tests in
+  `src/team/daemon/health/auto_doctor.rs::tests`.
+
 ## 0.11.20 — 2026-04-17
 
 Third-round field-report fix: stop wrong-role dispatch from ballooning

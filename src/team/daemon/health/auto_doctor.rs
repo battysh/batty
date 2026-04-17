@@ -59,6 +59,30 @@ impl TeamDaemon {
                 continue;
             }
 
+            // #683: after a hot-reload, `active_tasks` is cleared so the
+            // board becomes the source of truth. If a task is still
+            // in-progress and claimed by a valid engineer, trust that
+            // claim and re-attach rather than resetting to todo. Resetting
+            // used to drop the task back into the dispatch pool and cause
+            // immediate misroutes to peers on the next tick — wasting
+            // engineer context on a task that was intentionally parked.
+            if is_engineer && self.active_task_id(engineer).is_none() {
+                self.active_tasks
+                    .insert(engineer.to_string(), task.id);
+                let details = format!(
+                    "re-attached in-progress task #{} to {} from board state (post hot-reload)",
+                    task.id, engineer
+                );
+                self.log_auto_doctor_action(
+                    "orphaned_in_progress_reattached",
+                    Some(task.id),
+                    Some(engineer),
+                    details,
+                    &mut actions,
+                );
+                continue;
+            }
+
             let details = if is_engineer {
                 format!(
                     "reset orphaned in-progress task #{}, daemon active assignment for {} was {:?}",
@@ -375,9 +399,9 @@ mod tests {
     }
 
     #[test]
-    fn orphaned_task_gets_reset_to_todo() {
+    fn orphaned_task_claimed_by_valid_engineer_reattaches() {
         let tmp = tempfile::tempdir().unwrap();
-        let repo = init_git_repo(&tmp, "auto_doctor_orphaned");
+        let repo = init_git_repo(&tmp, "auto_doctor_reattach");
         let mut daemon = auto_doctor_daemon(&repo, false);
         write_owned_task_file(&repo, 17, "orphaned", "in-progress", "eng-1");
 
@@ -386,13 +410,36 @@ mod tests {
 
         let tasks = crate::task::load_tasks_from_dir(&daemon.board_dir().join("tasks")).unwrap();
         let task = tasks.into_iter().find(|task| task.id == 17).unwrap();
+        assert_eq!(task.status, "in-progress");
+        assert_eq!(task.claimed_by.as_deref(), Some("eng-1"));
+        assert_eq!(daemon.active_tasks.get("eng-1"), Some(&17));
+        assert!(
+            actions
+                .iter()
+                .any(|action| action.action_type == "orphaned_in_progress_reattached"
+                    && action.task_id == Some(17))
+        );
+    }
+
+    #[test]
+    fn orphaned_task_claimed_by_unknown_engineer_still_resets() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "auto_doctor_unknown_claim");
+        let mut daemon = auto_doctor_daemon(&repo, false);
+        write_owned_task_file(&repo, 19, "ghost-claim", "in-progress", "ghost-user");
+
+        set_cycle_ready(&mut daemon);
+        let actions = daemon.run_auto_doctor().unwrap();
+
+        let tasks = crate::task::load_tasks_from_dir(&daemon.board_dir().join("tasks")).unwrap();
+        let task = tasks.into_iter().find(|task| task.id == 19).unwrap();
         assert_eq!(task.status, "todo");
         assert_eq!(task.claimed_by, None);
         assert!(
             actions
                 .iter()
                 .any(|action| action.action_type == "orphaned_in_progress_reset"
-                    && action.task_id == Some(17))
+                    && action.task_id == Some(19))
         );
     }
 
@@ -578,7 +625,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let repo = init_git_repo(&tmp, "auto_doctor_run");
         let mut daemon = auto_doctor_daemon(&repo, false);
-        write_owned_task_file(&repo, 62, "run-task", "in-progress", "eng-1");
+        write_owned_task_file(&repo, 62, "run-task", "in-progress", "ghost-user");
         set_cycle_ready(&mut daemon);
 
         let actions = daemon.run_auto_doctor().unwrap();
