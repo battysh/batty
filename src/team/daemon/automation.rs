@@ -831,12 +831,31 @@ impl TeamDaemon {
                         Some((engineer.clone(), task_id, "task entered blocked", true))
                     }
                     None => Some((engineer.clone(), task_id, "task no longer exists", false)),
-                    Some(task) if task.claimed_by.as_deref() != Some(engineer.as_str()) => Some((
-                        engineer.clone(),
-                        task_id,
-                        "task no longer claimed by this engineer",
-                        false,
-                    )),
+                    // #698: resolve role-name claims ("alex-dev") to the instance-name
+                    // that active_tasks is keyed on ("alex-dev-1-1") before comparing.
+                    // Without this, auto-doctor's post-hot-reload re-attachment writes
+                    // the instance name, then reconciliation falsely flags it as stale
+                    // because the board still records the role name, cycling every tick.
+                    Some(task)
+                        if {
+                            let claim = task.claimed_by.as_deref();
+                            let resolved = claim.and_then(|c| {
+                                super::health::resolve_engineer_claim(
+                                    &self.config.members,
+                                    c,
+                                )
+                            });
+                            claim != Some(engineer.as_str())
+                                && resolved != Some(engineer.as_str())
+                        } =>
+                    {
+                        Some((
+                            engineer.clone(),
+                            task_id,
+                            "task no longer claimed by this engineer",
+                            false,
+                        ))
+                    }
                     // Clear if the task has been in todo/backlog for more than 60 seconds.
                     // This gives dispatch time to transition it to in-progress before
                     // reconciliation clears it. Without the delay, dispatch assigns a task,
@@ -4014,6 +4033,94 @@ thread 'tmux::tests::split_window_horizontal_creates_new_pane' panicked at src/t
 
         daemon.reconcile_active_tasks().unwrap();
         assert_eq!(daemon.active_tasks.get("eng-1"), Some(&10));
+    }
+
+    /// #698: regression — when the board records a role-name claim
+    /// (e.g. `eng`) but active_tasks is keyed on the instance name
+    /// (`eng-1-1`), reconciliation must resolve the role claim to its
+    /// sole engineer instance before flagging the entry as stale.
+    /// Pre-fix this loop fired every poll and cycled against the
+    /// auto-doctor post-hot-reload re-attachment at auto_doctor.rs:79.
+    #[test]
+    fn reconcile_active_tasks_resolves_role_name_claim_to_instance() {
+        let tmp = tempfile::tempdir().unwrap();
+        let engineer = MemberInstance {
+            name: "eng-1-1".to_string(),
+            role_name: "eng".to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("codex".to_string()),
+            prompt: None,
+            reports_to: None,
+            use_worktrees: false,
+            ..Default::default()
+        };
+        let mut daemon = make_test_daemon(tmp.path(), vec![engineer]);
+        daemon.active_tasks.insert("eng-1-1".to_string(), 10);
+
+        write_board_task_file(
+            tmp.path(),
+            10,
+            "role-name-claim",
+            "in-progress",
+            Some("eng"),
+            &[],
+            None,
+        );
+
+        daemon.reconcile_active_tasks().unwrap();
+        assert_eq!(
+            daemon.active_tasks.get("eng-1-1"),
+            Some(&10),
+            "role-name claim 'eng' must resolve to instance 'eng-1-1' and not flag stale"
+        );
+    }
+
+    /// #698: guard — resolution must not be used when the role has
+    /// multiple engineer instances, because it becomes ambiguous.
+    /// In that case the comparison correctly flags stale since we
+    /// cannot prove the claim belongs to this specific instance.
+    #[test]
+    fn reconcile_active_tasks_flags_stale_when_role_is_ambiguous() {
+        let tmp = tempfile::tempdir().unwrap();
+        let eng_a = MemberInstance {
+            name: "eng-1-1".to_string(),
+            role_name: "eng".to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("codex".to_string()),
+            prompt: None,
+            reports_to: None,
+            use_worktrees: false,
+            ..Default::default()
+        };
+        let eng_b = MemberInstance {
+            name: "eng-1-2".to_string(),
+            role_name: "eng".to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("codex".to_string()),
+            prompt: None,
+            reports_to: None,
+            use_worktrees: false,
+            ..Default::default()
+        };
+        let mut daemon = make_test_daemon(tmp.path(), vec![eng_a, eng_b]);
+        daemon.active_tasks.insert("eng-1-1".to_string(), 10);
+
+        write_board_task_file(
+            tmp.path(),
+            10,
+            "ambiguous-role-claim",
+            "in-progress",
+            Some("eng"),
+            &[],
+            None,
+        );
+
+        daemon.reconcile_active_tasks().unwrap();
+        assert_eq!(
+            daemon.active_tasks.get("eng-1-1"),
+            None,
+            "ambiguous role claim must not silently match a specific instance"
+        );
     }
 
     #[test]

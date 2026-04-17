@@ -2,6 +2,41 @@
 
 All notable changes to Batty are documented here.
 
+## 0.11.61 — 2026-04-17
+
+Stop the orphan-false-positive reconciliation churn. Before this fix,
+`reconcile_active_tasks` compared the board's `claimed_by` field (which
+engineers often record as the role name, e.g. `alex-dev`) against the
+`active_tasks` key (always the instance name, e.g. `alex-dev-1-1`).
+Whenever the two didn't exactly match, reconciliation fired
+`Reconciled stale active_task: ... task no longer claimed by this
+engineer` and cleared the entry. Auto-doctor's post-hot-reload
+re-attachment (`auto_doctor.rs:79`) then correctly re-inserted the
+instance-keyed entry from the board on the next tick, and the cycle
+repeated every ~65 seconds — visible in `batty-marketing` for tasks
+#592/#570/#597 where the same (engineer, task) pair ping-ponged with
+no new dispatch event in between.
+
+Reconciliation now resolves the role-name claim to its unique engineer
+instance (using the same logic auto-doctor applies) before flagging
+stale. If the role has multiple engineer instances, resolution returns
+`None` and the stale check proceeds as before — preserving the
+previous behavior for ambiguous claims.
+
+### Fixes
+
+- **Reconcile role-name claims to instance names before stale check**
+  (`src/team/daemon/automation.rs`,
+  `src/team/daemon/health/auto_doctor.rs`,
+  `src/team/daemon/health/mod.rs`): expose
+  `resolve_engineer_claim` to the daemon module and apply it inside
+  `reconcile_active_tasks` so role-name claims stop triggering the
+  `task no longer claimed by this engineer` loop. Adds two regression
+  tests — `reconcile_active_tasks_resolves_role_name_claim_to_instance`
+  (single-instance role resolves correctly) and
+  `reconcile_active_tasks_flags_stale_when_role_is_ambiguous`
+  (multi-instance role still flags stale, preserving the old guard).
+
 ## 0.11.60 — 2026-04-17
 
 Stop the hourly dispatch→release cascade on human-parked tasks. When an
