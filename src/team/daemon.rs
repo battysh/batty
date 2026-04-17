@@ -211,6 +211,11 @@ pub struct TeamDaemon {
     pub(super) pipeline_starvation_last_fired: Option<Instant>,
     pub(super) planning_cycle_last_fired: Option<Instant>,
     pub(super) planning_cycle_active: bool,
+    /// #681: Consecutive planning cycles that produced zero new tasks.
+    /// Used to exponentially back off the architect planning cadence so
+    /// that a stuck board (everything blocked, no dispatchable work) does
+    /// not burn orchestrator tokens with a ping storm of empty cycles.
+    pub(super) planning_cycle_consecutive_empty: u32,
     pub(super) retro_generated: bool,
     pub(super) failed_deliveries: Vec<FailedDelivery>,
     pub(super) review_first_seen: HashMap<u32, u64>,
@@ -589,6 +594,7 @@ impl TeamDaemon {
             pipeline_starvation_last_fired: None,
             planning_cycle_last_fired: None,
             planning_cycle_active: false,
+            planning_cycle_consecutive_empty: 0,
             retro_generated: false,
             failed_deliveries: Vec::new(),
             review_first_seen: HashMap::new(),

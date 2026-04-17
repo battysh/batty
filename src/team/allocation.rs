@@ -564,7 +564,7 @@ fn select_dispatch_task(tasks: &[Task], task_id: Option<u32>) -> Option<&Task> {
             task.depends_on.iter().all(|dep_id| {
                 task_status_by_id
                     .get(dep_id)
-                    .is_none_or(|status| status == "done")
+                    .is_none_or(|status| matches!(status.as_str(), "done" | "archived"))
             })
         })
         .collect();

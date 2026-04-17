@@ -2,6 +2,34 @@
 
 All notable changes to Batty are documented here.
 
+## 0.11.19 — 2026-04-17
+
+Second round of field-report fixes from the `batty_marketing` production
+run. Focus: stop burning orchestrator tokens on stuck boards, and
+unblock dependents of archived tasks.
+
+### Fixes
+
+- **Planning-cycle empty-response backoff** (#681) — when the architect
+  returns zero new tasks from a planning cycle (typical on a fully
+  blocked board where every task has `blocked: true`), the effective
+  cooldown now grows linearly: 1x → 6x of
+  `workflow_policy.planning_cycle_cooldown_secs`. A 5-minute base
+  settles to a 30-minute check on a stuck board, then snaps back to 1x
+  as soon as a cycle produces any tasks. Prevents the observed
+  "planning ping storm" in `batty_marketing` where 12+ consecutive
+  empty cycles each burned a multi-hundred-thousand-token architect
+  call. New field `planning_cycle_consecutive_empty: u32` on
+  `TeamDaemon`; logic in `tact_check` + `apply_planning_cycle_response`.
+- **Archived deps unblock dependents** (batty side of #680) — dispatch
+  and allocation dep-resolution now treat `status: archived` as
+  equivalent to `status: done`. Previously, an archived dependency
+  (common after long-running projects wind down and tasks are
+  archived in-place rather than moved) left downstream tasks stuck
+  in the dispatch filter forever. New `dep_status_satisfied(status)`
+  helper in `src/team/dispatch/queue.rs`; parallel fix in
+  `src/team/allocation.rs`.
+
 ## 0.11.18 — 2026-04-16
 
 Field-report fixes surfaced by a real `batty_marketing` production run.
