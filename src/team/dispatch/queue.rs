@@ -72,7 +72,7 @@ fn split_acyclic_blocking_ids(
     Ok((safe, rejected))
 }
 
-/// Parse an explicit `Owner: <role>` line from a task body, returning the
+/// Parse an explicit `Owner: <role>` token from a task body, returning the
 /// first role-name-looking token (lowercase letters + hyphens).
 ///
 /// #695: architects routinely author tasks whose frontmatter `tags:` are
@@ -83,33 +83,56 @@ fn split_acyclic_blocking_ids(
 /// scoring tiebreakers — observed: task #553 ("Owner: priya-writer drafts")
 /// was dispatched to sam-designer-1-1 in batty-marketing.
 ///
+/// #699: Maya-style round headers wrap the owner declaration inside a
+/// prose preamble, e.g. `**Round-8 task from maya-lead. Owner: alex-dev.
+/// Skeptic-defuser …**`. The line doesn't START with `Owner:`, so the
+/// previous line-prefix parser missed these and the tasks got round-
+/// robined to the wrong role (observed 2026-04-17: #518/#524 tagged
+/// `Owner: alex-dev` dispatched to sam-designer and kai-devrel). Search
+/// for `Owner:` anywhere in the line, but only accept matches at a word
+/// boundary so `CoOwner:` or `DataOwner:` can't masquerade as the hint.
+///
 /// The returned role-name is merged into the task's tag set for the
 /// duration of one ranking call (see `rank_dispatch_engineers`), which
 /// triggers the #692 tag-match bypass so the matching engineer wins.
 fn parse_body_owner_role(body: &str) -> Option<String> {
     for line in body.lines() {
-        let trimmed = line
-            .trim()
-            .trim_start_matches('-')
-            .trim()
-            .trim_start_matches('*')
-            .trim();
-        let Some(rest) = trimmed.strip_prefix("Owner:") else {
-            continue;
-        };
-        let rest = rest.trim().trim_start_matches('*').trim();
-        let role: String = rest
-            .chars()
-            .take_while(|c| c.is_ascii_lowercase() || *c == '-')
-            .collect();
-        if role.is_empty() || !role.contains('-') {
-            // Require at least one hyphen to match the repo's role_name
-            // shape (`priya-writer`, `kai-devrel`, `sam-designer`,
-            // `alex-dev`). Avoids false-positive extraction when the
-            // body writes something like "Owner: TBD".
-            continue;
+        let mut search_from = 0;
+        while let Some(rel_idx) = line[search_from..].find("Owner:") {
+            let idx = search_from + rel_idx;
+            search_from = idx + "Owner:".len();
+            // Require a word boundary before "Owner:" so we don't match
+            // in the middle of a longer token. Start-of-line, whitespace,
+            // list markers, and markdown emphasis all qualify.
+            let boundary_ok = idx == 0
+                || line[..idx]
+                    .chars()
+                    .next_back()
+                    .map(|c| {
+                        c.is_whitespace()
+                            || matches!(c, '-' | '*' | '_' | '(' | '[' | '.' | ';' | ':' | ',')
+                    })
+                    .unwrap_or(true);
+            if !boundary_ok {
+                continue;
+            }
+            let rest = line[search_from..]
+                .trim_start()
+                .trim_start_matches('*')
+                .trim_start();
+            let role: String = rest
+                .chars()
+                .take_while(|c| c.is_ascii_lowercase() || *c == '-')
+                .collect();
+            if role.is_empty() || !role.contains('-') {
+                // Require at least one hyphen to match the repo's role_name
+                // shape (`priya-writer`, `kai-devrel`, `sam-designer`,
+                // `alex-dev`). Avoids false-positive extraction when the
+                // body writes something like "Owner: TBD".
+                continue;
+            }
+            return Some(role);
         }
-        return Some(role);
     }
     None
 }
@@ -2331,6 +2354,35 @@ mod tests {
         assert_eq!(parse_body_owner_role("Owner: TBD"), None);
         assert_eq!(parse_body_owner_role("- Owner: tbd\n"), None);
         assert_eq!(parse_body_owner_role("Body with no owner line."), None);
+    }
+
+    #[test]
+    fn parse_body_owner_role_finds_owner_inside_prose_preamble() {
+        // #699 regression: Maya-style round headers wrap the Owner declaration
+        // inside a prose bold block, e.g. batty-marketing task #518 body
+        // begins `**Round-8 task from maya-lead. Owner: alex-dev. Skeptic-…`.
+        // The old parser required `Owner:` at line start (after trimming `-`
+        // / `*`) and missed these, so the tasks were round-robined to the
+        // wrong role. The new parser searches within the line at word
+        // boundaries.
+        assert_eq!(
+            parse_body_owner_role(
+                "**Round-8 task from maya-lead. Owner: alex-dev. Skeptic-defuser artifact for Article A.**"
+            ),
+            Some("alex-dev".to_string())
+        );
+        assert_eq!(
+            parse_body_owner_role(
+                "**Round-11 task from maya-lead. Owner: alex-dev. Daily metrics snapshot.**"
+            ),
+            Some("alex-dev".to_string())
+        );
+        // Guard against word-boundary bypass: `CoOwner: rogue-role` must not
+        // be picked up in place of a later legitimate `Owner: real-role`.
+        assert_eq!(
+            parse_body_owner_role("CoOwner: rogue-role. Owner: real-role handles it."),
+            Some("real-role".to_string())
+        );
     }
 
     #[test]
