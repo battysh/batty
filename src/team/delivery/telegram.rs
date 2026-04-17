@@ -279,6 +279,7 @@ mod tests {
             subsystem_error_counts: HashMap::new(),
             auto_merge_overrides: HashMap::new(),
             recent_dispatches: HashMap::new(),
+            recently_rescued_tasks: HashMap::new(),
             recent_escalations: HashMap::new(),
             main_smoke_state: None,
             telemetry_db: None,

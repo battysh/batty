@@ -253,6 +253,7 @@ fn available_dispatch_tasks(
     queued_task_ids: &HashSet<u32>,
     excluded_tags: &[String],
     non_engineer_assignees: &HashSet<String>,
+    rescued_task_ids: &HashSet<u32>,
 ) -> Result<Vec<crate::task::Task>> {
     let tasks = crate::task::load_tasks_from_dir(&board_dir.join("tasks"))?;
     let task_status_by_id: HashMap<u32, String> = tasks
@@ -269,6 +270,12 @@ fn available_dispatch_tasks(
         .filter(|task| !task.is_schedule_blocked())
         .filter(|task| !queued_task_ids.contains(&task.id))
         .filter(|task| !task_has_excluded_tag(task, excluded_tags))
+        // #684: tasks orphan-rescued back to todo within the cooldown
+        // window are held off dispatch so the releasing engineer or
+        // manager can reclaim/re-route before an auto-redispatch to a
+        // peer (which is almost always the wrong answer when the
+        // original claimer parked intentionally).
+        .filter(|task| !rescued_task_ids.contains(&task.id))
         // #682: tasks with `assignee:` pointing at a non-engineer (manager,
         // architect, writer, …) are messages for that member's inbox, not
         // dispatch candidates. Leaving them in the pool causes repeated
@@ -410,9 +417,24 @@ impl TeamDaemon {
             queued_task_ids,
             &self.config.team_config.board.dispatch_excluded_tags,
             &self.non_engineer_member_names(),
+            &self.rescued_task_ids(),
         )?
         .into_iter()
         .next())
+    }
+
+    /// #684: task IDs currently within the orphan-rescue cooldown
+    /// window. Dispatch filters these out so a task the releasing
+    /// engineer parked doesn't immediately bounce to a peer.
+    pub(super) fn rescued_task_ids(&self) -> HashSet<u32> {
+        let cooldown = Duration::from_secs(
+            self.config.team_config.board.orphan_rescue_cooldown_secs,
+        );
+        self.recently_rescued_tasks
+            .iter()
+            .filter(|(_, rescued_at)| rescued_at.elapsed() < cooldown)
+            .map(|(task_id, _)| *task_id)
+            .collect()
     }
 
     /// Returns names of configured members whose role is NOT `Engineer`.
@@ -447,6 +469,18 @@ impl TeamDaemon {
         self.recent_dispatches
             .retain(|_, dispatched_at| dispatched_at.elapsed() < dedup_window);
 
+        // #684: expire stale orphan-rescue cooldown entries.
+        let rescue_cooldown = Duration::from_secs(
+            self.config.team_config.board.orphan_rescue_cooldown_secs,
+        );
+        self.recently_rescued_tasks
+            .retain(|_, rescued_at| rescued_at.elapsed() < rescue_cooldown);
+        let rescued_task_ids: HashSet<u32> = self
+            .recently_rescued_tasks
+            .keys()
+            .copied()
+            .collect();
+
         let mut queued_task_ids: HashSet<u32> = self
             .dispatch_queue
             .iter()
@@ -480,6 +514,7 @@ impl TeamDaemon {
                 &unavailable_task_ids,
                 &self.config.team_config.board.dispatch_excluded_tags,
                 &non_engineer_names,
+                &rescued_task_ids,
             )?;
             if available_tasks.is_empty() {
                 break;
@@ -1065,6 +1100,7 @@ impl TeamDaemon {
 mod tests {
     use std::collections::{HashMap, HashSet};
     use std::path::Path;
+    use std::time::Instant;
 
     use super::{OverlapConflict, find_overlapping_tasks, predicted_files};
     use crate::team::standup::MemberState;
@@ -1808,6 +1844,69 @@ mod tests {
             daemon.dispatch_queue.is_empty(),
             "task must remain undispatched while named engineer is unavailable"
         );
+    }
+
+    #[test]
+    fn enqueue_dispatch_candidates_skips_recently_orphan_rescued_task() {
+        // #684: after the orphan-rescue path moves an in-progress task back
+        // to todo (e.g. the claimer released/parked), dispatch must wait
+        // for the cooldown to elapse before re-dispatching. Previously the
+        // task bounced straight to a peer within the same tick.
+        let tmp = tempfile::tempdir().unwrap();
+        write_task_with_body(
+            tmp.path(),
+            70,
+            "rescued-task",
+            "todo",
+            None,
+            "Touch src/team/telemetry_db.rs only.",
+        );
+
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![
+                manager_member("mgr", None),
+                engineer_member("eng-1", Some("mgr"), false),
+            ])
+            .states(HashMap::from([("eng-1".to_string(), MemberState::Idle)]))
+            .build();
+        daemon.recently_rescued_tasks.insert(70, Instant::now());
+
+        daemon.enqueue_dispatch_candidates().unwrap();
+
+        assert!(
+            daemon.dispatch_queue.is_empty(),
+            "task under orphan-rescue cooldown must stay off the dispatch queue"
+        );
+    }
+
+    #[test]
+    fn enqueue_dispatch_candidates_includes_task_after_orphan_rescue_cooldown_expires() {
+        // #684: once the cooldown passes the task becomes eligible again.
+        let tmp = tempfile::tempdir().unwrap();
+        write_task_with_body(
+            tmp.path(),
+            71,
+            "expired-rescue",
+            "todo",
+            None,
+            "Touch src/team/telemetry_db.rs only.",
+        );
+
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![
+                manager_member("mgr", None),
+                engineer_member("eng-1", Some("mgr"), false),
+            ])
+            .states(HashMap::from([("eng-1".to_string(), MemberState::Idle)]))
+            .build();
+        // Force cooldown to 0 so the task is immediately eligible.
+        daemon.config.team_config.board.orphan_rescue_cooldown_secs = 0;
+        daemon.recently_rescued_tasks.insert(71, Instant::now());
+
+        daemon.enqueue_dispatch_candidates().unwrap();
+
+        assert_eq!(daemon.dispatch_queue.len(), 1);
+        assert_eq!(daemon.dispatch_queue[0].task_id, 71);
     }
 
     #[test]
