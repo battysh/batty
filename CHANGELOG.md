@@ -2,6 +2,36 @@
 
 All notable changes to Batty are documented here.
 
+## 0.11.49 — 2026-04-17
+
+Field-report fix: in batty-marketing at 12:42:49 UTC, a planning
+cycle fired only 572s after the previous empty response (12:33:17)
+despite the v0.11.25 (#687) backoff logic calling for a 900s
+cooldown at `consecutive_empty=2` (3× base). Root cause: the
+daemon was restarted at 12:34:03 by a forced kill (`batty stop`
+timeout — "daemon did not stop gracefully; forcing shutdown"), so
+the clean-shutdown `persist_runtime_state(true)` path never ran;
+the last persisted snapshot was a 5-min heartbeat from before the
+12:33:17 empty-response in-memory update. On resume, the restored
+`consecutive_empty` was stale (1 instead of 2), shrinking the
+effective cooldown from 900s → 600s and letting a fresh planning
+cycle fire inside the real backoff window.
+
+### Fixes
+
+- **Empty planning response now persists immediately** (#710) —
+  `handle_planning_response()` in `src/team/daemon/automation.rs`
+  calls `persist_runtime_state(false)` right after it bumps
+  `planning_cycle_consecutive_empty` / resets it to zero and
+  re-anchors `planning_cycle_last_fired`. Mirrors the existing
+  persist-after-fire call at the trigger site (#687 followup), so
+  both sides of the planning-cycle lifecycle survive SIGKILL,
+  panic, OOM, or an abrupt `batty stop` timeout. Regression test:
+  `empty_planning_response_persists_consecutive_empty_increment`
+  verifies the persisted state file carries the updated
+  `consecutive_empty` and `last_fired_elapsed_secs` after an empty
+  response.
+
 ## 0.11.48 — 2026-04-17
 
 Field-report fix: in batty-marketing, jordan-pm's own note on task
