@@ -1045,11 +1045,97 @@ impl TeamDaemon {
         }
 
         // Orphaned in-progress rescue: tasks in "in-progress" with no claimed_by.
+        let rescue_base_cooldown = Duration::from_secs(
+            self.config.team_config.board.orphan_rescue_cooldown_secs,
+        );
         for task in &board_tasks {
             if task.status == "in-progress"
                 && task.claimed_by.is_none()
                 && !actively_tracked.contains(&task.id)
             {
+                // #714: if this task was already rescued within the cascade
+                // window, it's cycling through engineers who each claim and
+                // release in seconds. Observed batty-marketing 2026-04-16
+                // 23:09: #523 bounced alex-dev → kai-devrel → sam-designer →
+                // priya-writer in 4 minutes, producing 10 rescues in one day;
+                // #572 bounced sam-designer → alex-dev in 6 minutes on
+                // 2026-04-17. The 300s task-level cooldown alone doesn't hold
+                // because (a) per-engineer release exclusion (#697) lets the
+                // task hop to a different engineer once the task-level gate
+                // opens, and (b) races between `record_task_rescue` and
+                // already-queued dispatch entries can slip one dispatch past
+                // the gate before the cooldown is observed. Escalate to
+                // `blocked` on the 2nd rescue so the manager triages the spec
+                // (likely wrong assignee/role, ambiguous ownership, or a task
+                // already mid-gate-pass that engineers keep refusing) before
+                // any further dispatch. Tasks filed `blocked` are excluded
+                // from `available_dispatch_tasks`, halting the cascade.
+                let is_repeat_in_cascade = self
+                    .recently_rescued_tasks
+                    .get(&task.id)
+                    .is_some_and(|record| record.in_cascade_window(rescue_base_cooldown));
+                if is_repeat_in_cascade {
+                    let block_reason = format!(
+                        "orphan-rescue cascade: task was claimed and released repeatedly by different engineers \
+                         within the cascade window. Likely causes: wrong role/assignee, ambiguous ownership, \
+                         or the task body already describes completed/parked work. Manager triage required \
+                         before returning to todo."
+                    );
+                    warn!(
+                        task_id = task.id,
+                        "orphan-rescue cascade detected — moving task #{} to blocked for manager triage",
+                        task.id
+                    );
+                    match crate::team::task_cmd::block_task_with_reason(
+                        &board_dir,
+                        task.id,
+                        &block_reason,
+                    ) {
+                        Ok(()) => {
+                            if let Some(manager) = first_manager_name(&self.config.members) {
+                                let body = format!(
+                                    "Task #{} has been orphan-rescued repeatedly — engineers keep claiming it \
+                                     and releasing within seconds. I moved it to `blocked` so dispatch stops \
+                                     re-cycling it. Please review the task body and either (a) correct the \
+                                     assignee/role if it's been routed to the wrong discipline, (b) split or \
+                                     clarify the spec if engineers are refusing because ownership is ambiguous, \
+                                     or (c) transition it to done if the body already documents gate-pass or \
+                                     parked state. Then unblock it (remove `blocked`/`blocked_on`) or move \
+                                     directly to the correct terminal status.",
+                                    task.id
+                                );
+                                let inbox_root = inbox::inboxes_root(&self.config.project_root);
+                                let sender = self.automation_sender_for(&manager);
+                                let message =
+                                    inbox::InboxMessage::new_send(&sender, &manager, &body);
+                                match inbox::deliver_to_inbox(&inbox_root, &message) {
+                                    Ok(_) => {
+                                        self.record_message_routed(&sender, &manager);
+                                    }
+                                    Err(error) => {
+                                        warn!(
+                                            error = %error,
+                                            manager,
+                                            task_id = task.id,
+                                            "failed to notify manager of orphan-rescue cascade escalation"
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            warn!(
+                                task_id = task.id,
+                                error = %error,
+                                "failed to escalate orphan-rescue cascade task to blocked"
+                            );
+                        }
+                    }
+                    // Still record the rescue so the cooldown grows if the
+                    // manager unblocks it and the pattern repeats.
+                    self.record_task_rescue(task.id);
+                    continue;
+                }
                 // #698: same block-preservation logic as review rescue above.
                 let preserve_block = task.blocked.is_some() || task.blocked_on.is_some();
                 warn!(
@@ -4143,6 +4229,124 @@ thread 'tmux::tests::split_window_horizontal_creates_new_pane' panicked at src/t
         // No active tasks — should return immediately
         daemon.reconcile_active_tasks().unwrap();
         assert!(daemon.active_tasks.is_empty());
+    }
+
+    #[test]
+    fn reconcile_active_tasks_escalates_repeat_orphan_rescue_to_blocked() {
+        // #714: when a task is orphan-rescued a 2nd time within the cascade
+        // window, it's cycling through engineers who each release within
+        // seconds. Escalate to `blocked` + notify manager so dispatch stops
+        // auto-redispatching it. Mirrors batty-marketing 2026-04-16 23:09
+        // (#523 bounced 4 engineers in 4 minutes) and 2026-04-17 12:22 (#572
+        // bounced sam-designer → alex-dev in 6 minutes).
+        let tmp = tempfile::tempdir().unwrap();
+        let manager = manager_member("manager", None);
+        let engineer = engineer_member("eng-1", Some("manager"), false);
+        let mut daemon = make_test_daemon(tmp.path(), vec![manager, engineer]);
+
+        write_board_task_file(
+            tmp.path(),
+            42,
+            "cascade-task",
+            "in-progress",
+            None,
+            &[],
+            None,
+        );
+
+        // Seed a recent rescue record for task #42 so this reconcile pass
+        // counts as the 2nd rescue within the cascade window.
+        daemon.recently_rescued_tasks.insert(
+            42,
+            crate::team::daemon::RescueRecord {
+                last_rescued_at: Instant::now(),
+                count: 1,
+            },
+        );
+
+        daemon.reconcile_active_tasks().unwrap();
+
+        let task_path = board_task_path(tmp.path(), 42);
+        let task = crate::task::Task::from_file(&task_path).unwrap();
+        assert_eq!(
+            task.status, "blocked",
+            "repeat orphan-rescue must escalate to blocked, not todo"
+        );
+        assert!(
+            task.blocked.is_some(),
+            "block_reason must be set so the task surfaces in triage"
+        );
+        assert!(
+            task.blocked
+                .as_deref()
+                .unwrap_or("")
+                .contains("orphan-rescue cascade"),
+            "block_reason should name the cascade so manager knows why it escalated (got {:?})",
+            task.blocked
+        );
+
+        let inbox_root = inbox::inboxes_root(tmp.path());
+        let manager_messages = inbox::pending_messages(&inbox_root, "manager").unwrap();
+        assert!(
+            manager_messages
+                .iter()
+                .any(|message| message.body.contains("Task #42")
+                    && message.body.contains("orphan-rescued repeatedly")),
+            "manager must be notified of the cascade escalation (got {} messages)",
+            manager_messages.len()
+        );
+    }
+
+    #[test]
+    fn reconcile_active_tasks_first_orphan_rescue_moves_to_todo() {
+        // #714 regression-guard: the escalation path must only trigger on
+        // repeat rescues — the first rescue still moves the task back to
+        // todo so normal dispatch can pick it up. Without this guard, any
+        // single engineer release would block the task for manager triage,
+        // which is heavier than the actual problem.
+        let tmp = tempfile::tempdir().unwrap();
+        let manager = manager_member("manager", None);
+        let engineer = engineer_member("eng-1", Some("manager"), false);
+        let mut daemon = make_test_daemon(tmp.path(), vec![manager, engineer]);
+
+        write_board_task_file(
+            tmp.path(),
+            99,
+            "fresh-orphan",
+            "in-progress",
+            None,
+            &[],
+            None,
+        );
+
+        // recently_rescued_tasks intentionally empty — this is the first
+        // rescue and should fall through to the normal todo transition.
+        daemon.reconcile_active_tasks().unwrap();
+
+        let task_path = board_task_path(tmp.path(), 99);
+        let task = crate::task::Task::from_file(&task_path).unwrap();
+        assert_eq!(
+            task.status, "todo",
+            "first orphan-rescue must keep existing behavior (move to todo)"
+        );
+        assert!(
+            task.blocked.is_none(),
+            "first rescue must not set block_reason"
+        );
+
+        let inbox_root = inbox::inboxes_root(tmp.path());
+        let manager_messages = inbox::pending_messages(&inbox_root, "manager").unwrap();
+        assert!(
+            manager_messages
+                .iter()
+                .all(|message| !message.body.contains("orphan-rescued repeatedly")),
+            "manager must not be notified on a single rescue"
+        );
+
+        assert!(
+            daemon.recently_rescued_tasks.contains_key(&99),
+            "first rescue must record cooldown so a repeat escalates correctly"
+        );
     }
 
     #[test]
