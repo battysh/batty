@@ -2210,6 +2210,14 @@ impl TeamDaemon {
                 if created == 0 {
                     self.planning_cycle_consecutive_empty =
                         self.planning_cycle_consecutive_empty.saturating_add(1);
+                    // #688: when a cycle is empty, reset the cooldown anchor to
+                    // "now" so the next cycle is gated on time-since-completion,
+                    // not time-since-fire. Without this a slow (10-min) empty
+                    // cycle exactly hits the 2× cooldown boundary the moment
+                    // it completes and a fresh cycle fires within the same tick.
+                    // Productive cycles (created > 0) leave last_fired alone so
+                    // the architect can keep planning as fast as the pipeline needs.
+                    self.planning_cycle_last_fired = Some(Instant::now());
                 } else {
                     self.planning_cycle_consecutive_empty = 0;
                 }
