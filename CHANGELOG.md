@@ -2,6 +2,32 @@
 
 All notable changes to Batty are documented here.
 
+## 0.11.31 — 2026-04-17
+
+Field-report fix: the v0.11.30 role_name tag seed worked in the
+score-based ranking path, but `explain_routing_for_task` bypassed
+that path whenever telemetry was mixed — a single engineer with
+1–4 completions forced alphabetical fallback for the entire team,
+ignoring tag_overlap entirely. Observed immediately after v0.11.30
+deploy at 05:38:45: task #552 (tagged `kai-devrel`) was still
+dispatched to sam-designer because alex-dev-1-1 had telemetry but
+peers had zero.
+
+### Fixes
+
+- **Explicit tag match bypasses telemetry warmup gate** (#692) —
+  `explain_routing_for_task` now additionally uses score-based
+  ranking when at least one engineer's breakdown has
+  `tag_matches > 0`. A task-tag → engineer-tag match is a hard
+  routing signal and must take precedence over the
+  "needs 5 completions per engineer" warmup requirement.
+  Preserves existing warmup fallback for tasks without any tag
+  match. Regression test:
+  `explicit_tag_match_bypasses_telemetry_warmup_fallback`
+  proves a `kai-devrel`-tagged task routes to kai-devrel-1-1
+  (0 completions) over alex-dev-1-1 (2 completions, alphabetically
+  prior).
+
 ## 0.11.30 — 2026-04-17
 
 Field-report fix: role-specific task tags had no routing effect when
