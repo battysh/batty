@@ -2,6 +2,35 @@
 
 All notable changes to Batty are documented here.
 
+## 0.11.47 — 2026-04-17
+
+Field-report fix: in batty-marketing at 12:27:30 UTC, task #572
+("Card-1 peak-day hero card", tags `[pillar-a, design, thread-a,
+hero, card-1]`) was dispatched to **alex-dev-1-1** (engineer role,
+not designer) instead of **sam-designer-1-1**. alex released it
+within 38 s. #691's role-name seeding works for tasks tagged with
+the literal role_name (`sam-designer`) but natural-language tags
+like `design` still scored zero tag-overlap and fell through to
+alphabetical tiebreaker.
+
+### Fixes
+
+- **Natural-language role tags (`design`, `writing`, `designer`)
+  now route to the role-aligned engineer** (#708) — new
+  `role_name_seed_tags()` helper in `src/team/dispatch/queue.rs`
+  expands each engineer's role_name into seed tokens: the full
+  role_name (`sam-designer`), its hyphen-suffix token
+  (`designer`), and `-er` noun-agent stem/gerund variants
+  (`design`, `designing`). Short stems (<3 chars) skipped to
+  avoid noise. Example expansions: `sam-designer` →
+  `[sam-designer, designer, design, designing]`; `priya-writer`
+  → `[priya-writer, writer, writ, writing]`; `alex-dev` →
+  `[alex-dev, dev]`. Regression tests:
+  `dispatch_queue_seeds_role_name_word_family_variants` (full
+  dispatch path for task #572's tag set) +
+  `role_name_seed_tags_covers_hyphen_suffix_and_er_variants`
+  (helper unit test).
+
 ## 0.11.46 — 2026-04-17
 
 Field-report fix: in batty-marketing after the v0.11.45 daemon
