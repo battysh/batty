@@ -818,19 +818,37 @@ fn parse_messages_response(
 
     let mut inbound = Vec::new();
     let mut latest_message_id: Option<(u64, String)> = None;
+    let mut dropped_empty_content = 0usize;
+    let mut dropped_bot_author = 0usize;
+    let mut dropped_unauthorized_user = 0usize;
+    let mut latest_any_snowflake: Option<(u64, String)> = None;
 
     for message in messages {
         let message_id = match message.get("id").and_then(|value| value.as_str()) {
             Some(id) => id.to_string(),
             None => continue,
         };
+        // Track the highest-id message we see regardless of filtering so the
+        // cursor can advance past a window full of dropped messages. Without
+        // this, a channel with only bot/unauthorized/empty-content messages
+        // would never advance last_message_id and we'd re-parse the same
+        // window forever.
+        if let Ok(any_snowflake) = message_id.parse::<u64>() {
+            match &latest_any_snowflake {
+                Some((latest, _)) if *latest >= any_snowflake => {}
+                _ => latest_any_snowflake = Some((any_snowflake, message_id.clone())),
+            }
+        }
         let channel_id = match message.get("channel_id").and_then(|value| value.as_str()) {
             Some(id) => id.to_string(),
             None => continue,
         };
         let content = match message.get("content").and_then(|value| value.as_str()) {
             Some(content) if !content.trim().is_empty() => content.trim().to_string(),
-            _ => continue,
+            _ => {
+                dropped_empty_content += 1;
+                continue;
+            }
         };
 
         let author = match message.get("author") {
@@ -838,6 +856,7 @@ fn parse_messages_response(
             None => continue,
         };
         if author.get("bot").and_then(|value| value.as_bool()) == Some(true) {
+            dropped_bot_author += 1;
             continue;
         }
 
@@ -848,6 +867,7 @@ fn parse_messages_response(
             None => continue,
         };
         if !allowed_user_ids.contains(&from_user_id) {
+            dropped_unauthorized_user += 1;
             continue;
         }
 
@@ -867,8 +887,50 @@ fn parse_messages_response(
         });
     }
 
+    // Surface the MESSAGE_CONTENT intent footgun: if we see messages in the
+    // window but every single one has empty content, the bot almost certainly
+    // lacks the MESSAGE_CONTENT privileged intent in the Developer Portal.
+    // Previously this failed silently — ZERO inbound + Health: ok.
+    let total = messages.len();
+    if total > 0 && inbound.is_empty() {
+        warn!(
+            total_received = total,
+            dropped_empty_content,
+            dropped_bot_author,
+            dropped_unauthorized_user,
+            "Discord poll returned messages but none were delivered; \
+             if dropped_empty_content == total_received, the bot likely \
+             lacks the MESSAGE_CONTENT privileged intent"
+        );
+    } else if total > 0 {
+        debug!(
+            total_received = total,
+            delivered = inbound.len(),
+            dropped_empty_content,
+            dropped_bot_author,
+            dropped_unauthorized_user,
+            "Discord poll parsed"
+        );
+    }
+
     inbound.sort_by_key(|message| message.message_id.parse::<u64>().unwrap_or(0));
-    Ok((inbound, latest_message_id.map(|(_, id)| id)))
+    // Advance cursor to the highest snowflake seen in this window, regardless
+    // of filtering. Previously the cursor only advanced to the last delivered
+    // message — which meant a channel whose newest messages were from a bot
+    // or an unauthorized user would stall the cursor, causing every poll to
+    // re-fetch and re-filter the same batch forever.
+    let cursor = match (latest_message_id, latest_any_snowflake) {
+        (Some((delivered, delivered_id)), Some((any, any_id))) => {
+            if any > delivered {
+                Some(any_id)
+            } else {
+                Some(delivered_id)
+            }
+        }
+        (Some((_, id)), None) | (None, Some((_, id))) => Some(id),
+        (None, None) => None,
+    };
+    Ok((inbound, cursor))
 }
 
 fn parse_bot_identity(json: &serde_json::Value) -> Result<BotIdentity> {
@@ -1301,7 +1363,11 @@ mod tests {
                 text: "$status".to_string(),
             }]
         );
-        assert_eq!(latest_message_id.as_deref(), Some("1002"));
+        // Cursor advances past the entire window (to "1003", the bot message)
+        // even when the highest-id message is filtered. Otherwise a channel
+        // where a bot posts last would stall the cursor forever and every
+        // poll would re-fetch + re-filter the same batch.
+        assert_eq!(latest_message_id.as_deref(), Some("1003"));
     }
 
     #[test]
