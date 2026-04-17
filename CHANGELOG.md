@@ -2,6 +2,47 @@
 
 All notable changes to Batty are documented here.
 
+## 0.11.18 — 2026-04-16
+
+Field-report fixes surfaced by a real `batty_marketing` production run.
+Three surgical, backward-compatible defect fixes. No behavior changes
+for default configurations — only corrects pathological cases.
+
+### Fixes
+
+- **Engineers no longer auto-claim planning / design / content tasks**
+  (#677) — new `board.dispatch_excluded_tags` config (default empty)
+  holds a case-insensitive tag list; any task with a matching tag is
+  skipped by the dispatch queue and must be claimed explicitly. Typical
+  production value: `["planning", "design", "content", "ops"]`. Prevents
+  the engineer pool from stealing work intended for non-engineering
+  roles. Implementation in `src/team/dispatch/queue.rs`; both
+  `next_dispatch_task` and `enqueue_dispatch_candidates` honor the
+  filter.
+- **Escalation ping-storm suppression** (#678) — `record_task_escalated`
+  now dedupes on `(role, task_id, reason)` through the existing
+  `recent_escalations` cache with a 10-minute cooldown. Watchdogs that
+  re-examine the same signal each tick (stall, poll_shim, owned_tasks,
+  merge, automation) no longer produce duplicate `task_escalated`
+  telemetry for the same underlying state, so managers see one alert
+  per distinct cause instead of a flood during planning cycles.
+- **Aging-alert framing for non-git / multi-repo projects** (#679) —
+  `maybe_emit_task_aging_alerts` now branches on
+  `self.is_git_repo && !self.is_multi_repo`. When the project root is
+  not a single git repo, the checkpoint request, escalation reason,
+  and manager notification all reframe away from "commits ahead of
+  `main`" to "no progress signals during the cooldown window", so
+  non-code teams (marketing, design, research) don't see spurious
+  branch advice.
+
+### Notes
+
+- **#680 (kanban-md `edit --release` blocked by archived deps)** is
+  upstream in `antopolskiy/kanban-md`, not in the batty repo; the batty
+  daemon consumes the tool but doesn't own its dependency-validation
+  logic. Workaround while waiting for an upstream fix:
+  `kanban-md edit <task-id> --remove-dep <archived-dep> --claim`.
+
 ## 0.11.17 — 2026-04-16
 
 Closes the five outstanding `good first issue` items. No behavior
