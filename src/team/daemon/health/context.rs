@@ -220,6 +220,15 @@ impl TeamDaemon {
         _proactive_context_usage_pct: Option<u8>,
     ) -> Result<()> {
         if output_bytes == 0 && uptime_secs >= ZERO_OUTPUT_THRESHOLD_SECS {
+            // #685: only treat zero-output as a hang when the daemon
+            // actually expects the agent to be producing output. An idle
+            // member with an empty inbox and no active task has nothing
+            // to say — tearing them down every 10 minutes just burns a
+            // fresh startup context for no behavioral change.
+            let is_working = self.states.get(member_name) == Some(&MemberState::Working);
+            if !is_working {
+                return Ok(());
+            }
             if self.shim_handles.contains_key(member_name) {
                 warn!(
                     member = %member_name,
