@@ -33,6 +33,32 @@ pub(crate) fn transition_task(board_dir: &Path, task_id: u32, target: &str) -> R
     Ok(())
 }
 
+/// Orphan-rescue variant of `transition_task` that preserves `blocked` /
+/// `block_reason` / `blocked_on` frontmatter. Manual `batty move` via
+/// [`transition_task`] treats "target != Blocked" as "engineer is unblocking
+/// the task" and clears the block — which is correct for human intent but
+/// wrong for rescue: the engineer (or prior manager ruling) explicitly
+/// parked the task, and the rescue is just cleaning up a stuck claim, not
+/// revoking the block. Clearing here re-dispatches parked tasks on the next
+/// tick, burning engineer context on the same auto-refuse cascade.
+pub(crate) fn transition_task_preserving_block(
+    board_dir: &Path,
+    task_id: u32,
+    target: &str,
+) -> Result<()> {
+    let task_path = find_task_path(board_dir, task_id)?;
+    let task = Task::from_file(&task_path)?;
+    let current = parse_task_state(&task.status)?;
+    let target = parse_task_state(target)?;
+
+    can_transition(current, target).map_err(anyhow::Error::msg)?;
+
+    update_task_frontmatter(&task_path, |mapping| {
+        set_status(mapping, target);
+    })?;
+    Ok(())
+}
+
 pub(crate) fn block_task_with_reason(board_dir: &Path, task_id: u32, reason: &str) -> Result<()> {
     let task_path = find_task_path(board_dir, task_id)?;
     update_task_frontmatter(&task_path, |mapping| {
