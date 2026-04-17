@@ -213,17 +213,6 @@ impl TeamDaemon {
                 info!(member = member_name, "shim agent ready");
                 self.context_pressure_tracker.clear_member(member_name);
 
-                // Drain any pending messages
-                if self.pending_delivery_queue.contains_key(member_name) {
-                    if let Err(error) = self.drain_pending_queue(member_name) {
-                        warn!(
-                            member = member_name,
-                            error = %error,
-                            "failed to drain pending queue after shim ready"
-                        );
-                    }
-                }
-
                 // Only preserve Working state if the *shim handle* was Working
                 // (meaning work was mid-flight when the SDK connection dropped).
                 // Do NOT use self.states (persisted daemon state) here — after a
@@ -248,6 +237,21 @@ impl TeamDaemon {
                     self.states
                         .insert(member_name.to_string(), MemberState::Idle);
                     self.update_automation_timers_for_state(member_name, MemberState::Idle);
+                }
+
+                // Drain pending messages AFTER the state flip so that
+                // deliver_message → handle.is_ready() sees Idle. Otherwise
+                // the drain re-defers every message it just pulled out,
+                // and they rot until `expire_stale_pending_messages` fires
+                // (600s later) and kicks them to inbox fallback.
+                if self.pending_delivery_queue.contains_key(member_name) {
+                    if let Err(error) = self.drain_pending_queue(member_name) {
+                        warn!(
+                            member = member_name,
+                            error = %error,
+                            "failed to drain pending queue after shim ready"
+                        );
+                    }
                 }
 
                 self.maybe_persist_member_session_id(member_name);
@@ -1728,6 +1732,50 @@ mod tests {
 
         assert_eq!(daemon.states.get("eng-1"), Some(&MemberState::Idle));
         assert!(daemon.shim_handles["eng-1"].is_ready());
+    }
+
+    /// Regression: Starting→Ready race where drain_pending_queue ran
+    /// *before* apply_state_change(Idle), so deliver_message inside drain
+    /// saw state=Starting and re-deferred every message it pulled out.
+    /// Messages then rotted in the queue until expire_stale_pending_messages
+    /// kicked them to inbox fallback 600s later.
+    /// Observed 2026-04-17 18:45:55 — sam-designer-1-1 restart resume prompt.
+    #[test]
+    fn handle_shim_event_ready_drains_pending_queue_after_state_flip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = TestDaemonBuilder::new(tmp.path()).build();
+        let _child = insert_mock_handle(&mut daemon, "eng-1");
+        // Start in Starting state so that deliver_message would defer
+        // if it ran before the state flip.
+        daemon
+            .shim_handles
+            .get_mut("eng-1")
+            .unwrap()
+            .apply_state_change(ShimState::Starting);
+
+        daemon
+            .pending_delivery_queue
+            .entry("eng-1".to_string())
+            .or_default()
+            .push(crate::team::delivery::PendingMessage {
+                from: "daemon".to_string(),
+                body: "resume work".to_string(),
+                queued_at: std::time::Instant::now(),
+            });
+
+        daemon.handle_shim_event("eng-1", Event::Ready).unwrap();
+
+        // After Ready: state is Idle, and the pending queue is fully drained
+        // (message delivered via shim channel, not re-deferred back into queue).
+        assert!(daemon.shim_handles["eng-1"].is_ready());
+        assert!(
+            daemon
+                .pending_delivery_queue
+                .get("eng-1")
+                .map(|q| q.is_empty())
+                .unwrap_or(true),
+            "pending queue must be empty after drain; was re-deferred due to stale state read"
+        );
     }
 
     #[test]

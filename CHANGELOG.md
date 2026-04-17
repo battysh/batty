@@ -2,6 +2,43 @@
 
 All notable changes to Batty are documented here.
 
+## 0.11.59 — 2026-04-17
+
+Stop the Starting→Ready race where pending messages queued against a
+freshly spawned shim got re-deferred the instant the drain tried to
+flush them, then sat in the queue for 600s until
+`expire_stale_pending_messages` kicked them to inbox fallback.
+
+Observed 2026-04-17 18:45:55 UTC on `sam-designer-1-1`:
+`routing::deliver_message` deferred the restart resume prompt at
+.027683 (state=Starting). Shim became ready at .038018. The Ready
+handler called `drain_pending_queue` at .038088, which re-entered
+`deliver_message` — but `apply_state_change(ShimState::Idle)` didn't
+run until *after* the drain, so `handle.is_ready()` still returned
+false and the drained message was pushed right back into the pending
+queue (second "deferring to pending queue state=starting" log at
+.038359, 341µs later). The message then rotted until the 600s
+stale-pending expiry fired at 18:55:59 and dumped it to inbox
+fallback — 10 minutes of lost live-delivery latency.
+
+### Fixes
+
+- **Flip state to Idle before draining pending queue**
+  (`src/team/daemon/health/poll_shim.rs`) — in the `Event::Ready`
+  handler, reorder so `apply_state_change(ShimState::Idle)` and the
+  `self.states` / automation-timer updates run *before*
+  `drain_pending_queue`. `deliver_message` inside the drain now sees
+  `is_ready()=true` and sends via the shim channel instead of
+  re-deferring. The v0.11.56 `Working→Idle` drain trigger covered
+  natural completion; this closes the remaining
+  `Starting→Ready`-on-restart path.
+- **Regression test**
+  (`handle_shim_event_ready_drains_pending_queue_after_state_flip`)
+  — inserts a shim handle in `Starting`, queues a pending message,
+  fires `Event::Ready`, and asserts the pending queue is empty
+  afterward. Before the fix, the drain re-deferred the message and
+  the queue stayed at length 1.
+
 ## 0.11.58 — 2026-04-17
 
 Stop the auto-dispatch loop from stalling when the top-ranked
