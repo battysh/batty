@@ -404,6 +404,19 @@ fn clean_file_hint_token(token: &str) -> Option<String> {
     if cleaned.is_empty() {
         return None;
     }
+    // Markdown emphasis (bold `**x**`, underscore `__x__`) produces tokens
+    // like `**Acceptance:**`, `scope:**`, `**Out` that look glob-like to
+    // `cleaned.contains('*')` but are not file paths. Dispatch overlap
+    // detection previously treated them as predicted files and serialized
+    // unrelated tasks behind each other on markdown punctuation collisions.
+    // Reject any token whose edges are dominated by emphasis markers.
+    if cleaned.starts_with("**")
+        || cleaned.ends_with("**")
+        || cleaned.starts_with("__")
+        || cleaned.ends_with("__")
+    {
+        return None;
+    }
 
     let has_parent = PathBuf::from(cleaned)
         .parent()
@@ -767,6 +780,53 @@ Body.
 
         let hints = task_file_hints(&task).unwrap();
         assert_eq!(hints, vec!["*.rs".to_string()]);
+    }
+
+    #[test]
+    fn task_file_hints_reject_markdown_emphasis_tokens() {
+        // Regression: markdown bold (`**Acceptance:**`, `scope:**`, `**Out`)
+        // was being parsed as file globs because the only glob check was
+        // `contains('*')`. Dispatch overlap detection then logged 30KB+
+        // "predicted file overlap" noise on every serialize. See
+        // batty_marketing orchestrator log 2026-04-17 10:48:23.
+        let task = Task {
+            id: 1,
+            title: "markdown body".to_string(),
+            status: "todo".to_string(),
+            priority: "high".to_string(),
+            assignee: None,
+            claimed_by: None,
+            claimed_at: None,
+            claim_ttl_secs: None,
+            claim_expires_at: None,
+            last_progress_at: None,
+            claim_warning_sent_at: None,
+            claim_extensions: None,
+            last_output_bytes: None,
+            blocked: None,
+            tags: Vec::new(),
+            depends_on: Vec::new(),
+            review_owner: None,
+            blocked_on: None,
+            worktree_path: None,
+            branch: None,
+            commit: None,
+            artifacts: Vec::new(),
+            next_action: None,
+            scheduled_for: None,
+            cron_schedule: None,
+            cron_last_run: None,
+            completed: None,
+            description:
+                "**Acceptance:** tests pass. **Owner:** alex. Out of scope:** none. \
+                 __Priya's__ outline** lands Fri. Touch src/foo.rs and *.md."
+                    .to_string(),
+            batty_config: None,
+            source_path: PathBuf::new(),
+        };
+
+        let hints = task_file_hints(&task).unwrap();
+        assert_eq!(hints, vec!["*.md".to_string(), "src/foo.rs".to_string()]);
     }
 
     #[test]
