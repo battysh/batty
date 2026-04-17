@@ -2747,6 +2747,82 @@ fn maybe_intervene_architect_utilization_queues_for_underloaded_idle_architect()
 }
 
 #[test]
+fn architect_utilization_suppresses_idle_active_until_owned_task_escalates() {
+    // #702: when owned-task has just fired for an idle engineer, the
+    // architect utilization intervention must not also surface them in the
+    // same tick — the engineer is already being nudged directly. Only once
+    // owned-task escalates to the manager does the architect signal become
+    // useful again.
+    let tmp = tempfile::tempdir().unwrap();
+    let mut daemon = TestDaemonBuilder::new(tmp.path())
+        .members(vec![
+            architect_member("architect"),
+            manager_member("lead", Some("architect")),
+            engineer_member("eng-1", Some("lead"), false),
+            engineer_member("eng-2", Some("lead"), false),
+        ])
+        .pane_map(HashMap::from([(
+            "architect".to_string(),
+            "%999".to_string(),
+        )]))
+        .states(HashMap::from([
+            ("architect".to_string(), MemberState::Idle),
+            ("lead".to_string(), MemberState::Idle),
+            ("eng-1".to_string(), MemberState::Idle),
+            ("eng-2".to_string(), MemberState::Idle),
+        ]))
+        .build();
+
+    let root = inbox::inboxes_root(tmp.path());
+    inbox::init_inbox(&root, "architect").unwrap();
+    write_owned_task_file(tmp.path(), 191, "active-task", "in-progress", "eng-1");
+
+    // Simulate owned-task just nudging eng-1 in this tick; no escalation yet.
+    daemon.owned_task_interventions.insert(
+        "eng-1".to_string(),
+        super::interventions::OwnedTaskInterventionState {
+            idle_epoch: 0,
+            signature: "idle-active:eng-1:191".to_string(),
+            detected_at: Instant::now(),
+            escalation_sent: false,
+        },
+    );
+
+    backdate_idle_grace(&mut daemon, "architect");
+    daemon.maybe_intervene_architect_utilization().unwrap();
+
+    assert!(
+        inbox::pending_messages(&root, "architect")
+            .unwrap()
+            .is_empty(),
+        "utilization must not fire while owned-task is still actively nudging the engineer"
+    );
+    assert!(
+        !daemon
+            .owned_task_interventions
+            .contains_key("utilization::architect"),
+        "utilization intervention state must not be recorded when suppressed"
+    );
+
+    // Once owned-task escalates, the suppression must lift so the architect
+    // sees the sticking engineer.
+    daemon
+        .owned_task_interventions
+        .get_mut("eng-1")
+        .unwrap()
+        .escalation_sent = true;
+    daemon.maybe_intervene_architect_utilization().unwrap();
+
+    let pending = inbox::pending_messages(&root, "architect").unwrap();
+    assert_eq!(
+        pending.len(),
+        1,
+        "utilization must fire once owned-task has escalated"
+    );
+    assert!(pending[0].body.contains("eng-1 on #191"));
+}
+
+#[test]
 fn zero_engineers_topology_skips_executor_interventions() {
     let tmp = tempfile::tempdir().unwrap();
     let mut daemon = TestDaemonBuilder::new(tmp.path())
