@@ -1431,6 +1431,40 @@ impl TeamDaemon {
             .collect();
         eligible.sort();
 
+        // #705: when the task body explicitly names an engineer role
+        // (e.g. `- Route: dispatch to priya-writer.`), restrict
+        // eligibility to engineers carrying that role_name. Mirrors
+        // #682's "wait when assignee busy" behavior for the body-owner
+        // routing case: if the named engineer is not idle, leave the
+        // task undispatched rather than cascade-dispatch to a peer who
+        // will refuse. Only applies when at least one engineer actually
+        // carries the role — a body naming a non-engineer falls through
+        // to #703's filter in `available_dispatch_tasks`; a body naming
+        // an unknown/unconfigured role falls through to scoring.
+        //
+        // Observed 2026-04-17 11:04:36 UTC in batty-marketing: task
+        // #549 (body: `- Route: dispatch to priya-writer.`) dispatched
+        // to kai-devrel-1-1 because priya-writer-1-1 was `working`
+        // at the tick. kai released (third cascade attempt — prior:
+        // kai at 09:13, alex at 10:18). Before this gate the dispatcher
+        // bounced the task between whichever engineer happened to be
+        // idle each tick, burning claim+refuse turns.
+        let body_owner_role = parse_body_owner_role(&task.description);
+        if let Some(ref owner_role) = body_owner_role {
+            let engineers_with_role: HashSet<String> = self
+                .config
+                .members
+                .iter()
+                .filter(|m| {
+                    m.role_type == RoleType::Engineer && &m.role_name == owner_role
+                })
+                .map(|m| m.name.clone())
+                .collect();
+            if !engineers_with_role.is_empty() {
+                eligible.retain(|name| engineers_with_role.contains(name));
+            }
+        }
+
         if self.config.team_config.workflow_policy.allocation.strategy
             == AllocationStrategy::RoundRobin
         {
@@ -1444,7 +1478,7 @@ impl TeamDaemon {
         // `tag_overlap` for the matching engineer and triggers the #692
         // tag-match bypass — so the explicit body owner wins over
         // scoring-tiebreaker alphabetical fallback.
-        let task_for_ranking = match parse_body_owner_role(&task.description) {
+        let task_for_ranking = match body_owner_role {
             Some(owner_role)
                 if !task.tags.iter().any(|tag| tag == &owner_role) =>
             {
@@ -2363,6 +2397,135 @@ mod tests {
         assert_eq!(daemon.dispatch_queue.len(), 1);
         assert_eq!(daemon.dispatch_queue[0].task_id, 80);
         assert_eq!(daemon.dispatch_queue[0].engineer, "priya-writer-1-1");
+    }
+
+    #[test]
+    fn enqueue_dispatch_candidates_waits_when_body_owner_engineer_busy() {
+        // #705: a task whose body names a specific engineer role must
+        // wait for that engineer to become idle rather than cascading to
+        // a peer who will refuse. Mirrors #682's assignee-busy behavior
+        // for body-owner routing.
+        //
+        // Observed batty-marketing 2026-04-17 11:04:36 UTC: task #549
+        // (body `- Route: dispatch to priya-writer.`) dispatched to
+        // kai-devrel-1-1 while priya-writer-1-1 was working on another
+        // task; kai released it (third cascade bounce after kai at
+        // 09:13 and alex at 10:18). Before this gate the task pinged
+        // between idle peers, each burning a claim+refuse turn on work
+        // that was not theirs to do.
+        let tmp = tempfile::tempdir().unwrap();
+        write_task_with_body(
+            tmp.path(),
+            90,
+            "twir-submission",
+            "todo",
+            None,
+            "- Route: dispatch to priya-writer.\n",
+        );
+
+        let priya = MemberInstance {
+            name: "priya-writer-1-1".to_string(),
+            role_name: "priya-writer".to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("claude".to_string()),
+            reports_to: Some("jordan-pm".to_string()),
+            use_worktrees: false,
+            ..MemberInstance::default()
+        };
+        let kai = MemberInstance {
+            name: "kai-devrel-1-1".to_string(),
+            role_name: "kai-devrel".to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("claude".to_string()),
+            reports_to: Some("jordan-pm".to_string()),
+            use_worktrees: false,
+            ..MemberInstance::default()
+        };
+
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![
+                architect_member("maya-lead"),
+                manager_member("jordan-pm", Some("maya-lead")),
+                priya,
+                kai,
+            ])
+            // priya (named body owner) is not idle — only kai is. The
+            // dispatcher must NOT fall back to kai; it must wait for
+            // priya. Omitting priya from `states` makes her ineligible
+            // via `idle_engineer_names`, matching the field observation
+            // where priya-writer-1-1 was `working` on another task.
+            .states(HashMap::from([(
+                "kai-devrel-1-1".to_string(),
+                MemberState::Idle,
+            )]))
+            .build();
+
+        daemon.enqueue_dispatch_candidates().unwrap();
+
+        assert!(
+            daemon.dispatch_queue.is_empty(),
+            "task must remain undispatched while named body-owner engineer is busy; \
+             got {:?}",
+            daemon.dispatch_queue
+        );
+    }
+
+    #[test]
+    fn enqueue_dispatch_candidates_dispatches_to_body_owner_when_idle_even_with_other_idle_peers() {
+        // #705 surgical check: the body-owner gate must only restrict
+        // eligibility to engineers carrying the named role; if that
+        // engineer IS idle, the task must dispatch to them — not to
+        // some other idle peer.
+        let tmp = tempfile::tempdir().unwrap();
+        write_task_with_body(
+            tmp.path(),
+            91,
+            "twir-submission",
+            "todo",
+            None,
+            "- Route: dispatch to priya-writer.\n",
+        );
+
+        let priya = MemberInstance {
+            name: "priya-writer-1-1".to_string(),
+            role_name: "priya-writer".to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("claude".to_string()),
+            reports_to: Some("jordan-pm".to_string()),
+            use_worktrees: false,
+            ..MemberInstance::default()
+        };
+        let kai = MemberInstance {
+            name: "kai-devrel-1-1".to_string(),
+            role_name: "kai-devrel".to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("claude".to_string()),
+            reports_to: Some("jordan-pm".to_string()),
+            use_worktrees: false,
+            ..MemberInstance::default()
+        };
+
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![
+                architect_member("maya-lead"),
+                manager_member("jordan-pm", Some("maya-lead")),
+                priya,
+                kai,
+            ])
+            .states(HashMap::from([
+                ("priya-writer-1-1".to_string(), MemberState::Idle),
+                ("kai-devrel-1-1".to_string(), MemberState::Idle),
+            ]))
+            .build();
+
+        daemon.enqueue_dispatch_candidates().unwrap();
+
+        assert_eq!(daemon.dispatch_queue.len(), 1);
+        assert_eq!(daemon.dispatch_queue[0].task_id, 91);
+        assert_eq!(
+            daemon.dispatch_queue[0].engineer, "priya-writer-1-1",
+            "body-owner `priya-writer` must win over idle peer kai-devrel-1-1"
+        );
     }
 
     #[test]
