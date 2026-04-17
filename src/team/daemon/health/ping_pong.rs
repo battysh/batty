@@ -27,54 +27,66 @@ impl TeamDaemon {
         let names: Vec<String> = self.shim_handles.keys().cloned().collect();
 
         for name in &names {
-            let Some(handle) = self.shim_handles.get_mut(name) else {
-                continue;
+            // First pass: observe the handle (immutable) to classify staleness.
+            // We release the borrow before calling self.record_orchestrator_action
+            // and before re-borrowing mutably to send_ping.
+            let stale_observation = {
+                let Some(handle) = self.shim_handles.get(name) else {
+                    continue;
+                };
+                if handle.is_terminal() {
+                    continue;
+                }
+                handle.secs_since_last_pong().and_then(|secs_since_pong| {
+                    if secs_since_pong > timeout_secs {
+                        let recently_active = handle
+                            .secs_since_last_activity()
+                            .is_some_and(|secs_since_activity| {
+                                secs_since_activity <= timeout_secs
+                            });
+                        let working =
+                            handle.state == crate::shim::protocol::ShimState::Working;
+                        Some((secs_since_pong, working && recently_active))
+                    } else {
+                        None
+                    }
+                })
             };
 
-            // Skip terminal handles
-            if handle.is_terminal() {
-                continue;
-            }
-
-            // Check for stale handles (no Pong within timeout)
-            if let Some(secs_since_pong) = handle.secs_since_last_pong() {
-                if secs_since_pong > timeout_secs {
-                    let recently_active = handle
-                        .secs_since_last_activity()
-                        .is_some_and(|secs_since_activity| secs_since_activity <= timeout_secs);
-                    if handle.state == crate::shim::protocol::ShimState::Working && recently_active
-                    {
-                        debug!(
-                            member = name.as_str(),
-                            secs_since_pong,
-                            timeout_secs,
-                            "shim missed recent Pong but has fresh activity; suppressing stale warning"
-                        );
-                    } else {
-                        warn!(
-                            member = name.as_str(),
-                            secs_since_pong,
-                            timeout_secs,
-                            "shim handle stale — no Pong within timeout"
-                        );
-                        self.record_orchestrator_action(format!(
-                            "health: shim {} stale (no Pong for {}s, timeout={}s)",
-                            name, secs_since_pong, timeout_secs
-                        ));
-                        // Don't kill here — just log. The stall detector will handle
-                        // escalation if the agent is truly stuck.
-                        continue;
-                    }
+            if let Some((secs_since_pong, suppress_warn)) = stale_observation {
+                if suppress_warn {
+                    debug!(
+                        member = name.as_str(),
+                        secs_since_pong,
+                        timeout_secs,
+                        "shim missed recent Pong but has fresh activity; suppressing stale warning"
+                    );
+                } else {
+                    warn!(
+                        member = name.as_str(),
+                        secs_since_pong,
+                        timeout_secs,
+                        "shim handle stale — no Pong within timeout"
+                    );
+                    self.record_orchestrator_action(format!(
+                        "health: shim {} stale (no Pong for {}s, timeout={}s)",
+                        name, secs_since_pong, timeout_secs
+                    ));
+                    // Don't kill or skip — fall through and keep pinging so
+                    // last_pong_at can recover if the shim comes back. The
+                    // stall detector will handle escalation if truly stuck.
                 }
             }
 
             // Send Ping
-            if let Err(error) = handle.send_ping() {
-                debug!(
-                    member = name.as_str(),
-                    error = %error,
-                    "failed to send Ping to shim"
-                );
+            if let Some(handle) = self.shim_handles.get_mut(name) {
+                if let Err(error) = handle.send_ping() {
+                    debug!(
+                        member = name.as_str(),
+                        error = %error,
+                        "failed to send Ping to shim"
+                    );
+                }
             }
         }
 
