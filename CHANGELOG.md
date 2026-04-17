@@ -2,6 +2,23 @@
 
 All notable changes to Batty are documented here.
 
+## 0.11.26 — 2026-04-17
+
+Ninth-round field-report fix: persist planning-cycle state immediately
+on fire, not just at heartbeat.
+
+### Fixes
+
+- **Planning cycle fires twice on quick restart** (#687 followup) —
+  v0.11.25 persisted `planning_cycle_last_fired` in the 5-min heartbeat
+  path, but observed double-fire at 04:03:22 + 04:03:29 when the daemon
+  restarted 6 seconds after firing the first cycle (hot-reload or fast
+  manual restart). The in-memory `last_fired` update had not yet been
+  checkpointed, so the restored state still showed `None` and the new
+  daemon fired a second planning cycle at the architect. Now
+  `tact_check` persists immediately after setting `last_fired` so the
+  checkpoint is durable before any plausible restart window.
+
 ## 0.11.25 — 2026-04-17
 
 Eighth-round field-report fix: architect planning cadence survives restart.
