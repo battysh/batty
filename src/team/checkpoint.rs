@@ -530,6 +530,7 @@ mod tests {
             title: title.to_string(),
             status: "in-progress".to_string(),
             priority: "high".to_string(),
+            assignee: None,
             claimed_by: None,
             claimed_at: None,
             claim_ttl_secs: None,
@@ -645,6 +646,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let task = crate::task::Task {
             status: "done".to_string(),
+            assignee: None,
             claimed_by: Some("eng-1".to_string()),
             worktree_path: Some(".batty/worktrees/eng-1".to_string()),
             ..make_task(628, "done lane", "done lane description")
@@ -690,6 +692,7 @@ mod tests {
 
         let task = crate::task::Task {
             status: "done".to_string(),
+            assignee: None,
             claimed_by: Some("eng-1".to_string()),
             worktree_path: Some(".batty/worktrees/eng-1".to_string()),
             ..make_task(628, "done lane", "done lane description")

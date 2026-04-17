@@ -403,6 +403,7 @@ mod tests {
             title: format!("task-{id}"),
             status: status.to_string(),
             priority: "high".to_string(),
+            assignee: None,
             claimed_by: None,
             claimed_at: None,
             claim_ttl_secs: None,

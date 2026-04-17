@@ -2,6 +2,26 @@
 
 All notable changes to Batty are documented here.
 
+## 0.11.20 — 2026-04-17
+
+Third-round field-report fix: stop wrong-role dispatch from ballooning
+engineer context.
+
+### Fixes
+
+- **Respect `assignee:` frontmatter in dispatch** (#682) — tasks whose
+  `assignee:` names a non-engineer member (manager/architect/writer) are
+  now filtered out of the dispatch pool entirely; they're messages for
+  that member's inbox, not work for the engineer queue. When `assignee:`
+  names an engineer, dispatch routes only to that engineer (waiting if
+  they're busy rather than re-routing to a peer). Observed in
+  `batty_marketing`: kai-devrel ballooned to 170 % context (1.7 M
+  tokens) because the same non-engineer-assigned tasks were dispatched,
+  rejected, and re-dispatched on every tick. Adds
+  `assignee: Option<String>` to `Task` + `Frontmatter`, a
+  `non_engineer_member_names()` helper on the daemon, and an extra
+  filter in `available_dispatch_tasks` + `rank_dispatch_engineers`.
+
 ## 0.11.19 — 2026-04-17
 
 Second round of field-report fixes from the `batty_marketing` production

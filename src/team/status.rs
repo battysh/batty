@@ -3190,6 +3190,7 @@ mod tests {
                 title: "done lane".to_string(),
                 status: "done".to_string(),
                 priority: "high".to_string(),
+                assignee: None,
                 claimed_by: Some("eng-1".to_string()),
                 claimed_at: None,
                 claim_ttl_secs: None,
