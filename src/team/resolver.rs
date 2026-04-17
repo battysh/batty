@@ -119,6 +119,43 @@ pub fn is_dispatchable_task(task: &Task, done: &HashSet<u32>) -> bool {
     blocking_reason(task, &metadata, done).is_none()
 }
 
+/// Subset of `dispatchable_tasks` that excludes tasks already committed to a
+/// non-engineer member (architect/manager/writer digest) via `assignee:` or a
+/// body `**Owner:** <role>` declaration. Mirrors the same filters the engineer
+/// dispatcher applies in `available_dispatch_tasks` (#682 + #703).
+///
+/// #709: previously the dispatch-gap intervention + architect planning cycle
+/// used `dispatchable_tasks()` directly and counted maya-owned strategy tasks
+/// as "unassigned open tasks", firing the planning cycle on false premises
+/// and nagging jordan-pm to dispatch work that could not be dispatched.
+/// Observed in batty-marketing 2026-04-17: "third planning-cycle trigger
+/// in ~90min on stale 'idle engineers' diagnosis" (jordan-pm's own note on
+/// task #573). Each trigger burned one Maya turn (~5k+ tokens).
+pub fn engineer_dispatchable_tasks(
+    board_dir: &Path,
+    members: &[MemberInstance],
+) -> Result<Vec<Task>> {
+    let non_engineer_names: HashSet<String> = members
+        .iter()
+        .filter(|member| member.role_type != RoleType::Engineer)
+        .map(|member| member.name.clone())
+        .collect();
+    Ok(dispatchable_tasks(board_dir)?
+        .into_iter()
+        .filter(|task| is_engineer_dispatchable(task, &non_engineer_names))
+        .collect())
+}
+
+pub fn is_engineer_dispatchable(task: &Task, non_engineer_names: &HashSet<String>) -> bool {
+    if let Some(ref assignee) = task.assignee {
+        return !non_engineer_names.contains(assignee);
+    }
+    match crate::team::daemon::dispatch::queue::parse_body_owner_role(&task.description) {
+        Some(owner) => !non_engineer_names.contains(&owner),
+        None => true,
+    }
+}
+
 fn acting_capability(
     task: &Task,
     metadata: &WorkflowMetadata,
@@ -688,5 +725,83 @@ roles:
 
         let tasks = dispatchable_tasks(tmp.path()).unwrap();
         assert!(tasks.is_empty());
+    }
+
+    #[test]
+    fn engineer_dispatchable_filters_out_maya_owned_body_tasks() {
+        // Regression for #709: Maya's planner used to count planner/manager-owned
+        // tasks as engineer-dispatchable, triggering spurious planning cycles.
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = tmp.path().join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+
+        let team = members(
+            r#"
+name: mixed
+roles:
+  - name: maya-planner
+    role_type: architect
+    agent: codex
+    instances: 1
+  - name: engineer
+    role_type: engineer
+    agent: codex
+    instances: 1
+"#,
+        );
+
+        std::fs::write(
+            tasks_dir.join("001-eng.md"),
+            "---\nid: 1\ntitle: engineer work\nstatus: todo\npriority: medium\nclass: standard\n---\n\nBody.\n",
+        )
+        .unwrap();
+        std::fs::write(
+            tasks_dir.join("002-maya.md"),
+            "---\nid: 2\ntitle: planning task\nstatus: todo\npriority: medium\nclass: standard\n---\n\nOwner: maya-planner handles this.\n",
+        )
+        .unwrap();
+
+        let all = dispatchable_tasks(tmp.path()).unwrap();
+        assert_eq!(all.len(), 2);
+        let engineer_only = engineer_dispatchable_tasks(tmp.path(), &team).unwrap();
+        assert_eq!(engineer_only.len(), 1);
+        assert_eq!(engineer_only[0].id, 1);
+    }
+
+    #[test]
+    fn engineer_dispatchable_filters_explicit_non_engineer_assignee() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = tmp.path().join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+
+        let team = members(
+            r#"
+name: mixed
+roles:
+  - name: maya-planner
+    role_type: architect
+    agent: codex
+    instances: 1
+  - name: engineer
+    role_type: engineer
+    agent: codex
+    instances: 1
+"#,
+        );
+
+        std::fs::write(
+            tasks_dir.join("001-eng.md"),
+            "---\nid: 1\ntitle: engineer work\nstatus: todo\npriority: medium\nclass: standard\n---\n\nBody.\n",
+        )
+        .unwrap();
+        std::fs::write(
+            tasks_dir.join("002-maya.md"),
+            "---\nid: 2\ntitle: planning task\nstatus: todo\npriority: medium\nassignee: maya-planner\nclass: standard\n---\n\nBody.\n",
+        )
+        .unwrap();
+
+        let engineer_only = engineer_dispatchable_tasks(tmp.path(), &team).unwrap();
+        assert_eq!(engineer_only.len(), 1);
+        assert_eq!(engineer_only[0].id, 1);
     }
 }

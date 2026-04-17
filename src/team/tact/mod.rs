@@ -32,9 +32,9 @@ pub use prompt::{PLANNING_RESPONSE_FORMAT, compose_planning_prompt};
 
 pub fn dispatchable_task_count(
     board_dir: &Path,
-    _members: &[crate::team::hierarchy::MemberInstance],
+    members: &[crate::team::hierarchy::MemberInstance],
 ) -> Result<usize> {
-    Ok(crate::team::resolver::dispatchable_tasks(board_dir)?.len())
+    Ok(crate::team::resolver::engineer_dispatchable_tasks(board_dir, members)?.len())
 }
 
 pub fn should_trigger_planning_cycle(idle_engineers: usize, dispatchable_tasks: usize) -> bool {

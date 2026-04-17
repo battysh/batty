@@ -75,7 +75,7 @@ mod config_reload;
 #[path = "discord_bridge.rs"]
 mod discord_bridge;
 #[path = "dispatch/mod.rs"]
-mod dispatch;
+pub(crate) mod dispatch;
 #[path = "daemon/error_handling.rs"]
 mod error_handling;
 #[path = "daemon/health/mod.rs"]

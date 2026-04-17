@@ -2,6 +2,47 @@
 
 All notable changes to Batty are documented here.
 
+## 0.11.48 — 2026-04-17
+
+Field-report fix: in batty-marketing, jordan-pm's own note on task
+#573 body captured the symptom: "this is the third planning-cycle
+trigger in ~90min on stale 'idle engineers' diagnosis. ...
+Dispatcher mis-reads policy-parked tasks as dispatch-blocked."
+Each spurious planning cycle burns one Maya turn (~5k+ tokens), so
+three false triggers in ~90min = ~15k tokens of waste. Root cause:
+`dispatchable_task_count()` (called by tact planner + idle-burst
+and utilization interventions) delegates to
+`resolver::dispatchable_tasks()` which only filters on
+runnability, not on who owns the task. Since #703 introduced
+body-owner parsing that routes Maya-owned tasks away from
+engineers, engineers-dispatchable and dispatchable diverged: a
+Maya-owned runnable task still counted toward "engineer-
+dispatchable" for planning-cycle trigger math
+(`idle_engineers > dispatchable_tasks`), so idle engineers
+appeared "starved" even when Maya had plenty of her own work
+queued.
+
+### Fixes
+
+- **Planner and interventions now count only engineer-dispatchable
+  tasks** (#709) — new `resolver::engineer_dispatchable_tasks()`
+  helper layers #703's body-owner + assignee filter on top of
+  `dispatchable_tasks()`, excluding tasks whose body-parsed
+  `Owner:` line names a non-engineer member (architect, manager,
+  reviewer) or whose frontmatter `assignee` is a non-engineer.
+  Callers updated: `tact::dispatchable_task_count()`,
+  `interventions::dispatch::IdleBurstCheck`, and
+  `interventions::utilization::UtilizationCheck`. Exposed
+  `parse_body_owner_role` as `pub(crate)` and raised `dispatch`
+  and `dispatch::queue` module visibility to `pub(crate)` so the
+  resolver can share the body-owner parser. Regression tests:
+  `engineer_dispatchable_filters_out_maya_owned_body_tasks` (body
+  `Owner:` line naming maya-planner excluded) and
+  `engineer_dispatchable_filters_explicit_non_engineer_assignee`
+  (frontmatter `assignee: maya-planner` excluded). Prevents
+  repeated spurious planning cycles when engineers are idle but
+  only planner-owned work remains.
+
 ## 0.11.47 — 2026-04-17
 
 Field-report fix: in batty-marketing at 12:27:30 UTC, task #572

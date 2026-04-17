@@ -129,10 +129,13 @@ impl TeamDaemon {
                 .collect();
 
             let dispatchable_task_ids: std::collections::HashSet<u32> =
-                crate::team::resolver::dispatchable_tasks(&board_dir)?
-                    .into_iter()
-                    .map(|task| task.id)
-                    .collect();
+                crate::team::resolver::engineer_dispatchable_tasks(
+                    &board_dir,
+                    &self.config.members,
+                )?
+                .into_iter()
+                .map(|task| task.id)
+                .collect();
             let unassigned_open_tasks: Vec<&crate::task::Task> = tasks
                 .iter()
                 .filter(|task| dispatchable_task_ids.contains(&task.id))

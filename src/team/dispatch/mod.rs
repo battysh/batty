@@ -8,7 +8,7 @@
 //! - `guard` — escalation and failure routing
 
 mod guard;
-mod queue;
+pub(crate) mod queue;
 mod readiness;
 mod stabilization;
 mod wip;

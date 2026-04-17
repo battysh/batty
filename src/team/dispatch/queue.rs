@@ -186,7 +186,7 @@ fn first_role_token_after(text: &str) -> Option<String> {
 /// The returned role-name is merged into the task's tag set for the
 /// duration of one ranking call (see `rank_dispatch_engineers`), which
 /// triggers the #692 tag-match bypass so the matching engineer wins.
-fn parse_body_owner_role(body: &str) -> Option<String> {
+pub(crate) fn parse_body_owner_role(body: &str) -> Option<String> {
     const ROUTING_CUES: &[&str] = &[
         "Owner:",
         "OWNER:",
