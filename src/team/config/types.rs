@@ -738,6 +738,14 @@ pub struct BoardConfig {
     /// wrong answer when the original claimer intentionally parked).
     #[serde(default = "default_orphan_rescue_cooldown_secs")]
     pub orphan_rescue_cooldown_secs: u64,
+    /// #697: when an engineer releases their claim on a task (state
+    /// reconciliation detects `claimed_by` cleared), exclude that
+    /// specific engineer from re-dispatch of the same task for this
+    /// many seconds. Longer than `orphan_rescue_cooldown_secs` so the
+    /// exclusion outlasts the task-level exponential backoff and a
+    /// different engineer (or a manual re-route) gets the task next.
+    #[serde(default = "default_dispatch_release_exclusion_secs")]
+    pub dispatch_release_exclusion_secs: u64,
     /// Tags that disqualify a task from auto-dispatch to engineers. Case-insensitive.
     ///
     /// Default empty. Typical production use: `["planning", "design", "content", "ops"]`.
@@ -761,6 +769,7 @@ impl Default for BoardConfig {
             dispatch_dedup_window_secs: default_dispatch_dedup_window_secs(),
             dispatch_manual_cooldown_secs: default_dispatch_manual_cooldown_secs(),
             orphan_rescue_cooldown_secs: default_orphan_rescue_cooldown_secs(),
+            dispatch_release_exclusion_secs: default_dispatch_release_exclusion_secs(),
             dispatch_excluded_tags: Vec::new(),
         }
     }
@@ -1053,6 +1062,10 @@ fn default_dispatch_manual_cooldown_secs() -> u64 {
 
 fn default_orphan_rescue_cooldown_secs() -> u64 {
     300
+}
+
+fn default_dispatch_release_exclusion_secs() -> u64 {
+    3600 // 1 hour — outlasts the task-level exponential backoff (max 80m at count=5)
 }
 
 fn default_standup_interval() -> u64 {

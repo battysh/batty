@@ -897,6 +897,13 @@ impl TeamDaemon {
                 released_claims = true;
             }
             self.record_state_reconciliation(Some(&engineer), Some(task_id), correction);
+            // #697: when the engineer's claim was cleared by the engineer
+            // themselves (not by a task transition to done/review/blocked),
+            // record an exclusion so the dispatcher does not immediately
+            // re-dispatch the same task back to the engineer who parked it.
+            if reason == "task no longer claimed by this engineer" {
+                self.record_task_release_by(task_id, &engineer);
+            }
             self.record_orchestrator_action(format!(
                 "state reconciliation: {} stale active task #{} for {} ({})",
                 if release_claim {

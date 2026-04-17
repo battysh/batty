@@ -382,6 +382,7 @@ fn daemon_state_round_trip_preserves_runtime_fields() {
                 count: 3,
             },
         )]),
+        recently_released_by: HashMap::from([("55:kai-devrel-1-1".to_string(), 60)]),
     };
 
     save_daemon_state(tmp.path(), &state).unwrap();
@@ -460,6 +461,38 @@ fn restore_runtime_state_preserves_recently_rescued_tasks_across_restart() {
     assert!(
         restored_elapsed >= 175 && restored_elapsed <= 195,
         "expected restored last_rescued elapsed to be ~180s, got {restored_elapsed}s",
+    );
+}
+
+#[test]
+fn restore_runtime_state_preserves_recently_released_by_across_restart() {
+    // #697: before this fix, the engineer-release exclusion was
+    // in-memory only. A restart mid-cascade would wipe the exclusion
+    // window, and the dispatcher would immediately re-push the parked
+    // task back to the engineer who just released it — the exact
+    // pattern observed in batty-marketing with task #555 and kai-devrel-1-1.
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(tmp.path().join(".batty").join("team_config")).unwrap();
+
+    let mut daemon = make_test_daemon(tmp.path(), vec![manager_member("manager", None)]);
+    daemon.recently_released_by.insert(
+        (555, "kai-devrel-1-1".to_string()),
+        std::time::Instant::now() - std::time::Duration::from_secs(300),
+    );
+    daemon.persist_runtime_state(true).unwrap();
+
+    let mut restored = make_test_daemon(tmp.path(), vec![manager_member("manager", None)]);
+    assert!(restored.recently_released_by.is_empty());
+    restored.restore_runtime_state();
+    let restored_at = restored
+        .recently_released_by
+        .get(&(555, "kai-devrel-1-1".to_string()))
+        .copied()
+        .expect("release-exclusion record must survive restart");
+    let restored_elapsed = restored_at.elapsed().as_secs();
+    assert!(
+        restored_elapsed >= 295 && restored_elapsed <= 315,
+        "expected restored release-exclusion elapsed ~300s, got {restored_elapsed}s",
     );
 }
 
@@ -5429,6 +5462,7 @@ fn save_daemon_state_returns_error_on_readonly_dir() {
             planning_cycle_last_fired_elapsed_secs: None,
             planning_cycle_consecutive_empty: 0,
             recently_rescued_tasks: HashMap::new(),
+            recently_released_by: HashMap::new(),
         };
 
         let result = save_daemon_state(tmp.path(), &state);

@@ -2,6 +2,42 @@
 
 All notable changes to Batty are documented here.
 
+## 0.11.36 — 2026-04-17
+
+Field-report fix: after an engineer released their claim on a
+parked/blocked task, the dispatcher would immediately re-queue the
+same task back to the same engineer as soon as the task-level
+`orphan_rescue_cooldown_secs` window opened. The task-level
+exponential backoff grew correctly (5→10→20 min) but kept routing
+to the releasing engineer, who would release again in 30 seconds
+and burn ~10–50K LLM tokens per cycle re-reading the body before
+rejecting. Observed in batty-marketing: task #555 (Thread A T+24h
+harvest, owner kai-devrel) was dispatched to kai-devrel-1-1 at
+06:33:51, parked with an explicit upstream-block note, released at
+07:02:12, re-dispatched at 07:07:16 (5m+4s later — exactly the
+base cooldown), re-released at 07:07:48.
+
+### Fixes
+
+- **Per-engineer release exclusion excludes the releasing engineer
+  from re-dispatch** (#697) — new
+  `recently_released_by: HashMap<(u32, String), Instant>` on
+  `TeamDaemon`. `reconcile_active_tasks` in automation.rs populates
+  it when the reconciliation reason is
+  `"task no longer claimed by this engineer"` (the signal that the
+  engineer cleared `claimed_by` themselves, not a transition to
+  review/blocked/done). `enqueue_dispatch_candidates` filters the
+  map before picking an engineer; `process_dispatch_queue` prunes
+  stale queue entries covered by the exclusion. New config knob
+  `board.dispatch_release_exclusion_secs` (default 3600s / 1 hour)
+  outlasts the task-level exponential backoff so a different
+  engineer (or manual re-route) gets the task. State persisted in
+  `PersistedDaemonState.recently_released_by` as
+  `{"task_id:engineer": elapsed_secs}` entries so the exclusion
+  survives daemon restarts. Regression tests:
+  `release_exclusion_blocks_redispatch_to_same_engineer_until_window_expires`
+  + `restore_runtime_state_preserves_recently_released_by_across_restart`.
+
 ## 0.11.35 — 2026-04-17
 
 Field-report fix: `serialize_overlapping_candidate`'s auto-persisted
