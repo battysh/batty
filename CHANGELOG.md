@@ -2,6 +2,43 @@
 
 All notable changes to Batty are documented here.
 
+## 0.11.37 — 2026-04-17
+
+Field-report fix: the orphan rescue was quietly destroying
+engineer-set block metadata. When a task carried
+`blocked: true` + `block_reason: "..."` in frontmatter and the
+engineer released their claim, the rescue's
+`transition_task(..., "todo")` path called `clear_blocked`
+(correct for manual `batty move` — "engineer is unblocking the
+task" — but wrong for rescue — "daemon is cleaning up a stuck
+claim, not revoking the block"). The block vanished, the task
+became dispatchable again, and the next ranked engineer picked
+it up. Observed in batty-marketing task #553: priya-writer
+parked the task with an explicit `PARKED pending Maya
+sequencing ruling` block, released the claim; within one tick
+the rescue wiped the block; sam-designer-1-1 got re-dispatched
+and auto-refused for the third time in ~40 minutes.
+
+### Fixes
+
+- **Orphan rescue preserves engineer-set block metadata** (#698)
+  — new `transition_task_preserving_block` helper in
+  `src/team/task_cmd.rs` that writes the status field but skips
+  `clear_blocked`. `reconcile_active_tasks` in automation.rs
+  now checks `task.blocked.is_some() || task.blocked_on.is_some()`
+  before each rescue transition. When the task was blocked, the
+  rescue uses the preserving variant; otherwise it falls through
+  to the legacy `transition_task` so manual unblock semantics on
+  non-blocked rescues are unchanged. Applies to both the
+  "orphaned review" and "orphaned in-progress" branches.
+  Combined with the #697 per-engineer release exclusion, this
+  closes the auto-refuse cascade: even if the rescue cooldown
+  elapses, the block metadata survives and the dispatch filter
+  (`task.blocked.is_none()` in `available_dispatch_tasks`)
+  excludes the task from the queue. Regression tests:
+  `orphan_rescue_preserves_engineer_set_block_metadata` +
+  `orphan_rescue_still_clears_block_when_task_was_not_blocked`.
+
 ## 0.11.36 — 2026-04-17
 
 Field-report fix: after an engineer released their claim on a

@@ -3437,6 +3437,81 @@ fn reconcile_keeps_in_progress_task() {
 }
 
 #[test]
+fn orphan_rescue_preserves_engineer_set_block_metadata() {
+    // #698: regression — the sam-designer auto-refuse cascade at
+    // batty-marketing task #553 proved orphan rescue was calling
+    // `clear_blocked` on tasks the engineer explicitly parked. After
+    // priya-writer set `blocked: true` + `block_reason: "PARKED..."` and
+    // released, the rescue's `transition_task(..., "todo")` wiped the
+    // block, making the task re-dispatchable to the next ranked engineer
+    // (sam-designer) who had already refused it twice. The cycle burned
+    // engineer context on every tick.
+    let tmp = tempfile::tempdir().unwrap();
+    let tasks_dir = tmp
+        .path()
+        .join(".batty")
+        .join("team_config")
+        .join("board")
+        .join("tasks");
+    std::fs::create_dir_all(&tasks_dir).unwrap();
+    std::fs::write(
+        tasks_dir.join("553-parked-task.md"),
+        "---\nid: 553\ntitle: parked-task\nstatus: in-progress\npriority: high\nblocked: true\nblock_reason: \"PARKED pending sequencing ruling\"\nblocked_on: \"PARKED pending sequencing ruling\"\nclass: standard\n---\n\nTask body.\n",
+    )
+    .unwrap();
+    let mut daemon = make_test_daemon(
+        tmp.path(),
+        vec![engineer_member("eng-1", Some("manager"), false)],
+    );
+    // active_tasks empty: engineer released the claim, so the task is an
+    // orphan from the daemon's perspective.
+
+    daemon.reconcile_active_tasks().unwrap();
+
+    let task = crate::task::load_task_by_id(&tasks_dir, 553).unwrap();
+    assert_eq!(task.status, "todo", "orphan rescue should transition off in-progress");
+    assert!(
+        task.blocked.is_some(),
+        "block metadata must survive rescue — otherwise a parked task is re-dispatchable"
+    );
+    assert!(
+        task.blocked_on.is_some(),
+        "blocked_on must survive rescue for downstream filters"
+    );
+}
+
+#[test]
+fn orphan_rescue_still_clears_block_when_task_was_not_blocked() {
+    // #698 sibling: only blocked tasks should preserve their frontmatter.
+    // Tasks with no block fields follow the legacy behavior (no block to
+    // preserve, dispatch queue re-picks up the task on next tick).
+    let tmp = tempfile::tempdir().unwrap();
+    let tasks_dir = tmp
+        .path()
+        .join(".batty")
+        .join("team_config")
+        .join("board")
+        .join("tasks");
+    std::fs::create_dir_all(&tasks_dir).unwrap();
+    std::fs::write(
+        tasks_dir.join("600-plain-orphan.md"),
+        "---\nid: 600\ntitle: plain-orphan\nstatus: in-progress\npriority: medium\nclass: standard\n---\n\nTask body.\n",
+    )
+    .unwrap();
+    let mut daemon = make_test_daemon(
+        tmp.path(),
+        vec![engineer_member("eng-1", Some("manager"), false)],
+    );
+
+    daemon.reconcile_active_tasks().unwrap();
+
+    let task = crate::task::load_task_by_id(&tasks_dir, 600).unwrap();
+    assert_eq!(task.status, "todo");
+    assert!(task.blocked.is_none());
+    assert!(task.blocked_on.is_none());
+}
+
+#[test]
 fn spawn_all_agents_resume_reports_missing_sessions_across_primary_roles() {
     let tmp = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(tmp.path().join(".batty").join("team_config")).unwrap();

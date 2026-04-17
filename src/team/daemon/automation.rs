@@ -977,12 +977,35 @@ impl TeamDaemon {
                 && task.review_owner.is_none()
                 && !actively_tracked.contains(&task.id)
             {
+                // #698: preserve engineer-set block metadata across rescue.
+                // Without this, the pair of `transition_task` calls below
+                // clears `blocked` / `block_reason` / `blocked_on` (via
+                // `clear_blocked`), re-dispatching a task the engineer or
+                // manager explicitly parked — the canonical sam-designer
+                // auto-refuse cascade we saw with batty-marketing #553.
+                let preserve_block = task.blocked.is_some() || task.blocked_on.is_some();
                 warn!(
                     task_id = task.id,
+                    preserve_block,
                     "orphaned review task #{} has no owner — moving back to todo", task.id
                 );
-                let _ = crate::team::task_cmd::transition_task(&board_dir, task.id, "in-progress");
-                let _ = crate::team::task_cmd::transition_task(&board_dir, task.id, "todo");
+                if preserve_block {
+                    let _ = crate::team::task_cmd::transition_task_preserving_block(
+                        &board_dir,
+                        task.id,
+                        "in-progress",
+                    );
+                    let _ = crate::team::task_cmd::transition_task_preserving_block(
+                        &board_dir, task.id, "todo",
+                    );
+                } else {
+                    let _ = crate::team::task_cmd::transition_task(
+                        &board_dir,
+                        task.id,
+                        "in-progress",
+                    );
+                    let _ = crate::team::task_cmd::transition_task(&board_dir, task.id, "todo");
+                }
                 let _ = crate::team::task_cmd::unclaim_task(&board_dir, task.id);
                 // #684 / #686: same exponential-backoff dispatch-cooldown
                 // pattern as in-progress rescue.
@@ -996,11 +1019,20 @@ impl TeamDaemon {
                 && task.claimed_by.is_none()
                 && !actively_tracked.contains(&task.id)
             {
+                // #698: same block-preservation logic as review rescue above.
+                let preserve_block = task.blocked.is_some() || task.blocked_on.is_some();
                 warn!(
                     task_id = task.id,
+                    preserve_block,
                     "orphaned in-progress task #{} has no owner — moving back to todo", task.id
                 );
-                let _ = crate::team::task_cmd::transition_task(&board_dir, task.id, "todo");
+                if preserve_block {
+                    let _ = crate::team::task_cmd::transition_task_preserving_block(
+                        &board_dir, task.id, "todo",
+                    );
+                } else {
+                    let _ = crate::team::task_cmd::transition_task(&board_dir, task.id, "todo");
+                }
                 // #684 / #686: hold the task off the dispatch queue with an
                 // exponentially-growing cooldown on repeated rescues so the
                 // releasing engineer or manager has a widening window to
