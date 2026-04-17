@@ -2,6 +2,30 @@
 
 All notable changes to Batty are documented here.
 
+## 0.11.33 — 2026-04-17
+
+Field-report fix: persisted `dispatch_queue` entries carried routing
+decisions across binary upgrades, silently undoing routing-bug fixes.
+Observed in batty-marketing immediately after v0.11.32 deploy: task
+#552 (tagged `kai-devrel`) was delivered to sam-designer-1-1 at
+06:20:35Z — 34 seconds after daemon restart — because a stale
+`DispatchQueueEntry { engineer: "sam-designer-1-1", task_id: 552 }`
+was replayed from disk. The new binary's corrected routing logic
+(#691 + #692) was bypassed because the routing decision had been
+frozen at enqueue time under the old binary.
+
+### Fixes
+
+- **Drop `dispatch_queue` on daemon restart** (#694) —
+  `restore_runtime_state` no longer assigns
+  `state.dispatch_queue` into `self.dispatch_queue`. The queue
+  rebuilds from current board state on the next
+  `enqueue_dispatch_candidates` tick (within seconds), so we
+  accept a brief re-enqueue delay in exchange for guaranteeing
+  that every dispatch decision gets routed through the live
+  binary's logic. Regression test:
+  `restore_runtime_state_drops_dispatch_queue_across_restart`.
+
 ## 0.11.32 — 2026-04-17
 
 Field-report fix: the SDK stall recovery loop had no upper bound on

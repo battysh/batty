@@ -464,6 +464,41 @@ fn restore_runtime_state_preserves_recently_rescued_tasks_across_restart() {
 }
 
 #[test]
+fn restore_runtime_state_drops_dispatch_queue_across_restart() {
+    // #694: before this fix, `dispatch_queue` was persisted and replayed
+    // across restarts. A queue entry carries a (task_id, engineer) routing
+    // decision frozen at enqueue time, so entries created under a buggy
+    // binary would be delivered by the new binary — silently undoing the
+    // fix. Observed in batty-marketing after v0.11.32 deploy: task #552
+    // (tagged `kai-devrel`) was delivered to sam-designer-1-1 seconds
+    // after restart because a stale queue entry from a pre-upgrade
+    // binary was replayed.
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(tmp.path().join(".batty").join("team_config")).unwrap();
+
+    let mut daemon = make_test_daemon(tmp.path(), vec![manager_member("manager", None)]);
+    daemon.dispatch_queue.push(DispatchQueueEntry {
+        engineer: "sam-designer-1-1".to_string(),
+        task_id: 552,
+        task_title: "stale routing decision".to_string(),
+        queued_at: 0,
+        validation_failures: 0,
+        last_failure: None,
+    });
+    daemon.persist_runtime_state(true).unwrap();
+
+    let mut restored = make_test_daemon(tmp.path(), vec![manager_member("manager", None)]);
+    assert!(restored.dispatch_queue.is_empty());
+    restored.restore_runtime_state();
+    assert!(
+        restored.dispatch_queue.is_empty(),
+        "dispatch_queue must not be restored across restart — stale routing \
+         decisions must be re-ranked by enqueue_dispatch_candidates against \
+         the current binary's routing logic"
+    );
+}
+
+#[test]
 fn watcher_mut_returns_context_for_unknown_member() {
     let tmp = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(tmp.path().join(".batty").join("team_config")).unwrap();
