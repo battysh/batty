@@ -2000,7 +2000,27 @@ fn compute_board_metrics(
         .filter_map(|task| file_age_secs(&task.source_path, now))
         .max();
 
-    let idle_with_runnable = compute_idle_with_runnable(board_dir, members, &tasks, runnable_count);
+    // #711: "idle with runnable" must only count tasks an engineer could
+    // actually take. A task owned by the architect (body "Owner: maya-lead")
+    // or manager (frontmatter assignee: jordan-pm) is runnable-in-general but
+    // not engineer-runnable. Counting those caused the status display and
+    // standup report to warn "idle while runnable work exists" to engineers
+    // who had nothing to pick up, and surfaced the same false signal in
+    // jordan-pm's standup workflow-signals. Same classification pattern as
+    // #709 on the dispatch-gap / planning-cycle paths.
+    let non_engineer_names: HashSet<String> = members
+        .iter()
+        .filter(|member| member.role_type != RoleType::Engineer)
+        .map(|member| member.name.clone())
+        .collect();
+    let engineer_runnable_count = dispatchable_tasks
+        .iter()
+        .filter(|task| {
+            crate::team::resolver::is_engineer_dispatchable(task, &non_engineer_names)
+        })
+        .count() as u32;
+    let idle_with_runnable =
+        compute_idle_with_runnable(board_dir, members, &tasks, engineer_runnable_count);
     let top_runnable_tasks = top_runnable_task_summaries(&dispatchable_tasks, 3);
     let aging = project_root_from_board_dir(board_dir)
         .and_then(|project_root| {
@@ -3488,6 +3508,72 @@ mod tests {
         assert_eq!(metrics.idle_with_runnable, vec!["eng-4".to_string()]);
         assert!(metrics.oldest_review_age_secs.is_some());
         assert!(metrics.oldest_assignment_age_secs.is_some());
+    }
+
+    #[test]
+    fn idle_with_runnable_excludes_non_engineer_owned_runnable() {
+        // Regression for #711 — when the only runnable task is body-owned by
+        // the architect, compute_idle_with_runnable must not list engineers
+        // as "idle with runnable" because they cannot dispatch it.
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = board_dir(tmp.path()).join("tasks");
+        fs::create_dir_all(&tasks_dir).unwrap();
+        // Maya-owned strategy task — runnable but not engineer-runnable.
+        fs::write(
+            tasks_dir.join("001-maya-strategy.md"),
+            "---\nid: 1\ntitle: Maya strategy\nstatus: todo\npriority: high\nclass: standard\n---\n\n**Owner:** maya-lead (architect strategy work)\n",
+        )
+        .unwrap();
+
+        let metrics = compute_metrics(
+            &board_dir(tmp.path()),
+            &[
+                architect("maya-lead"),
+                engineer("eng-1"),
+                engineer("eng-2"),
+            ],
+        )
+        .unwrap();
+
+        // runnable_count still reports 1 — the task IS dispatchable in general.
+        assert_eq!(metrics.runnable_count, 1);
+        // But no engineer should be flagged as idle-with-runnable because
+        // no engineer-dispatchable task exists.
+        assert!(
+            metrics.idle_with_runnable.is_empty(),
+            "expected no idle-with-runnable engineers, got {:?}",
+            metrics.idle_with_runnable
+        );
+    }
+
+    #[test]
+    fn idle_with_runnable_lists_engineers_when_engineer_task_available() {
+        // Companion test for #711 — when at least one engineer-dispatchable
+        // task exists, idle engineers are still flagged.
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = board_dir(tmp.path()).join("tasks");
+        fs::create_dir_all(&tasks_dir).unwrap();
+        // Maya-owned (non-engineer) — filtered out.
+        fs::write(
+            tasks_dir.join("001-maya-strategy.md"),
+            "---\nid: 1\ntitle: Maya strategy\nstatus: todo\npriority: high\nclass: standard\n---\n\n**Owner:** maya-lead\n",
+        )
+        .unwrap();
+        // Plain engineer-runnable task — keeps idle_with_runnable non-empty.
+        fs::write(
+            tasks_dir.join("002-engineer-todo.md"),
+            "---\nid: 2\ntitle: Engineer work\nstatus: todo\npriority: medium\nclass: standard\n---\n\nRegular engineer work.\n",
+        )
+        .unwrap();
+
+        let metrics = compute_metrics(
+            &board_dir(tmp.path()),
+            &[architect("maya-lead"), engineer("eng-1")],
+        )
+        .unwrap();
+
+        assert_eq!(metrics.runnable_count, 2);
+        assert_eq!(metrics.idle_with_runnable, vec!["eng-1".to_string()]);
     }
 
     #[test]
