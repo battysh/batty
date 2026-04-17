@@ -423,18 +423,44 @@ impl TeamDaemon {
         .next())
     }
 
-    /// #684: task IDs currently within the orphan-rescue cooldown
-    /// window. Dispatch filters these out so a task the releasing
-    /// engineer parked doesn't immediately bounce to a peer.
+    /// #684 / #686: task IDs currently within the orphan-rescue cooldown
+    /// window (exponentially grown per repeated rescue). Dispatch filters
+    /// these out so a task the releasing engineer parked doesn't immediately
+    /// bounce to a peer, and tasks that keep getting rescued stay quiet
+    /// longer instead of re-cascading every base window.
     pub(super) fn rescued_task_ids(&self) -> HashSet<u32> {
-        let cooldown = Duration::from_secs(
+        let base = Duration::from_secs(
             self.config.team_config.board.orphan_rescue_cooldown_secs,
         );
         self.recently_rescued_tasks
             .iter()
-            .filter(|(_, rescued_at)| rescued_at.elapsed() < cooldown)
+            .filter(|(_, record)| record.is_active(base))
             .map(|(task_id, _)| *task_id)
             .collect()
+    }
+
+    /// #686: record a rescue event for `task_id`. If the task is still
+    /// within its current cooldown window, the count (and therefore the
+    /// next window) grows; otherwise the count resets to 1.
+    pub(in super::super) fn record_task_rescue(&mut self, task_id: u32) {
+        let base = Duration::from_secs(
+            self.config.team_config.board.orphan_rescue_cooldown_secs,
+        );
+        let now = Instant::now();
+        self.recently_rescued_tasks
+            .entry(task_id)
+            .and_modify(|record| {
+                if record.is_active(base) {
+                    record.count = record.count.saturating_add(1);
+                } else {
+                    record.count = 1;
+                }
+                record.last_rescued_at = now;
+            })
+            .or_insert(crate::team::daemon::RescueRecord {
+                last_rescued_at: now,
+                count: 1,
+            });
     }
 
     /// Returns names of configured members whose role is NOT `Engineer`.
@@ -469,12 +495,14 @@ impl TeamDaemon {
         self.recent_dispatches
             .retain(|_, dispatched_at| dispatched_at.elapsed() < dedup_window);
 
-        // #684: expire stale orphan-rescue cooldown entries.
-        let rescue_cooldown = Duration::from_secs(
+        // #684 / #686: expire stale orphan-rescue cooldown entries, using
+        // the per-task exponential window so repeatedly-rescued tasks stay
+        // quiet longer than the base cooldown.
+        let rescue_base_cooldown = Duration::from_secs(
             self.config.team_config.board.orphan_rescue_cooldown_secs,
         );
         self.recently_rescued_tasks
-            .retain(|_, rescued_at| rescued_at.elapsed() < rescue_cooldown);
+            .retain(|_, record| record.is_active(rescue_base_cooldown));
         let rescued_task_ids: HashSet<u32> = self
             .recently_rescued_tasks
             .keys()
@@ -1869,7 +1897,7 @@ mod tests {
             ])
             .states(HashMap::from([("eng-1".to_string(), MemberState::Idle)]))
             .build();
-        daemon.recently_rescued_tasks.insert(70, Instant::now());
+        daemon.record_task_rescue(70);
 
         daemon.enqueue_dispatch_candidates().unwrap();
 
@@ -1901,12 +1929,57 @@ mod tests {
             .build();
         // Force cooldown to 0 so the task is immediately eligible.
         daemon.config.team_config.board.orphan_rescue_cooldown_secs = 0;
-        daemon.recently_rescued_tasks.insert(71, Instant::now());
+        daemon.record_task_rescue(71);
 
         daemon.enqueue_dispatch_candidates().unwrap();
 
         assert_eq!(daemon.dispatch_queue.len(), 1);
         assert_eq!(daemon.dispatch_queue[0].task_id, 71);
+    }
+
+    #[test]
+    fn record_task_rescue_grows_cooldown_exponentially_on_repeat() {
+        // #686: repeated rescues of the same task should widen the
+        // effective dispatch-cooldown window (1×, 2×, 4×, 8×, 16× cap)
+        // so the engine doesn't cascade a task across every idle peer
+        // every base window.
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![
+                manager_member("mgr", None),
+                engineer_member("eng-1", Some("mgr"), false),
+            ])
+            .build();
+
+        daemon.record_task_rescue(99);
+        let first = daemon.recently_rescued_tasks[&99];
+        assert_eq!(first.count, 1);
+
+        // Rescue again while still active — count must grow.
+        daemon.record_task_rescue(99);
+        let second = daemon.recently_rescued_tasks[&99];
+        assert_eq!(second.count, 2);
+
+        daemon.record_task_rescue(99);
+        let third = daemon.recently_rescued_tasks[&99];
+        assert_eq!(third.count, 3);
+
+        // Effective cooldown doubles each rescue up to the 16× cap.
+        let base = std::time::Duration::from_secs(100);
+        assert_eq!(
+            third.effective_cooldown(base),
+            std::time::Duration::from_secs(400)
+        );
+
+        // Simulate many rescues — multiplier caps at 16×.
+        for _ in 0..10 {
+            daemon.record_task_rescue(99);
+        }
+        let capped = daemon.recently_rescued_tasks[&99];
+        assert_eq!(
+            capped.effective_cooldown(base),
+            std::time::Duration::from_secs(1600)
+        );
     }
 
     #[test]
