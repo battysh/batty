@@ -582,6 +582,43 @@ impl TeamDaemon {
             });
     }
 
+    /// #697: window within which an engineer who just released a task's
+    /// claim is excluded from re-dispatch of that same task.
+    pub(in super::super) fn release_exclusion_window(&self) -> Duration {
+        Duration::from_secs(
+            self.config
+                .team_config
+                .board
+                .dispatch_release_exclusion_secs,
+        )
+    }
+
+    /// #697: record that `engineer` just released task `task_id` (state
+    /// reconciliation observed `claimed_by` cleared). Subsequent dispatch
+    /// cycles skip this pair until `release_exclusion_window` elapses.
+    pub(in super::super) fn record_task_release_by(
+        &mut self,
+        task_id: u32,
+        engineer: &str,
+    ) {
+        self.recently_released_by
+            .insert((task_id, engineer.to_string()), Instant::now());
+    }
+
+    /// #697: true if `engineer` is still within the release-exclusion
+    /// window for `task_id`.
+    pub(in super::super) fn is_release_excluded(
+        &self,
+        task_id: u32,
+        engineer: &str,
+    ) -> bool {
+        let window = self.release_exclusion_window();
+        self.recently_released_by
+            .get(&(task_id, engineer.to_string()))
+            .map(|released_at| released_at.elapsed() < window)
+            .unwrap_or(false)
+    }
+
     /// Returns names of configured members whose role is NOT `Engineer`.
     /// Tasks whose `assignee:` frontmatter points at one of these names
     /// are excluded from dispatch — they belong in that member's inbox.
@@ -613,6 +650,10 @@ impl TeamDaemon {
         // Expire stale dedup entries.
         self.recent_dispatches
             .retain(|_, dispatched_at| dispatched_at.elapsed() < dedup_window);
+        // #697: expire stale release-exclusion entries.
+        let release_exclusion_window = self.release_exclusion_window();
+        self.recently_released_by
+            .retain(|_, released_at| released_at.elapsed() < release_exclusion_window);
 
         // #684 / #686 / #689: retain rescue records through the full
         // cascade-observation window (2× effective cooldown), not just
@@ -765,6 +806,8 @@ impl TeamDaemon {
                 !self
                     .recent_dispatches
                     .contains_key(&(task.id, engineer_name.clone()))
+                    // #697: skip engineers who recently released this task.
+                    && !self.is_release_excluded(task.id, engineer_name)
             }) else {
                 break;
             };
@@ -840,6 +883,18 @@ impl TeamDaemon {
                     engineer = %entry.engineer,
                     task_id = entry.task_id,
                     "dispatch queue: pruning entry — task re-entered orphan-rescue cooldown"
+                );
+                continue;
+            }
+            // #697: drop entries where the engineer recently released
+            // this task. `enqueue_dispatch_candidates` filters at queue
+            // time; this catches the race where the entry was queued
+            // before the release was recorded in the same tick.
+            if self.is_release_excluded(entry.task_id, &entry.engineer) {
+                info!(
+                    engineer = %entry.engineer,
+                    task_id = entry.task_id,
+                    "dispatch queue: pruning entry — engineer recently released this task"
                 );
                 continue;
             }
@@ -2431,6 +2486,50 @@ mod tests {
         assert_eq!(
             reset.count, 1,
             "rescue past cascade window is a new cascade — counter resets"
+        );
+    }
+
+    #[test]
+    fn release_exclusion_blocks_redispatch_to_same_engineer_until_window_expires() {
+        // #697: after an engineer releases a task (claim cleared), the
+        // dispatcher must not immediately re-queue the same task back to
+        // the same engineer. Observed in batty-marketing: task #555 was
+        // repeatedly re-dispatched to kai-devrel-1-1 at base-cooldown
+        // intervals after they parked it with an upstream-block note.
+        use std::time::Duration;
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![
+                manager_member("mgr", None),
+                engineer_member("eng-1", Some("mgr"), false),
+            ])
+            .build();
+        daemon.config.team_config.board.dispatch_release_exclusion_secs = 300;
+
+        assert!(!daemon.is_release_excluded(42, "eng-1"));
+        daemon.record_task_release_by(42, "eng-1");
+        assert!(
+            daemon.is_release_excluded(42, "eng-1"),
+            "engineer who just released task must be excluded"
+        );
+        // A different engineer should NOT be excluded.
+        assert!(
+            !daemon.is_release_excluded(42, "eng-2"),
+            "exclusion is per-(task, engineer), not global"
+        );
+        // A different task must not be excluded for the same engineer.
+        assert!(
+            !daemon.is_release_excluded(99, "eng-1"),
+            "exclusion must not leak to other tasks"
+        );
+
+        // Backdate the entry past the configured window — exclusion expires.
+        daemon
+            .recently_released_by
+            .insert((42, "eng-1".to_string()), std::time::Instant::now() - Duration::from_secs(400));
+        assert!(
+            !daemon.is_release_excluded(42, "eng-1"),
+            "exclusion must expire after dispatch_release_exclusion_secs"
         );
     }
 

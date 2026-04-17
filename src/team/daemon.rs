@@ -294,6 +294,14 @@ pub struct TeamDaemon {
     /// (capped at 16×) so repeated rescues of the same task widen the
     /// quiet period instead of re-cascading every base window.
     pub(super) recently_rescued_tasks: HashMap<u32, RescueRecord>,
+    /// #697: tasks recently released by a specific engineer. Populated
+    /// when state reconciliation detects an engineer cleared their claim
+    /// (reason `task no longer claimed by this engineer`). Dispatch
+    /// excludes that engineer from re-dispatch of the same task for
+    /// `dispatch_release_exclusion_secs` so they do not immediately
+    /// receive back a task they just parked. Other engineers remain
+    /// eligible once the task-level rescue cooldown expires.
+    pub(super) recently_released_by: HashMap<(u32, String), Instant>,
     /// Tracks recent escalation keys to suppress repeated alerts.
     pub(super) recent_escalations: HashMap<String, Instant>,
     /// Latest periodic main smoke-test outcome.
@@ -672,6 +680,7 @@ impl TeamDaemon {
             auto_merge_overrides: HashMap::new(),
             recent_dispatches: HashMap::new(),
             recently_rescued_tasks: HashMap::new(),
+            recently_released_by: HashMap::new(),
             recent_escalations: HashMap::new(),
             main_smoke_state: None,
             telemetry_db,

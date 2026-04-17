@@ -64,6 +64,13 @@ pub(super) struct PersistedDaemonState {
     /// cascaded task earns) survives daemon restarts.
     #[serde(default)]
     pub recently_rescued_tasks: HashMap<u32, PersistedRescueRecord>,
+    /// #697: per-(task, engineer) release-exclusion records. Persisted
+    /// so a restart mid-cascade does not reset the exclusion window and
+    /// let the releasing engineer immediately re-receive the task.
+    /// Key format: `"task_id:engineer"` (string-keyed for JSON tuple
+    /// compatibility).
+    #[serde(default)]
+    pub recently_released_by: HashMap<String, u64>,
 }
 
 impl TeamDaemon {
@@ -145,6 +152,20 @@ impl TeamDaemon {
                 )
             })
             .collect();
+        // #697: restore release-exclusion records so a releasing engineer
+        // is not immediately re-given the parked task after a restart.
+        self.recently_released_by = state
+            .recently_released_by
+            .into_iter()
+            .filter_map(|(key, elapsed_secs)| {
+                let (task_id_str, engineer) = key.split_once(':')?;
+                let task_id: u32 = task_id_str.parse().ok()?;
+                let released_at = Instant::now()
+                    .checked_sub(Duration::from_secs(elapsed_secs))
+                    .unwrap_or_else(Instant::now);
+                Some(((task_id, engineer.to_string()), released_at))
+            })
+            .collect();
     }
 
     pub(super) fn persist_runtime_state(&self, clean_shutdown: bool) -> Result<()> {
@@ -194,6 +215,16 @@ impl TeamDaemon {
                             last_rescued_elapsed_secs: record.last_rescued_at.elapsed().as_secs(),
                             count: record.count,
                         },
+                    )
+                })
+                .collect(),
+            recently_released_by: self
+                .recently_released_by
+                .iter()
+                .map(|((task_id, engineer), released_at)| {
+                    (
+                        format!("{task_id}:{engineer}"),
+                        released_at.elapsed().as_secs(),
                     )
                 })
                 .collect(),
