@@ -441,8 +441,7 @@ fn restore_runtime_state_preserves_recently_rescued_tasks_across_restart() {
     daemon.recently_rescued_tasks.insert(
         519,
         super::RescueRecord {
-            last_rescued_at: std::time::Instant::now()
-                - std::time::Duration::from_secs(180),
+            last_rescued_at: std::time::Instant::now() - std::time::Duration::from_secs(180),
             count: 4,
         },
     );
@@ -3607,7 +3606,10 @@ fn orphan_rescue_preserves_engineer_set_block_metadata() {
     daemon.reconcile_active_tasks().unwrap();
 
     let task = crate::task::load_task_by_id(&tasks_dir, 553).unwrap();
-    assert_eq!(task.status, "todo", "orphan rescue should transition off in-progress");
+    assert_eq!(
+        task.status, "todo",
+        "orphan rescue should transition off in-progress"
+    );
     assert!(
         task.blocked.is_some(),
         "block metadata must survive rescue — otherwise a parked task is re-dispatchable"

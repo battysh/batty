@@ -1560,12 +1560,9 @@ impl TeamDaemon {
                 {
                     warn!(error = %error, task_id, "failed to block task after stall cap");
                 }
-                if let Err(error) = super::task_cmd::assign_task_owners(
-                    &board_dir,
-                    task_id,
-                    Some(""),
-                    None,
-                ) {
+                if let Err(error) =
+                    super::task_cmd::assign_task_owners(&board_dir, task_id, Some(""), None)
+                {
                     warn!(error = %error, task_id, "failed to release claim after stall cap");
                 }
                 if let Some(manager) = self.manager_name(member_name) {

@@ -2,6 +2,43 @@
 
 All notable changes to Batty are documented here.
 
+## 0.11.55 — 2026-04-17
+
+Stop auto-doctor from resetting in-progress tasks whose claim
+uses the engineer's role name instead of the instance name.
+In batty-marketing, `alex-dev` (role) has one instance
+`alex-dev-1-1`. The dispatcher assigns `claimed_by:
+alex-dev-1-1`, but engineers often move their own tasks with
+`kanban-md move --claim alex-dev` using the role name they
+see in their prompt. Auto-doctor's `is_engineer` check
+required an exact match against `config.members[*].name`
+(instance-scoped), so any role-name claim was treated as
+"unknown engineer" and the in-progress task was reset to
+todo — churning correctly-assigned work and burning engineer
+context. Observed in batty-marketing on tasks #582 and #583
+after v0.11.54 restart.
+
+### Fixes
+
+- **Resolve role-name claims to canonical instance in
+  auto-doctor** (`src/team/daemon/health/auto_doctor.rs`) —
+  `auto_doctor_reset_orphaned_in_progress` and
+  `auto_doctor_reclaim_stale_claims` now call a new
+  `resolve_engineer_claim` helper that first matches
+  `member.name` (instance) then falls back to
+  `member.role_name` when exactly one engineer instance
+  shares the role. The resolved instance name drives
+  `active_task_id` lookups, `active_tasks` re-attach keys,
+  and `clear_active_task`/`worktree_dir` so the daemon
+  sees the claim as valid. Ambiguous role-name claims
+  (multiple instances) fall through to reset as before.
+- **Regression test**
+  (`orphaned_task_claimed_by_role_name_reattaches_to_single_instance`)
+  — writes a task with `claimed_by: eng` (role) and the
+  daemon has one member `name=eng-1, role_name=eng`;
+  asserts the task re-attaches to `eng-1` in `active_tasks`
+  instead of being reset.
+
 ## 0.11.54 — 2026-04-17
 
 Stop the dispatch-overlap predictor from parsing markdown bold

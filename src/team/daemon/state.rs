@@ -129,11 +129,13 @@ impl TeamDaemon {
         // stuck.
         self.planning_cycle_consecutive_empty = state.planning_cycle_consecutive_empty;
         self.planning_cycle_last_fired =
-            state.planning_cycle_last_fired_elapsed_secs.map(|elapsed_secs| {
-                Instant::now()
-                    .checked_sub(Duration::from_secs(elapsed_secs))
-                    .unwrap_or_else(Instant::now)
-            });
+            state
+                .planning_cycle_last_fired_elapsed_secs
+                .map(|elapsed_secs| {
+                    Instant::now()
+                        .checked_sub(Duration::from_secs(elapsed_secs))
+                        .unwrap_or_else(Instant::now)
+                });
         // #689: restore orphan-rescue records so the exponential-backoff
         // counter survives a daemon restart mid-cascade.
         self.recently_rescued_tasks = state

@@ -209,10 +209,7 @@ pub(crate) fn parse_body_owner_role(body: &str) -> Option<String> {
                         .next_back()
                         .map(|c| {
                             c.is_whitespace()
-                                || matches!(
-                                    c,
-                                    '-' | '*' | '_' | '(' | '[' | '.' | ';' | ':' | ','
-                                )
+                                || matches!(c, '-' | '*' | '_' | '(' | '[' | '.' | ';' | ':' | ',')
                         })
                         .unwrap_or(true);
                 if !boundary_ok {
@@ -682,9 +679,7 @@ impl TeamDaemon {
     /// bounce to a peer, and tasks that keep getting rescued stay quiet
     /// longer instead of re-cascading every base window.
     pub(super) fn rescued_task_ids(&self) -> HashSet<u32> {
-        let base = Duration::from_secs(
-            self.config.team_config.board.orphan_rescue_cooldown_secs,
-        );
+        let base = Duration::from_secs(self.config.team_config.board.orphan_rescue_cooldown_secs);
         self.recently_rescued_tasks
             .iter()
             .filter(|(_, record)| record.dispatch_blocked(base))
@@ -698,9 +693,7 @@ impl TeamDaemon {
     /// dispatch gate has opened, so gating growth on `dispatch_blocked`
     /// meant the counter never climbed past 1 in production.
     pub(in super::super) fn record_task_rescue(&mut self, task_id: u32) {
-        let base = Duration::from_secs(
-            self.config.team_config.board.orphan_rescue_cooldown_secs,
-        );
+        let base = Duration::from_secs(self.config.team_config.board.orphan_rescue_cooldown_secs);
         let now = Instant::now();
         self.recently_rescued_tasks
             .entry(task_id)
@@ -732,22 +725,14 @@ impl TeamDaemon {
     /// #697: record that `engineer` just released task `task_id` (state
     /// reconciliation observed `claimed_by` cleared). Subsequent dispatch
     /// cycles skip this pair until `release_exclusion_window` elapses.
-    pub(in super::super) fn record_task_release_by(
-        &mut self,
-        task_id: u32,
-        engineer: &str,
-    ) {
+    pub(in super::super) fn record_task_release_by(&mut self, task_id: u32, engineer: &str) {
         self.recently_released_by
             .insert((task_id, engineer.to_string()), Instant::now());
     }
 
     /// #697: true if `engineer` is still within the release-exclusion
     /// window for `task_id`.
-    pub(in super::super) fn is_release_excluded(
-        &self,
-        task_id: u32,
-        engineer: &str,
-    ) -> bool {
+    pub(in super::super) fn is_release_excluded(&self, task_id: u32, engineer: &str) -> bool {
         let window = self.release_exclusion_window();
         self.recently_released_by
             .get(&(task_id, engineer.to_string()))
@@ -796,9 +781,8 @@ impl TeamDaemon {
         // the dispatch gate. Dropping the record the moment the gate
         // opens is what caused the counter to reset to 1 on every
         // rescue in production — killing the exponential backoff.
-        let rescue_base_cooldown = Duration::from_secs(
-            self.config.team_config.board.orphan_rescue_cooldown_secs,
-        );
+        let rescue_base_cooldown =
+            Duration::from_secs(self.config.team_config.board.orphan_rescue_cooldown_secs);
         self.recently_rescued_tasks
             .retain(|_, record| record.in_cascade_window(rescue_base_cooldown));
         // Only task IDs still behind the dispatch gate should block new
@@ -1485,9 +1469,7 @@ impl TeamDaemon {
                 .config
                 .members
                 .iter()
-                .filter(|m| {
-                    m.role_type == RoleType::Engineer && &m.role_name == owner_role
-                })
+                .filter(|m| m.role_type == RoleType::Engineer && &m.role_name == owner_role)
                 .map(|m| m.name.clone())
                 .collect();
             if !engineers_with_role.is_empty() {
@@ -1509,9 +1491,7 @@ impl TeamDaemon {
         // tag-match bypass — so the explicit body owner wins over
         // scoring-tiebreaker alphabetical fallback.
         let task_for_ranking = match body_owner_role {
-            Some(owner_role)
-                if !task.tags.iter().any(|tag| tag == &owner_role) =>
-            {
+            Some(owner_role) if !task.tags.iter().any(|tag| tag == &owner_role) => {
                 let mut synth = task.clone();
                 synth.tags.push(owner_role);
                 std::borrow::Cow::Owned(synth)
@@ -2694,7 +2674,10 @@ mod tests {
             vec!["kai-devrel".to_string(), "devrel".to_string()]
         );
         // No hyphen → no suffix token; only self-seed.
-        assert_eq!(role_name_seed_tags("architect"), vec!["architect".to_string()]);
+        assert_eq!(
+            role_name_seed_tags("architect"),
+            vec!["architect".to_string()]
+        );
     }
 
     #[test]
@@ -2770,8 +2753,7 @@ mod tests {
         write_task_with_deps(tmp.path(), 560, "unrelated", &[]);
         let board_dir = tmp.path().join(".batty").join("team_config").join("board");
 
-        let (safe, rejected) =
-            split_acyclic_blocking_ids(&board_dir, 554, &[553, 560]).unwrap();
+        let (safe, rejected) = split_acyclic_blocking_ids(&board_dir, 554, &[553, 560]).unwrap();
 
         assert_eq!(
             rejected,
@@ -2795,8 +2777,7 @@ mod tests {
         write_task_with_deps(tmp.path(), 102, "c", &[]);
         let board_dir = tmp.path().join(".batty").join("team_config").join("board");
 
-        let (safe, rejected) =
-            split_acyclic_blocking_ids(&board_dir, 102, &[100]).unwrap();
+        let (safe, rejected) = split_acyclic_blocking_ids(&board_dir, 102, &[100]).unwrap();
 
         assert!(safe.is_empty(), "#102 -> #100 reaches #102 via #101");
         assert_eq!(rejected, vec![100]);
@@ -3072,7 +3053,11 @@ mod tests {
                 engineer_member("eng-1", Some("mgr"), false),
             ])
             .build();
-        daemon.config.team_config.board.dispatch_release_exclusion_secs = 300;
+        daemon
+            .config
+            .team_config
+            .board
+            .dispatch_release_exclusion_secs = 300;
 
         assert!(!daemon.is_release_excluded(42, "eng-1"));
         daemon.record_task_release_by(42, "eng-1");
@@ -3092,9 +3077,10 @@ mod tests {
         );
 
         // Backdate the entry past the configured window — exclusion expires.
-        daemon
-            .recently_released_by
-            .insert((42, "eng-1".to_string()), std::time::Instant::now() - Duration::from_secs(400));
+        daemon.recently_released_by.insert(
+            (42, "eng-1".to_string()),
+            std::time::Instant::now() - Duration::from_secs(400),
+        );
         assert!(
             !daemon.is_release_excluded(42, "eng-1"),
             "exclusion must expire after dispatch_release_exclusion_secs"
