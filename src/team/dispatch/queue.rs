@@ -840,9 +840,19 @@ impl TeamDaemon {
             }
         }
 
+        // Tasks whose only eligible engineer(s) are currently blocked (already
+        // in `recent_dispatches` or #697 release-excluded). Treat them as
+        // unavailable for the remainder of this enqueue pass so the outer
+        // loop can advance to lower-priority tasks for other idle engineers
+        // instead of stalling the whole queue. Observed 2026-04-17 on
+        // batty_marketing: top-priority #597 was body-owner-restricted to
+        // alex-dev-1-1 who sat inside the 1h release-exclusion window, which
+        // starved dispatches for priya/sam/kai on their own tasks.
+        let mut eligibility_excluded_task_ids: HashSet<u32> = HashSet::new();
         loop {
             let mut unavailable_task_ids = queued_task_ids.clone();
             unavailable_task_ids.extend(file_locked_task_ids.iter().copied());
+            unavailable_task_ids.extend(eligibility_excluded_task_ids.iter().copied());
             let available_tasks = available_dispatch_tasks(
                 &board_dir,
                 &unavailable_task_ids,
@@ -931,7 +941,13 @@ impl TeamDaemon {
                     // #697: skip engineers who recently released this task.
                     && !self.is_release_excluded(task.id, engineer_name)
             }) else {
-                break;
+                // No eligible engineer for THIS task right now — defer it and
+                // let the loop consider lower-priority tasks. Without this,
+                // a body-owner-restricted high-priority task whose owner is
+                // inside the release-exclusion window blocks every subsequent
+                // idle engineer from getting work.
+                eligibility_excluded_task_ids.insert(task.id);
+                continue;
             };
 
             queued_task_ids.insert(task.id);
@@ -3085,6 +3101,80 @@ mod tests {
             !daemon.is_release_excluded(42, "eng-1"),
             "exclusion must expire after dispatch_release_exclusion_secs"
         );
+    }
+
+    #[test]
+    fn enqueue_dispatch_candidates_defers_release_excluded_task_and_dispatches_next_priority() {
+        // Regression for dispatch-starvation observed on batty_marketing
+        // 2026-04-17: top-priority task was body-owner-restricted to a
+        // single engineer who was inside the 1h #697 release-exclusion
+        // window. The pre-fix `enqueue_dispatch_candidates` called
+        // `break` when its ranked_engineers `find` came up empty, which
+        // stalled the whole queue — idle peers whose own tasks were
+        // dispatchable never got them. Fix: defer the blocked task via
+        // `eligibility_excluded_task_ids` and `continue` so the loop
+        // advances to the next candidate.
+        let tmp = tempfile::tempdir().unwrap();
+        write_task_with_body(
+            tmp.path(),
+            101,
+            "ci-badge-repair",
+            "todo",
+            None,
+            "- Owner: alex-dev. Prefer CI job repair over badge swap.\n",
+        );
+        write_task_with_body(
+            tmp.path(),
+            102,
+            "twir-submission",
+            "todo",
+            None,
+            "- Route: dispatch to priya-writer.\n",
+        );
+
+        let alex = MemberInstance {
+            name: "alex-dev-1-1".to_string(),
+            role_name: "alex-dev".to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("claude".to_string()),
+            reports_to: Some("mgr".to_string()),
+            use_worktrees: false,
+            ..MemberInstance::default()
+        };
+        let priya = MemberInstance {
+            name: "priya-writer-1-1".to_string(),
+            role_name: "priya-writer".to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("claude".to_string()),
+            reports_to: Some("mgr".to_string()),
+            use_worktrees: false,
+            ..MemberInstance::default()
+        };
+
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![manager_member("mgr", None), alex, priya])
+            .states(HashMap::from([
+                ("alex-dev-1-1".to_string(), MemberState::Idle),
+                ("priya-writer-1-1".to_string(), MemberState::Idle),
+            ]))
+            .build();
+
+        // Alex just released task #101 — still inside the exclusion window.
+        daemon.record_task_release_by(101, "alex-dev-1-1");
+        assert!(daemon.is_release_excluded(101, "alex-dev-1-1"));
+
+        daemon.enqueue_dispatch_candidates().unwrap();
+
+        // #101 must be deferred (alex is the only eligible engineer and is
+        // release-excluded) and #102 must still dispatch to priya. Before
+        // the fix, the outer loop `break`'d on #101 and left priya idle.
+        assert_eq!(
+            daemon.dispatch_queue.len(),
+            1,
+            "release-excluded top-priority task must not starve lower candidates"
+        );
+        assert_eq!(daemon.dispatch_queue[0].task_id, 102);
+        assert_eq!(daemon.dispatch_queue[0].engineer, "priya-writer-1-1");
     }
 
     #[test]
