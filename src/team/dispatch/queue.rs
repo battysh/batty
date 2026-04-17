@@ -18,6 +18,60 @@ use crate::team::allocation::{
 use crate::team::config::AllocationStrategy;
 use serde::Deserialize;
 
+/// #696: partition `blocking_task_ids` into (safe, rejected) by walking
+/// the on-disk `depends_on` graph. An edge `candidate -> blocking` is
+/// unsafe when `blocking` already depends on `candidate` (directly or
+/// transitively), because persisting it would close a cycle. Returns
+/// the edges that can be safely appended and the rejected ones for
+/// logging.
+fn split_acyclic_blocking_ids(
+    board_dir: &Path,
+    candidate_id: u32,
+    blocking_task_ids: &[u32],
+) -> Result<(Vec<u32>, Vec<u32>)> {
+    let tasks = crate::task::load_tasks_from_dir(&board_dir.join("tasks"))?;
+    let deps_by_id: HashMap<u32, Vec<u32>> = tasks
+        .iter()
+        .map(|task| (task.id, task.depends_on.clone()))
+        .collect();
+
+    let reaches_candidate = |start: u32| -> bool {
+        if start == candidate_id {
+            return true;
+        }
+        let mut visited: HashSet<u32> = HashSet::new();
+        let mut stack: Vec<u32> = vec![start];
+        while let Some(node) = stack.pop() {
+            if !visited.insert(node) {
+                continue;
+            }
+            let Some(neighbors) = deps_by_id.get(&node) else {
+                continue;
+            };
+            for next in neighbors {
+                if *next == candidate_id {
+                    return true;
+                }
+                if !visited.contains(next) {
+                    stack.push(*next);
+                }
+            }
+        }
+        false
+    };
+
+    let mut safe = Vec::new();
+    let mut rejected = Vec::new();
+    for id in blocking_task_ids {
+        if reaches_candidate(*id) {
+            rejected.push(*id);
+        } else {
+            safe.push(*id);
+        }
+    }
+    Ok((safe, rejected))
+}
+
 /// Parse an explicit `Owner: <role>` line from a task body, returning the
 /// first role-name-looking token (lowercase letters + hyphens).
 ///
@@ -392,11 +446,32 @@ impl TeamDaemon {
                 )
             })
             .collect::<Vec<_>>();
-        let updated_dependencies = if persist_dependency {
+        // #696: strip cycle-creating edges before persisting. If the
+        // candidate is already (directly or transitively) a dependency
+        // of a blocking task, adding `candidate depends_on blocking_id`
+        // would form a cycle — auto_doctor surfaces these as WARNs but
+        // does not heal them, leaving both tasks indefinitely stuck.
+        // Observed in batty-marketing 2026-04-17: #553 depends_on [554]
+        // was authored by maya-lead, then dispatch overlap persisted
+        // #554 depends_on [553] ("prevented overlapping dispatch"),
+        // producing `dependency cycle detected: #553 -> #554 -> #553`.
+        let (safe_blocking_ids, rejected_blocking_ids) = if persist_dependency {
+            split_acyclic_blocking_ids(board_dir, candidate.id, &blocking_task_ids)?
+        } else {
+            (blocking_task_ids.clone(), Vec::new())
+        };
+        if !rejected_blocking_ids.is_empty() {
+            warn!(
+                task_id = candidate.id,
+                rejected = ?rejected_blocking_ids,
+                "dispatch queue: skipped cycle-creating overlap dependency"
+            );
+        }
+        let updated_dependencies = if persist_dependency && !safe_blocking_ids.is_empty() {
             Some(append_task_dependencies(
                 board_dir,
                 candidate.id,
-                &blocking_task_ids,
+                &safe_blocking_ids,
             )?)
         } else {
             None
@@ -1231,7 +1306,10 @@ mod tests {
     use std::collections::{HashMap, HashSet};
     use std::path::Path;
 
-    use super::{OverlapConflict, find_overlapping_tasks, parse_body_owner_role, predicted_files};
+    use super::{
+        OverlapConflict, find_overlapping_tasks, parse_body_owner_role, predicted_files,
+        split_acyclic_blocking_ids,
+    };
     use crate::team::config::RoleType;
     use crate::team::hierarchy::MemberInstance;
     use crate::team::standup::MemberState;
@@ -2133,6 +2211,51 @@ mod tests {
              priya-writer-1-1 even when frontmatter tags are thematic \
              (content/pillar-b/x/writing) and match no role_name"
         );
+    }
+
+    #[test]
+    fn split_acyclic_blocking_ids_rejects_reverse_edge() {
+        // #696: #553 already depends_on [#554]. If dispatch overlap wants
+        // to persist #554 depends_on [#553], that edge closes a cycle
+        // and auto_doctor will WARN on every subsequent tick without
+        // healing — leaving both tasks stuck. The splitter must
+        // reject the cycle-forming edge and keep the rest.
+        let tmp = tempfile::tempdir().unwrap();
+        write_task_with_deps(tmp.path(), 553, "pillar-b-thread", &[554]);
+        write_task_with_deps(tmp.path(), 554, "dev-to-article", &[]);
+        write_task_with_deps(tmp.path(), 560, "unrelated", &[]);
+        let board_dir = tmp.path().join(".batty").join("team_config").join("board");
+
+        let (safe, rejected) =
+            split_acyclic_blocking_ids(&board_dir, 554, &[553, 560]).unwrap();
+
+        assert_eq!(
+            rejected,
+            vec![553],
+            "edge #554 -> #553 must be rejected — #553 already depends on #554"
+        );
+        assert_eq!(
+            safe,
+            vec![560],
+            "unrelated #554 -> #560 edge stays — no cycle"
+        );
+    }
+
+    #[test]
+    fn split_acyclic_blocking_ids_rejects_transitive_cycle() {
+        // Chain: #A depends_on #B depends_on #C. Persisting
+        // #C depends_on #A would close a 3-node cycle through #B.
+        let tmp = tempfile::tempdir().unwrap();
+        write_task_with_deps(tmp.path(), 100, "a", &[101]);
+        write_task_with_deps(tmp.path(), 101, "b", &[102]);
+        write_task_with_deps(tmp.path(), 102, "c", &[]);
+        let board_dir = tmp.path().join(".batty").join("team_config").join("board");
+
+        let (safe, rejected) =
+            split_acyclic_blocking_ids(&board_dir, 102, &[100]).unwrap();
+
+        assert!(safe.is_empty(), "#102 -> #100 reaches #102 via #101");
+        assert_eq!(rejected, vec![100]);
     }
 
     #[test]

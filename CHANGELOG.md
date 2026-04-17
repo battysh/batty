@@ -2,6 +2,32 @@
 
 All notable changes to Batty are documented here.
 
+## 0.11.35 — 2026-04-17
+
+Field-report fix: `serialize_overlapping_candidate`'s auto-persisted
+overlap dependency could close a cycle when the blocking task
+already depended on the candidate. Observed in batty-marketing:
+task #553 (priority: high, status: in-progress) had
+`depends_on: [554]` from the author, then dispatch considered #554
+for dispatch, saw it overlapped files with #553, and persisted
+`#554 depends_on [553]`. Auto_doctor logged
+`dependency cycle detected: #553 -> #554 -> #553` every tick but
+took no heal action — the tasks were only unstuck because priya
+finished #554 before the cycle could gate dispatch.
+
+### Fixes
+
+- **Strip cycle-forming edges from overlap dependency persistence** (#696) —
+  new `split_acyclic_blocking_ids` walks the on-disk `depends_on`
+  graph from each blocking task and rejects any edge whose target
+  (the candidate) is already reachable. Only the acyclic subset is
+  handed to `append_task_dependencies`. Rejected edges are logged
+  at WARN so the overlap is still visible in operator logs.
+  Regressions: `split_acyclic_blocking_ids_rejects_reverse_edge`
+  (direct `A depends_on B` → persisting `B depends_on A` stripped),
+  `split_acyclic_blocking_ids_rejects_transitive_cycle` (3-node
+  chain #A → #B → #C → persisting `C depends_on A` stripped).
+
 ## 0.11.34 — 2026-04-17
 
 Field-report fix: tasks whose frontmatter `tags:` are thematic but
