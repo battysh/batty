@@ -79,6 +79,19 @@ impl TeamDaemon {
         let idle_active_engineers: Vec<(String, Vec<u32>)> = engineer_names
             .iter()
             .filter(|name| self.is_member_idle(name))
+            // #702: when the owned-task intervention has just nudged the engineer
+            // directly and hasn't yet escalated to their manager, surfacing the
+            // same engineer to the architect duplicates the nudge in the same
+            // tick — burning a supervisory turn on information the engineer is
+            // already being asked to act on. Once owned-task gives up and
+            // escalates (`escalation_sent = true`), the architect signal becomes
+            // load-bearing again, so we only suppress the pre-escalation window.
+            .filter(|name| {
+                !self
+                    .owned_task_interventions
+                    .get(name.as_str())
+                    .is_some_and(|state| !state.escalation_sent)
+            })
             .filter_map(|name| {
                 let task_ids: Vec<u32> = tasks
                     .iter()

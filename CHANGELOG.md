@@ -2,6 +2,39 @@
 
 All notable changes to Batty are documented here.
 
+## 0.11.41 — 2026-04-17
+
+Field-report fix: in the batty-marketing observation window the
+architect utilization intervention fired in the same tick as the
+owned-task intervention for the same engineer, double-nudging the
+architect about a condition the engineer was already being asked
+to address directly. At 09:52:10 UTC `maybe_intervene_owned_tasks`
+queued a nudge to `alex-dev-1-1` for his in-progress #518, and
+105 ms later `maybe_intervene_architect_utilization` fired for
+`maya-lead` with `idle_active_engineers=1` — listing the same
+alex/#518 pair. 90 seconds after maya responded, `tact_check`
+fired a planning cycle with `dispatchable_tasks=0`, stacking a
+third overlapping nudge on the architect inbox. The architect
+burned supervisory turns on information the engineer was already
+acting on, and the owned-task state machine already has an
+escalation path (`escalation_sent`) for when the direct nudge
+fails.
+
+### Fixes
+
+- **Suppress architect utilization during active owned-task
+  nudge** (#702) — `maybe_intervene_architect_utilization` in
+  `src/team/daemon/interventions/utilization.rs` now filters
+  `idle_active_engineers` to exclude engineers whose
+  `owned_task_interventions` entry has `escalation_sent=false`.
+  The architect signal re-engages automatically once owned-task
+  escalates to the manager (i.e. the engineer ignored the direct
+  nudge and the supervisory chain is the right escalation
+  target). Regression test:
+  `architect_utilization_suppresses_idle_active_until_owned_task_escalates`
+  covers both the suppressed-first-fire and post-escalation
+  re-fire paths.
+
 ## 0.11.40 — 2026-04-17
 
 Field-report fix: the zero-diff completion tracker was cold-
