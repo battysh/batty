@@ -215,6 +215,24 @@ pub(super) fn binary_is_reloadable(path: &Path) -> bool {
 
     #[cfg(target_os = "macos")]
     {
+        // On macOS, `cp` preserves the embedded codesign bytes (so
+        // `codesign --verify` passes), but the kernel's amfi cache keys on
+        // inode identity — a replaced binary at the same path is SIGKILLed
+        // on exec even though the signature is valid. Refreshing the adhoc
+        // signature with `codesign --force --sign -` invalidates the cache
+        // and restores exec trust. Do it once per reload attempt before
+        // the verify check so a freshly-copied binary won't crash the
+        // daemon post-exec.
+        let resigned = std::process::Command::new("codesign")
+            .args(["--force", "--sign", "-", path.to_string_lossy().as_ref()])
+            .status();
+        if !matches!(resigned, Ok(status) if status.success()) {
+            warn!(
+                path = %path.display(),
+                "codesign adhoc re-sign failed before hot-reload verify; exec may SIGKILL"
+            );
+        }
+
         let Ok(status) = std::process::Command::new("codesign")
             .args(["--verify", path.to_string_lossy().as_ref()])
             .status()

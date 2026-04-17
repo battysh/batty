@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::{DateTime, Local, Utc};
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 use super::telegram_bridge::TelegramCommand;
 use super::*;
@@ -62,7 +62,7 @@ impl TeamDaemon {
         {
             Ok(messages) => messages,
             Err(error) => {
-                debug!(error = %error, "discord poll failed");
+                warn!(error = %error, "discord poll failed");
                 return Ok(());
             }
         };
