@@ -185,6 +185,37 @@ pub fn assign_task(project_root: &Path, engineer: &str, task: &str) -> Result<St
         }
     }
 
+    // #713: mirror the daemon's WIP-limit guard (routing.rs, Assign branch)
+    // at the CLI boundary so `batty assign` fails fast instead of silently
+    // accepting an assignment the daemon will reject. Without this guard,
+    // managers like jordan-pm burn a full turn composing the assign, and a
+    // second turn reading the daemon-queued rejection — a two-turn cost for
+    // a state the CLI already knew at send time.
+    let board_dir = board_dir_for(project_root);
+    let tasks_dir = board_dir.join("tasks");
+    if tasks_dir.exists() {
+        let active: Vec<crate::task::Task> = crate::task::load_tasks_from_dir(&tasks_dir)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|t| {
+                t.claimed_by.as_deref() == Some(recipient.as_str())
+                    && matches!(t.status.as_str(), "in-progress" | "review")
+            })
+            .collect();
+        if !active.is_empty() {
+            let summary = active
+                .iter()
+                .map(|t| format!("#{} ({}: {})", t.id, t.status, t.title))
+                .collect::<Vec<_>>()
+                .join(", ");
+            bail!(
+                "Assignment to {recipient} rejected (WIP limit): engineer already has {} active item(s): {summary}. \
+                 Merge or complete the current work first, then re-assign.",
+                active.len()
+            );
+        }
+    }
+
     let root = inbox::inboxes_root(project_root);
     let msg = inbox::InboxMessage::new_assign(&from, &recipient, task);
     let id = inbox::deliver_to_inbox(&root, &msg)?;
@@ -644,6 +675,59 @@ mod tests {
         assert_eq!(pending[0].to, "eng-1-1");
         assert_eq!(pending[0].body, "fix bug");
         assert_eq!(pending[0].msg_type, inbox::MessageType::Assign);
+    }
+
+    // #713 regression — `batty assign` must fail fast (bail, not deliver)
+    // when the target engineer already holds an in-progress / review item,
+    // mirroring the daemon-side routing guard so managers don't burn a
+    // compose + re-read-rejection round trip.
+    #[test]
+    fn assign_task_rejects_when_engineer_already_has_active_task() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _tmux_pane = EnvVarGuard::unset("TMUX_PANE");
+        let _batty_member = EnvVarGuard::unset("BATTY_MEMBER");
+
+        let tasks_dir = board_dir_for(tmp.path()).join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+        std::fs::write(
+            tasks_dir.join("042-active.md"),
+            "---\nid: 42\ntitle: Active work\nstatus: in-progress\nclaimed_by: eng-1-1\npriority: high\nclass: standard\n---\n\nbody\n",
+        ).unwrap();
+
+        let err = assign_task(tmp.path(), "eng-1-1", "new work").unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("WIP limit"),
+            "error should mention WIP limit, got: {msg}"
+        );
+        assert!(
+            msg.contains("#42"),
+            "error should identify the active task, got: {msg}"
+        );
+
+        let root = inbox::inboxes_root(tmp.path());
+        let pending = inbox::pending_messages(&root, "eng-1-1").unwrap();
+        assert!(
+            pending.is_empty(),
+            "assignment must not be delivered to inbox when bailed"
+        );
+    }
+
+    #[test]
+    fn assign_task_allows_when_engineers_only_active_is_done_or_todo() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _tmux_pane = EnvVarGuard::unset("TMUX_PANE");
+        let _batty_member = EnvVarGuard::unset("BATTY_MEMBER");
+
+        let tasks_dir = board_dir_for(tmp.path()).join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+        std::fs::write(
+            tasks_dir.join("042-old.md"),
+            "---\nid: 42\ntitle: Old completed\nstatus: done\nclaimed_by: eng-1-1\npriority: high\nclass: standard\n---\n\nbody\n",
+        ).unwrap();
+
+        let id = assign_task(tmp.path(), "eng-1-1", "new work").unwrap();
+        assert!(!id.is_empty());
     }
 
     #[test]
