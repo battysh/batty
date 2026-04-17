@@ -83,7 +83,17 @@ impl TeamDaemon {
         self.active_tasks = state.active_tasks;
         self.retry_counts = state.retry_counts;
         self.discord_event_cursor = state.discord_event_cursor;
-        self.dispatch_queue = state.dispatch_queue;
+        // #694: do NOT restore dispatch_queue across restarts. A queue entry
+        // carries a (task_id, engineer) routing decision frozen at enqueue
+        // time. When the daemon binary is upgraded to fix a routing bug, any
+        // entries enqueued under the buggy binary would still be delivered by
+        // the new binary — silently undoing the fix. Observed after v0.11.32
+        // deploy: task #552 (tagged `kai-devrel`) was delivered to
+        // sam-designer-1-1 seconds after restart because the stale queue
+        // entry from a pre-upgrade binary was replayed. `enqueue_dispatch_candidates`
+        // re-populates the queue from current board state within one tick, so
+        // dropping it on restore costs at most a brief delay.
+        let _discarded_dispatch_queue = state.dispatch_queue;
         self.paused_standups = state.paused_standups;
         self.last_standup = standup::restore_timer_state(state.last_standup_elapsed_secs);
 
