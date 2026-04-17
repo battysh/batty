@@ -2,6 +2,24 @@
 
 All notable changes to Batty are documented here.
 
+## 0.11.23 — 2026-04-17
+
+Sixth-round field-report fix: stop tearing down idle agents.
+
+### Fixes
+
+- **Zero-output restart gated on `Working` state** (#685) — the context
+  health check restarted any agent whose shim reported zero output for
+  10+ minutes, regardless of `MemberState`. Idle agents with empty
+  inboxes and no active task legitimately produce no output, so the
+  handler was tearing them down every 10 minutes and paying a fresh
+  shim cold-respawn cost with no behavioral gain. Observed in
+  `batty_marketing`: 5 agents (kai, priya, sam, alex, jordan) all
+  force-restarted at uptime 600s in a single tick. The zero-output
+  branch now checks `is_working` first and returns early when the
+  member is Idle. Working members whose shim hung still restart as
+  before.
+
 ## 0.11.22 — 2026-04-17
 
 Fifth-round field-report fix: damp the release→redispatch loop.
