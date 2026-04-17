@@ -731,6 +731,13 @@ pub struct BoardConfig {
     pub dispatch_dedup_window_secs: u64,
     #[serde(default = "default_dispatch_manual_cooldown_secs")]
     pub dispatch_manual_cooldown_secs: u64,
+    /// After orphan rescue moves an in-progress task back to todo, how long
+    /// to hold it off the dispatch queue. Gives the releasing engineer or
+    /// the manager a window to reclaim/re-route before the task is
+    /// automatically re-dispatched to a peer (which is almost always the
+    /// wrong answer when the original claimer intentionally parked).
+    #[serde(default = "default_orphan_rescue_cooldown_secs")]
+    pub orphan_rescue_cooldown_secs: u64,
     /// Tags that disqualify a task from auto-dispatch to engineers. Case-insensitive.
     ///
     /// Default empty. Typical production use: `["planning", "design", "content", "ops"]`.
@@ -753,6 +760,7 @@ impl Default for BoardConfig {
             dispatch_stabilization_delay_secs: default_dispatch_stabilization_delay_secs(),
             dispatch_dedup_window_secs: default_dispatch_dedup_window_secs(),
             dispatch_manual_cooldown_secs: default_dispatch_manual_cooldown_secs(),
+            orphan_rescue_cooldown_secs: default_orphan_rescue_cooldown_secs(),
             dispatch_excluded_tags: Vec::new(),
         }
     }
@@ -1041,6 +1049,10 @@ fn default_dispatch_dedup_window_secs() -> u64 {
 
 fn default_dispatch_manual_cooldown_secs() -> u64 {
     30
+}
+
+fn default_orphan_rescue_cooldown_secs() -> u64 {
+    300
 }
 
 fn default_standup_interval() -> u64 {

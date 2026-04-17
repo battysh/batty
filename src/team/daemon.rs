@@ -238,6 +238,12 @@ pub struct TeamDaemon {
     pub(super) auto_merge_overrides: HashMap<u32, bool>,
     /// Tracks recent (task_id, engineer) dispatch pairs for deduplication.
     pub(super) recent_dispatches: HashMap<(u32, String), Instant>,
+    /// #684: tasks the auto/runtime orphan rescue just moved back to todo.
+    /// Dispatch skips these for `orphan_rescue_cooldown_secs` so the
+    /// releasing engineer or manager has a window to reclaim/re-route
+    /// before the task is auto-dispatched to a peer (which is usually the
+    /// wrong answer when the original claimer parked intentionally).
+    pub(super) recently_rescued_tasks: HashMap<u32, Instant>,
     /// Tracks recent escalation keys to suppress repeated alerts.
     pub(super) recent_escalations: HashMap<String, Instant>,
     /// Latest periodic main smoke-test outcome.
@@ -608,6 +614,7 @@ impl TeamDaemon {
             subsystem_error_counts: HashMap::new(),
             auto_merge_overrides: HashMap::new(),
             recent_dispatches: HashMap::new(),
+            recently_rescued_tasks: HashMap::new(),
             recent_escalations: HashMap::new(),
             main_smoke_state: None,
             telemetry_db,

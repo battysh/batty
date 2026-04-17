@@ -2,6 +2,28 @@
 
 All notable changes to Batty are documented here.
 
+## 0.11.22 — 2026-04-17
+
+Fifth-round field-report fix: damp the release→redispatch loop.
+
+### Fixes
+
+- **Orphan-rescue cooldown before auto-redispatch** (#684) — when an
+  engineer releases a parked/in-progress task (by clearing their own
+  claim) and the daemon reconciles the board back to `todo`, the
+  dispatch queue previously re-handed the task to the first idle peer
+  on the same tick — which then rejected it, triggering another rescue
+  → re-dispatch cycle. Observed in `batty_marketing`: kai-devrel
+  released #519 at 03:06:48, sam-designer got it at 03:06:48, released,
+  alex-dev got it at 03:07:16. Introduces
+  `board.orphan_rescue_cooldown_secs` (default 300s / 5 min) and a
+  `recently_rescued_tasks` map on `TeamDaemon`. Both the runtime
+  orphan-rescue path (`automation.rs`) and the auto-doctor reset path
+  (`auto_doctor.rs`) insert into the map; `available_dispatch_tasks`
+  filters on it. Gives the releasing engineer or the manager a 5-minute
+  window to reclaim/re-route before auto-dispatch takes over. Two
+  regression tests in `src/team/dispatch/queue.rs::tests`.
+
 ## 0.11.21 — 2026-04-17
 
 Fourth-round field-report fix: preserve valid in-progress claims across

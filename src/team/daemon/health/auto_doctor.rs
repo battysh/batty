@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
@@ -102,6 +102,9 @@ impl TeamDaemon {
                 "Reset by auto-doctor after daemon lost active ownership.",
             )?;
             self.clear_active_task(engineer);
+            // #684: same dispatch-cooldown pattern as runtime orphan rescue
+            // — don't immediately re-dispatch a task that was just reset.
+            self.recently_rescued_tasks.insert(task.id, Instant::now());
             self.log_auto_doctor_action(
                 "orphaned_in_progress_reset",
                 Some(task.id),

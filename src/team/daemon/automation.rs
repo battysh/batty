@@ -977,6 +977,8 @@ impl TeamDaemon {
                 let _ = crate::team::task_cmd::transition_task(&board_dir, task.id, "in-progress");
                 let _ = crate::team::task_cmd::transition_task(&board_dir, task.id, "todo");
                 let _ = crate::team::task_cmd::unclaim_task(&board_dir, task.id);
+                // #684: same dispatch-cooldown pattern as in-progress rescue.
+                self.recently_rescued_tasks.insert(task.id, Instant::now());
             }
         }
 
@@ -991,6 +993,10 @@ impl TeamDaemon {
                     "orphaned in-progress task #{} has no owner — moving back to todo", task.id
                 );
                 let _ = crate::team::task_cmd::transition_task(&board_dir, task.id, "todo");
+                // #684: hold the task off the dispatch queue briefly so
+                // the releasing engineer or manager can reclaim/re-route
+                // before it auto-dispatches to a peer.
+                self.recently_rescued_tasks.insert(task.id, Instant::now());
             }
         }
 
