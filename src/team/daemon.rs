@@ -59,6 +59,12 @@ use dispatch::DispatchQueueEntry;
 
 const STALLED_MID_TURN_MARKER: &str = "stalled mid-turn";
 const STALLED_MID_TURN_RETRY_BACKOFF_SECS: [u64; 2] = [30, 60];
+/// Upper bound on total stall attempts (backoffs + restarts) before the
+/// task is escalated to blocked. Defense against unbounded restart loops
+/// that burn context tokens without making progress. Observed pre-cap
+/// 2026-04-17 on batty-marketing: alex-dev-1-1 was on attempt=6 for
+/// task #546 after 37 minutes of restart cycling.
+const STALLED_MID_TURN_MAX_ATTEMPTS: u32 = 5;
 
 #[path = "daemon/agent_handle.rs"]
 pub(super) mod agent_handle;
@@ -1475,6 +1481,11 @@ impl TeamDaemon {
     }
 
     #[cfg(test)]
+    pub(super) fn set_retry_count_for_test(&mut self, engineer: &str, count: u32) {
+        self.retry_counts.insert(engineer.to_string(), count);
+    }
+
+    #[cfg(test)]
     pub(super) fn member_state_for_test(&self, engineer: &str) -> Option<MemberState> {
         self.states.get(engineer).copied()
     }
@@ -1517,6 +1528,48 @@ impl TeamDaemon {
         }
 
         let attempt = self.increment_retry(member_name);
+        if attempt > STALLED_MID_TURN_MAX_ATTEMPTS {
+            warn!(
+                member = member_name,
+                attempt,
+                max_attempts = STALLED_MID_TURN_MAX_ATTEMPTS,
+                "shim stall retries exhausted; blocking task and releasing engineer"
+            );
+            self.record_orchestrator_action(format!(
+                "stall: attempts exhausted for {member_name} (attempt {attempt}/{max}); blocking task",
+                max = STALLED_MID_TURN_MAX_ATTEMPTS
+            ));
+
+            let task_id = self.active_task_id(member_name);
+            if let Some(task_id) = task_id {
+                let board_dir = self.board_dir();
+                let reason = format!(
+                    "stall-retry cap: SDK stalled mid-turn {attempt}x on {member_name}; needs human triage",
+                );
+                if let Err(error) =
+                    super::task_cmd::block_task_with_reason(&board_dir, task_id, &reason)
+                {
+                    warn!(error = %error, task_id, "failed to block task after stall cap");
+                }
+                if let Err(error) = super::task_cmd::assign_task_owners(
+                    &board_dir,
+                    task_id,
+                    Some(""),
+                    None,
+                ) {
+                    warn!(error = %error, task_id, "failed to release claim after stall cap");
+                }
+                if let Some(manager) = self.manager_name(member_name) {
+                    let notice = format!(
+                        "Task #{task_id} blocked after {attempt} consecutive stall-retries on {member_name}. Claim released. Needs human triage.",
+                    );
+                    let _ = self.queue_message("daemon", &manager, &notice);
+                }
+            }
+
+            self.clear_active_task(member_name);
+            return Ok(true);
+        }
         if let Some(backoff_secs) = stalled_mid_turn_backoff_secs(attempt) {
             warn!(
                 member = member_name,
@@ -1659,7 +1712,9 @@ mod tests;
 mod stalled_mid_turn_tests {
     use super::*;
     use crate::team::inbox;
-    use crate::team::test_support::{TestDaemonBuilder, engineer_member, write_owned_task_file};
+    use crate::team::test_support::{
+        TestDaemonBuilder, engineer_member, manager_member, write_owned_task_file,
+    };
 
     #[test]
     fn stalled_mid_turn_backoff_schedule_matches_task_requirements() {
@@ -1709,5 +1764,67 @@ mod stalled_mid_turn_tests {
         assert_eq!(inbox_entries.len(), 1);
         assert!(inbox_entries[0].body.contains("Waited 30s before retrying"));
         assert!(inbox_entries[0].body.contains("stalled mid-turn"));
+    }
+
+    #[test]
+    fn stalled_mid_turn_blocks_task_after_max_attempts() {
+        // #693: without a cap, each SDK stall restarts the agent and burns
+        // context tokens indefinitely. After MAX_ATTEMPTS (5), block the
+        // task with a reason, release the claim, and notify the manager.
+        let tmp = tempfile::tempdir().unwrap();
+        let member_name = "eng-1";
+        write_owned_task_file(tmp.path(), 77, "sdk-cap", "in-progress", member_name);
+        let inbox_root = inbox::inboxes_root(tmp.path());
+        inbox::init_inbox(&inbox_root, "manager").unwrap();
+
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![
+                manager_member("manager", None),
+                engineer_member(member_name, Some("manager"), true),
+            ])
+            .build();
+        daemon.active_tasks.insert(member_name.to_string(), 77);
+        // Simulate that MAX_ATTEMPTS stalls have already occurred.
+        daemon.set_retry_count_for_test(member_name, STALLED_MID_TURN_MAX_ATTEMPTS);
+
+        let handled = daemon
+            .handle_stalled_mid_turn_completion(
+                member_name,
+                "stalled mid-turn: no stdout from Claude SDK for 120s while working.",
+            )
+            .unwrap();
+
+        assert!(handled, "capped stall must still be handled");
+
+        // Task file should be blocked and claim released.
+        let task_path = tmp
+            .path()
+            .join(".batty")
+            .join("team_config")
+            .join("board")
+            .join("tasks")
+            .join("077-sdk-cap.md");
+        let task_body = std::fs::read_to_string(&task_path).unwrap();
+        assert!(
+            task_body.contains("status: blocked"),
+            "task must be marked blocked after stall cap; got:\n{task_body}"
+        );
+        assert!(
+            task_body.contains("stall-retry cap"),
+            "blocked_reason must mention stall cap; got:\n{task_body}"
+        );
+
+        // Manager receives a notice.
+        let manager_inbox = inbox::pending_messages(&inbox_root, "manager").unwrap();
+        assert!(
+            manager_inbox
+                .iter()
+                .any(|msg| msg.body.contains("blocked after") && msg.body.contains("#77")),
+            "manager must be notified of the capped stall"
+        );
+
+        // Active task tracking and retry counter are cleared.
+        assert_eq!(daemon.active_task_id(member_name), None);
+        assert_eq!(daemon.retry_count_for_test(member_name), None);
     }
 }
