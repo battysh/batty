@@ -354,7 +354,7 @@ impl TeamDaemon {
 /// first by exact `name` match, then by unique `role_name` match across
 /// engineer members. Returns `None` when the claim does not correspond to any
 /// engineer or when the role has multiple instances (ambiguous).
-fn resolve_engineer_claim<'a>(
+pub(in crate::team::daemon) fn resolve_engineer_claim<'a>(
     members: &'a [crate::team::hierarchy::MemberInstance],
     claim: &str,
 ) -> Option<&'a str> {

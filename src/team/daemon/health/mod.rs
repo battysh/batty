@@ -18,6 +18,7 @@ use anyhow::{Context, Result};
 use tracing::warn;
 
 mod auto_doctor;
+pub(in crate::team::daemon) use auto_doctor::resolve_engineer_claim;
 pub(crate) mod binary_freshness;
 mod checks;
 pub mod context;
