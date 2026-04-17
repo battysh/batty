@@ -405,6 +405,7 @@ mod tests {
             title: format!("Task #{id}"),
             status: "in-progress".to_string(),
             priority: "high".to_string(),
+            assignee: None,
             claimed_by: Some("eng-1-2".to_string()),
             claimed_at: None,
             claim_ttl_secs: None,

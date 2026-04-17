@@ -39,6 +39,11 @@ pub struct Task {
     pub title: String,
     pub status: String,
     pub priority: String,
+    /// Preferred member for this task (from `assignee:` frontmatter). When set
+    /// to an engineer, dispatch routes to that engineer only. When set to a
+    /// non-engineer member (manager/architect), dispatch skips the task —
+    /// the message belongs in that member's inbox, not the auto-dispatcher.
+    pub assignee: Option<String>,
     pub claimed_by: Option<String>,
     pub claimed_at: Option<String>,
     pub claim_ttl_secs: Option<u64>,
@@ -84,6 +89,8 @@ struct Frontmatter {
     status: String,
     #[serde(default)]
     priority: String,
+    #[serde(default)]
+    assignee: Option<String>,
     #[serde(default)]
     claimed_by: Option<String>,
     #[serde(default)]
@@ -203,6 +210,7 @@ impl Task {
             title: fm.title,
             status: fm.status,
             priority: fm.priority,
+            assignee: fm.assignee,
             claimed_by: fm.claimed_by,
             claimed_at: fm.claimed_at,
             claim_ttl_secs: fm.claim_ttl_secs,
@@ -729,6 +737,7 @@ Body.
             title: "root glob".to_string(),
             status: "todo".to_string(),
             priority: "high".to_string(),
+            assignee: None,
             claimed_by: None,
             claimed_at: None,
             claim_ttl_secs: None,

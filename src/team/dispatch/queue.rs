@@ -252,6 +252,7 @@ fn available_dispatch_tasks(
     board_dir: &Path,
     queued_task_ids: &HashSet<u32>,
     excluded_tags: &[String],
+    non_engineer_assignees: &HashSet<String>,
 ) -> Result<Vec<crate::task::Task>> {
     let tasks = crate::task::load_tasks_from_dir(&board_dir.join("tasks"))?;
     let task_status_by_id: HashMap<u32, String> = tasks
@@ -268,6 +269,16 @@ fn available_dispatch_tasks(
         .filter(|task| !task.is_schedule_blocked())
         .filter(|task| !queued_task_ids.contains(&task.id))
         .filter(|task| !task_has_excluded_tag(task, excluded_tags))
+        // #682: tasks with `assignee:` pointing at a non-engineer (manager,
+        // architect, writer, …) are messages for that member's inbox, not
+        // dispatch candidates. Leaving them in the pool causes repeated
+        // wrong-role dispatches that burn engineer context re-reading and
+        // rejecting a task they can't take.
+        .filter(|task| {
+            task.assignee
+                .as_deref()
+                .is_none_or(|name| !non_engineer_assignees.contains(name))
+        })
         .filter(|task| {
             task.depends_on.iter().all(|dep_id| {
                 task_status_by_id
@@ -398,9 +409,22 @@ impl TeamDaemon {
             board_dir,
             queued_task_ids,
             &self.config.team_config.board.dispatch_excluded_tags,
+            &self.non_engineer_member_names(),
         )?
         .into_iter()
         .next())
+    }
+
+    /// Returns names of configured members whose role is NOT `Engineer`.
+    /// Tasks whose `assignee:` frontmatter points at one of these names
+    /// are excluded from dispatch — they belong in that member's inbox.
+    fn non_engineer_member_names(&self) -> HashSet<String> {
+        self.config
+            .members
+            .iter()
+            .filter(|member| member.role_type != RoleType::Engineer)
+            .map(|member| member.name.clone())
+            .collect()
     }
 
     #[cfg(test)]
@@ -445,6 +469,7 @@ impl TeamDaemon {
             .filter(|member| member.role_type == RoleType::Engineer)
             .map(|member| member.name.clone())
             .collect();
+        let non_engineer_names = self.non_engineer_member_names();
         let profiles = load_engineer_profiles(self.project_root(), &all_engineers, &board_tasks)?;
 
         loop {
@@ -454,6 +479,7 @@ impl TeamDaemon {
                 &board_dir,
                 &unavailable_task_ids,
                 &self.config.team_config.board.dispatch_excluded_tags,
+                &non_engineer_names,
             )?;
             if available_tasks.is_empty() {
                 break;
@@ -983,6 +1009,15 @@ impl TeamDaemon {
             .into_iter()
             .filter(|engineer_name| !queued_engineers.contains(engineer_name))
             .filter(|engineer_name| !benched_engineers.contains(engineer_name))
+            // #682: honor `assignee:` frontmatter when it names an engineer.
+            // Non-engineer assignees are filtered earlier in
+            // `available_dispatch_tasks`; by the time we get here, an
+            // assignee must be an engineer who wants this specific task.
+            .filter(|engineer_name| {
+                task.assignee
+                    .as_deref()
+                    .is_none_or(|preferred| preferred == engineer_name)
+            })
             .filter(|engineer_name| {
                 // #674 defect 2: skip engineers whose backend is parked
                 // (quota_exhausted with future retry_at). Without this gate,
@@ -1130,6 +1165,22 @@ mod tests {
         content.push_str(body);
         content.push('\n');
         std::fs::write(tasks_dir.join(format!("{id:03}-{title}.md")), content).unwrap();
+    }
+
+    fn write_task_with_assignee(project_root: &Path, id: u32, title: &str, assignee: &str) {
+        let tasks_dir = project_root
+            .join(".batty")
+            .join("team_config")
+            .join("board")
+            .join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+        std::fs::write(
+            tasks_dir.join(format!("{id:03}-{title}.md")),
+            format!(
+                "---\nid: {id}\ntitle: {title}\nstatus: todo\npriority: high\nassignee: {assignee}\nclass: standard\n---\n\nTask.\n"
+            ),
+        )
+        .unwrap();
     }
 
     fn write_bench_test_team_config(project_root: &Path, engineer_instances: u32) {
@@ -1663,6 +1714,99 @@ mod tests {
         assert_eq!(
             daemon.dispatch_queue[0].task_id, 31,
             "blocked task #30 must be filtered out; only the runnable #31 should be queued"
+        );
+    }
+
+    #[test]
+    fn enqueue_dispatch_candidates_skips_tasks_assigned_to_non_engineer() {
+        // #682: a task whose `assignee:` frontmatter points at a manager/
+        // architect is a message for that member's inbox, not a dispatch
+        // candidate. Previously these tasks were repeatedly handed to
+        // engineers who immediately rejected them — burning engineer
+        // context re-reading huge bodies on every dispatch tick.
+        let tmp = tempfile::tempdir().unwrap();
+        write_task_with_assignee(tmp.path(), 40, "pm-intake", "mgr");
+        write_task_with_body(
+            tmp.path(),
+            41,
+            "engineer-candidate",
+            "todo",
+            None,
+            "Touch src/team/telemetry_db.rs only.",
+        );
+
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![
+                manager_member("mgr", None),
+                engineer_member("eng-1", Some("mgr"), false),
+            ])
+            .states(HashMap::from([("eng-1".to_string(), MemberState::Idle)]))
+            .build();
+
+        daemon.enqueue_dispatch_candidates().unwrap();
+
+        assert_eq!(daemon.dispatch_queue.len(), 1);
+        assert_eq!(
+            daemon.dispatch_queue[0].task_id, 41,
+            "non-engineer-assigned task #40 must be filtered out; only #41 should dispatch"
+        );
+    }
+
+    #[test]
+    fn enqueue_dispatch_candidates_routes_engineer_assigned_task_to_named_engineer() {
+        // #682: when `assignee:` names an engineer, dispatch must route the
+        // task only to that engineer — even when other idle engineers could
+        // otherwise take it. Previously the dispatcher ignored the field
+        // and the task went to whichever idle engineer won the ranking.
+        let tmp = tempfile::tempdir().unwrap();
+        write_task_with_assignee(tmp.path(), 50, "for-eng-2", "eng-2");
+
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![
+                manager_member("mgr", None),
+                engineer_member("eng-1", Some("mgr"), false),
+                engineer_member("eng-2", Some("mgr"), false),
+                engineer_member("eng-3", Some("mgr"), false),
+            ])
+            .states(HashMap::from([
+                ("eng-1".to_string(), MemberState::Idle),
+                ("eng-2".to_string(), MemberState::Idle),
+                ("eng-3".to_string(), MemberState::Idle),
+            ]))
+            .build();
+
+        daemon.enqueue_dispatch_candidates().unwrap();
+
+        assert_eq!(daemon.dispatch_queue.len(), 1);
+        assert_eq!(daemon.dispatch_queue[0].task_id, 50);
+        assert_eq!(
+            daemon.dispatch_queue[0].engineer, "eng-2",
+            "task with `assignee: eng-2` must dispatch to eng-2, not a peer"
+        );
+    }
+
+    #[test]
+    fn enqueue_dispatch_candidates_waits_when_assigned_engineer_busy() {
+        // #682: if the named engineer is not idle, leave the task in the
+        // pool rather than re-routing to a peer. Reassigning defeats the
+        // purpose of the `assignee:` hint.
+        let tmp = tempfile::tempdir().unwrap();
+        write_task_with_assignee(tmp.path(), 60, "for-eng-2", "eng-2");
+
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![
+                manager_member("mgr", None),
+                engineer_member("eng-1", Some("mgr"), false),
+                engineer_member("eng-2", Some("mgr"), false),
+            ])
+            .states(HashMap::from([("eng-1".to_string(), MemberState::Idle)]))
+            .build();
+
+        daemon.enqueue_dispatch_candidates().unwrap();
+
+        assert!(
+            daemon.dispatch_queue.is_empty(),
+            "task must remain undispatched while named engineer is unavailable"
         );
     }
 

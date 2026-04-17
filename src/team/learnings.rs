@@ -594,6 +594,7 @@ mod tests {
             title: "Improve dispatch scoring".to_string(),
             status: "todo".to_string(),
             priority: "high".to_string(),
+            assignee: None,
             claimed_by: Some("eng-1".to_string()),
             claimed_at: None,
             claim_ttl_secs: None,
