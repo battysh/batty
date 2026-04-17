@@ -2,6 +2,32 @@
 
 All notable changes to Batty are documented here.
 
+## 0.11.32 — 2026-04-17
+
+Field-report fix: the SDK stall recovery loop had no upper bound on
+retry attempts. When `handle_stalled_mid_turn_completion` fires, it
+schedules a 30s/60s backoff for attempts 1–2 and then calls
+`restart_member_with_task_context` for every subsequent attempt
+indefinitely. Observed in batty-marketing: alex-dev-1-1 on task
+#546 (asciinema demo) cycled stall→restart for 37+ minutes, with
+the retry counter reaching attempt=6 and no progress made — each
+restart burns ~200K tokens of context rebuild before immediately
+stalling again.
+
+### Fixes
+
+- **Cap stall-mid-turn retries at 5 attempts** (#693) —
+  `handle_stalled_mid_turn_completion` now enforces
+  `STALLED_MID_TURN_MAX_ATTEMPTS = 5`. When the cap trips the
+  daemon blocks the task with a human-triage reason, releases the
+  engineer's claim (`assign_task_owners(Some(""), None)`), clears
+  active-task tracking, and notifies the engineer's manager via
+  `queue_message`. Subsequent stalls on the same engineer start
+  from a fresh retry counter on their next assignment. Regression
+  test: `stalled_mid_turn_blocks_task_after_max_attempts` verifies
+  the blocked task file content, claim release, and manager inbox
+  notification.
+
 ## 0.11.31 — 2026-04-17
 
 Field-report fix: the v0.11.30 role_name tag seed worked in the
