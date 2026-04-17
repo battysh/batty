@@ -932,6 +932,68 @@ fn zero_diff_completion_tracking_counts_consecutive_empty_diffs() {
 }
 
 #[test]
+fn zero_diff_completion_tracking_skips_non_git_projects() {
+    // #701 regression: in a non-git project (like ~/batty_marketing, used as
+    // a content pipeline), `branch_exists` is always false and
+    // `commits_ahead` is always 0 — so the `branch_exists && commits_ahead
+    // > 0` short-circuit never fires and every engineer completion
+    // increments the counter. With threshold=2 the engineer is cold-
+    // respawned every two completions, burning ~200K tokens of context
+    // per cycle. Observed 2026-04-17 09:22 / 09:25: alex-dev-1-1 cold-
+    // respawned twice in ~3 min after jordan-pm<->alex message pairs.
+    //
+    // `TestDaemonBuilder::new` defaults `is_git_repo` to false when the
+    // harness dir is not a real repo, which matches batty-marketing.
+    let tmp = tempfile::tempdir().unwrap();
+    write_owned_task_file(tmp.path(), 42, "non-git-task", "in-progress", "eng-1");
+
+    let mut daemon = TestDaemonBuilder::new(tmp.path())
+        .members(vec![
+            manager_member("manager", None),
+            engineer_member("eng-1", Some("manager"), true),
+        ])
+        .build();
+    assert!(!daemon.is_git_repo, "non-git project precondition");
+    daemon.set_active_task_for_test("eng-1", 42);
+
+    assert_eq!(
+        daemon.maybe_track_zero_diff_completion("eng-1").unwrap(),
+        None,
+        "zero-diff tracker must be inert in non-git projects"
+    );
+    assert_eq!(
+        daemon.maybe_track_zero_diff_completion("eng-1").unwrap(),
+        None,
+        "repeat completions in non-git project must still be inert"
+    );
+}
+
+#[test]
+fn zero_diff_completion_tracking_skips_multi_repo_projects() {
+    // #701: multi-repo projects also lack a single <base>..<branch> range
+    // to count commits against. Gate with the same check used by
+    // `main_smoke_check`.
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = init_git_repo(&tmp, "batty-zero-diff-multi");
+    write_owned_task_file(&repo, 42, "multi-repo-task", "in-progress", "eng-1");
+
+    let mut daemon = TestDaemonBuilder::new(&repo)
+        .members(vec![
+            manager_member("manager", None),
+            engineer_member("eng-1", Some("manager"), true),
+        ])
+        .build();
+    daemon.is_multi_repo = true;
+    daemon.set_active_task_for_test("eng-1", 42);
+
+    assert_eq!(
+        daemon.maybe_track_zero_diff_completion("eng-1").unwrap(),
+        None,
+        "zero-diff tracker must be inert in multi-repo projects"
+    );
+}
+
+#[test]
 fn zero_diff_completion_tracking_counts_missing_task_branch() {
     let tmp = tempfile::tempdir().unwrap();
     let repo = init_git_repo(&tmp, "batty-zero-diff-missing-branch");

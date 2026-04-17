@@ -1082,6 +1082,20 @@ impl TeamDaemon {
             return Ok(None);
         }
 
+        // #701: in non-git and multi-repo projects there is no single
+        // `<base>..<engineer-branch>` range to count commits against.
+        // `show_ref_exists` / `run_git` both return `false`/empty, so the
+        // `branch_exists && commits_ahead > 0` short-circuit never fires and
+        // every engineer completion increments the zero-diff counter.
+        // With threshold=2 the engineer is cold-respawned every two
+        // completion events, destroying ~200K tokens of context per cycle.
+        // Skip tracking entirely when the engine is not operating in a
+        // single-repo git context — the mechanism relies on git commit
+        // attribution and cannot tell success from failure without it.
+        if !self.is_git_repo || self.is_multi_repo {
+            return Ok(None);
+        }
+
         let expected_branch = self
             .active_task(member_name)?
             .and_then(|task| task.branch)
