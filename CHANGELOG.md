@@ -2,6 +2,35 @@
 
 All notable changes to Batty are documented here.
 
+## 0.11.50 — 2026-04-17
+
+Field-report follow-up to #709: the same "architect-owned task
+counted as engineer-runnable" classification bug was also present
+in the status / standup paths. In batty-marketing this morning,
+`batty status` reported `Idle With Runnable: alex-dev-1-1,
+kai-devrel-1-1, priya-writer-1-1, sam-designer-1-1` while the only
+two runnable tasks were #542 (Owner: maya-lead, strategy) and #573
+(Owner: jordan-pm, coordinator doc). Each standup then injected
+"warning: idle while runnable work exists on the board" into every
+engineer's context and added "idle with runnable: <all four>" to
+jordan-pm's workflow-signals — costing tokens for engineers trying
+to find work they cannot pick up, and for jordan-pm trying to
+coordinate dispatch that cannot happen.
+
+### Fixes
+
+- **`compute_idle_with_runnable` respects engineer ownership** (#711)
+  — `compute_metrics` in `src/team/status.rs` now filters the
+  runnable task count through `resolver::is_engineer_dispatchable`
+  before deciding whether any idle engineer should be flagged. If
+  every runnable task is body-owned or assignee-gated to a
+  non-engineer role, `idle_with_runnable` is empty and the standup
+  per-member warning + jordan-pm workflow-signal line both
+  disappear. The public `runnable_count` metric is unchanged — it
+  still reflects total dispatchable work. Regression tests:
+  `idle_with_runnable_excludes_non_engineer_owned_runnable` and
+  `idle_with_runnable_lists_engineers_when_engineer_task_available`.
+
 ## 0.11.49 — 2026-04-17
 
 Field-report fix: in batty-marketing at 12:42:49 UTC, a planning
