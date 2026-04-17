@@ -2291,6 +2291,22 @@ impl TeamDaemon {
                 } else {
                     self.planning_cycle_consecutive_empty = 0;
                 }
+                // #710: persist immediately so a non-clean daemon termination
+                // (SIGKILL from `batty stop` timeout, panic, OOM) doesn't
+                // revert consecutive_empty/last_fired back to the last
+                // heartbeat snapshot — which shrinks the backoff cooldown and
+                // lets a spurious planning cycle fire within minutes of the
+                // restart. Observed in batty-marketing at 12:42:49 UTC: after
+                // a forced restart at 12:34:03 lost the 12:33:17 empty
+                // response update, the restored state carried stale
+                // consecutive_empty=1 instead of 2, shrinking cooldown from
+                // 900s → 600s and firing a fresh planning cycle 572s later.
+                if let Err(error) = self.persist_runtime_state(false) {
+                    warn!(
+                        error = %error,
+                        "failed to persist daemon state after planning cycle response"
+                    );
+                }
                 self.record_tact_tasks_created(
                     &architect,
                     created as u32,
@@ -3302,6 +3318,33 @@ thread 'tmux::tests::split_window_horizontal_creates_new_pane' panicked at src/t
                 .unwrap_or_default();
         assert!(
             orchestrator_log.contains("planning: applied planning response and created 0 tasks")
+        );
+    }
+
+    #[test]
+    fn empty_planning_response_persists_consecutive_empty_increment() {
+        // #710: `handle_planning_response` used to update
+        // `planning_cycle_consecutive_empty` and `planning_cycle_last_fired`
+        // in memory only. A non-clean daemon termination between the
+        // response-applied heartbeat and the next 5-min heartbeat would
+        // revert those values to the last persisted snapshot — shrinking
+        // the backoff cooldown so a spurious planning cycle could fire
+        // within minutes of the restart. Observed in batty-marketing at
+        // 12:42:49 UTC; this test locks in the persist-after-apply.
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = planning_test_daemon(&tmp, 300);
+        daemon.planning_cycle_active = true;
+        daemon.planning_cycle_consecutive_empty = 1;
+
+        daemon.handle_planning_response("").unwrap();
+        assert_eq!(daemon.planning_cycle_consecutive_empty, 2);
+
+        let persisted = super::super::state::load_daemon_state(tmp.path())
+            .expect("daemon state should be persisted after empty planning response");
+        assert_eq!(persisted.planning_cycle_consecutive_empty, 2);
+        assert!(
+            persisted.planning_cycle_last_fired_elapsed_secs.is_some(),
+            "last_fired should be recorded as the cooldown anchor"
         );
     }
 
