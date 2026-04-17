@@ -18,6 +18,48 @@ use crate::team::allocation::{
 use crate::team::config::AllocationStrategy;
 use serde::Deserialize;
 
+/// Parse an explicit `Owner: <role>` line from a task body, returning the
+/// first role-name-looking token (lowercase letters + hyphens).
+///
+/// #695: architects routinely author tasks whose frontmatter `tags:` are
+/// thematic (e.g. `[content, pillar-b, x, writing]`) but whose body prose
+/// names the actual owner role ("Owner: priya-writer drafts; kai-devrel
+/// schedules"). Without a route-seed from this prose, `tag_overlap` scores
+/// 0 for every engineer and the task lands on whichever engineer wins
+/// scoring tiebreakers — observed: task #553 ("Owner: priya-writer drafts")
+/// was dispatched to sam-designer-1-1 in batty-marketing.
+///
+/// The returned role-name is merged into the task's tag set for the
+/// duration of one ranking call (see `rank_dispatch_engineers`), which
+/// triggers the #692 tag-match bypass so the matching engineer wins.
+fn parse_body_owner_role(body: &str) -> Option<String> {
+    for line in body.lines() {
+        let trimmed = line
+            .trim()
+            .trim_start_matches('-')
+            .trim()
+            .trim_start_matches('*')
+            .trim();
+        let Some(rest) = trimmed.strip_prefix("Owner:") else {
+            continue;
+        };
+        let rest = rest.trim().trim_start_matches('*').trim();
+        let role: String = rest
+            .chars()
+            .take_while(|c| c.is_ascii_lowercase() || *c == '-')
+            .collect();
+        if role.is_empty() || !role.contains('-') {
+            // Require at least one hyphen to match the repo's role_name
+            // shape (`priya-writer`, `kai-devrel`, `sam-designer`,
+            // `alex-dev`). Avoids false-positive extraction when the
+            // body writes something like "Owner: TBD".
+            continue;
+        }
+        return Some(role);
+    }
+    None
+}
+
 /// Parse task IDs from "Blocked on:" or "Depends on:" lines in the task body.
 /// Returns None if no dependency line found, Some(vec) of referenced task IDs.
 fn parse_body_dependency_ids(body: &str) -> Option<Vec<u32>> {
@@ -1156,10 +1198,29 @@ impl TeamDaemon {
         {
             return eligible;
         }
+
+        // #695: if the task body explicitly names an owner role
+        // (`Owner: priya-writer …`), splice that role into the task's tag
+        // set before scoring. Combined with #691's role_name seeding of
+        // each engineer's `domain_tags`, this produces a non-zero
+        // `tag_overlap` for the matching engineer and triggers the #692
+        // tag-match bypass — so the explicit body owner wins over
+        // scoring-tiebreaker alphabetical fallback.
+        let task_for_ranking = match parse_body_owner_role(&task.description) {
+            Some(owner_role)
+                if !task.tags.iter().any(|tag| tag == &owner_role) =>
+            {
+                let mut synth = task.clone();
+                synth.tags.push(owner_role);
+                std::borrow::Cow::Owned(synth)
+            }
+            _ => std::borrow::Cow::Borrowed(task),
+        };
+
         rank_engineers_for_task(
             &eligible,
             profiles,
-            task,
+            &task_for_ranking,
             &self.config.team_config.workflow_policy.allocation,
         )
     }
@@ -1170,7 +1231,7 @@ mod tests {
     use std::collections::{HashMap, HashSet};
     use std::path::Path;
 
-    use super::{OverlapConflict, find_overlapping_tasks, predicted_files};
+    use super::{OverlapConflict, find_overlapping_tasks, parse_body_owner_role, predicted_files};
     use crate::team::config::RoleType;
     use crate::team::hierarchy::MemberInstance;
     use crate::team::standup::MemberState;
@@ -1305,6 +1366,33 @@ mod tests {
             tasks_dir.join(format!("{id:03}-{title}.md")),
             format!(
                 "---\nid: {id}\ntitle: {title}\nstatus: todo\npriority: high\ntags:\n{tags_block}\nclass: standard\n---\n\nTask.\n"
+            ),
+        )
+        .unwrap();
+    }
+
+    fn write_task_with_tags_and_body(
+        project_root: &Path,
+        id: u32,
+        title: &str,
+        tags: &[&str],
+        body: &str,
+    ) {
+        let tasks_dir = project_root
+            .join(".batty")
+            .join("team_config")
+            .join("board")
+            .join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+        let tags_block = tags
+            .iter()
+            .map(|tag| format!("  - {tag}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(
+            tasks_dir.join(format!("{id:03}-{title}.md")),
+            format!(
+                "---\nid: {id}\ntitle: {title}\nstatus: todo\npriority: high\ntags:\n{tags_block}\nclass: standard\n---\n\n{body}\n"
             ),
         )
         .unwrap();
@@ -1985,6 +2073,86 @@ mod tests {
             "task tagged with a role_name must prefer the engineer whose role_name matches, \
              not fall back to the first alphabetical peer"
         );
+    }
+
+    #[test]
+    fn dispatch_honors_explicit_body_owner_when_tags_do_not_match_role() {
+        // #695: architects author tasks with thematic frontmatter tags
+        // (`content`, `writing`, `x`, `pillar-b`) but name the owner role
+        // in prose ("Owner: priya-writer drafts; kai-devrel schedules").
+        // Under #691 role-name seeding alone, no tag overlaps any
+        // role_name, so `tag_overlap` is zero for every engineer and
+        // dispatch falls through to scoring tiebreakers — observed in
+        // batty-marketing: task #553 (body "Owner: priya-writer drafts…")
+        // was dispatched to sam-designer-1-1.
+        //
+        // `parse_body_owner_role` + tag-splice in `rank_dispatch_engineers`
+        // synthesizes a role_name tag from the body so the matching
+        // engineer wins over peers whose role_name does not match.
+        let tmp = tempfile::tempdir().unwrap();
+        write_task_with_tags_and_body(
+            tmp.path(),
+            91,
+            "body-owner-routing",
+            &["content", "pillar-b", "x", "writing"],
+            "- Owner: priya-writer drafts; kai-devrel schedules\n\
+             - Acceptance: ...\n",
+        );
+
+        let member_with_role = |name: &str, role_name: &str| MemberInstance {
+            name: name.to_string(),
+            role_name: role_name.to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("codex".to_string()),
+            reports_to: Some("mgr".to_string()),
+            use_worktrees: false,
+            ..MemberInstance::default()
+        };
+
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![
+                manager_member("mgr", None),
+                member_with_role("kai-devrel-1-1", "kai-devrel"),
+                member_with_role("priya-writer-1-1", "priya-writer"),
+                member_with_role("sam-designer-1-1", "sam-designer"),
+            ])
+            .states(HashMap::from([
+                ("kai-devrel-1-1".to_string(), MemberState::Idle),
+                ("priya-writer-1-1".to_string(), MemberState::Idle),
+                ("sam-designer-1-1".to_string(), MemberState::Idle),
+            ]))
+            .build();
+
+        daemon.enqueue_dispatch_candidates().unwrap();
+
+        assert_eq!(daemon.dispatch_queue.len(), 1);
+        assert_eq!(daemon.dispatch_queue[0].task_id, 91);
+        assert_eq!(
+            daemon.dispatch_queue[0].engineer, "priya-writer-1-1",
+            "task whose body says `Owner: priya-writer` must route to \
+             priya-writer-1-1 even when frontmatter tags are thematic \
+             (content/pillar-b/x/writing) and match no role_name"
+        );
+    }
+
+    #[test]
+    fn parse_body_owner_role_extracts_first_role_from_prose() {
+        // Sanity: the parser tolerates markdown (`-`, `**`) and stops at
+        // the first whitespace/punctuation after the role token.
+        assert_eq!(
+            parse_body_owner_role("- Owner: priya-writer drafts; kai-devrel schedules"),
+            Some("priya-writer".to_string())
+        );
+        assert_eq!(
+            parse_body_owner_role("Owner: **kai-devrel** (explicit)."),
+            Some("kai-devrel".to_string())
+        );
+        // Require at least one hyphen to reject degenerate cases like
+        // "Owner: TBD" that would otherwise extract "tbd" and either
+        // match nothing (harmless) or collide with a future role.
+        assert_eq!(parse_body_owner_role("Owner: TBD"), None);
+        assert_eq!(parse_body_owner_role("- Owner: tbd\n"), None);
+        assert_eq!(parse_body_owner_role("Body with no owner line."), None);
     }
 
     #[test]
