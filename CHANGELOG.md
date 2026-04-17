@@ -2,6 +2,42 @@
 
 All notable changes to Batty are documented here.
 
+## 0.11.34 — 2026-04-17
+
+Field-report fix: tasks whose frontmatter `tags:` are thematic but
+whose body prose explicitly names the owner role were still routing
+to the wrong engineer. Observed in batty-marketing: task #553 with
+frontmatter `tags: [content, pillar-b, x, writing]` and body line 1
+"Owner: priya-writer drafts; kai-devrel schedules" was dispatched to
+sam-designer-1-1 because none of the four task tags matched any
+engineer's `role_name`, so `tag_overlap` scored 0 for every candidate
+and routing fell through to scoring tiebreakers.
+
+The #691 role-name seeding fix established the engineer side of the
+match (each engineer's `domain_tags` contains their `role_name`).
+This release adds the task side: when the body names an owner role
+in prose, splice that role into the task's tag set at ranking time.
+The matching engineer then scores `tag_overlap = 1`, triggers the
+#692 tag-match bypass, and wins routing over non-matching peers.
+
+### Fixes
+
+- **Parse `Owner: <role>` from task body as a routing signal** (#695) —
+  new `parse_body_owner_role` scans the task description for a line
+  of the form `Owner: <lowercase-hyphen-role>` (tolerating markdown
+  bullet/bold prefixes) and returns the first matching role token.
+  `rank_dispatch_engineers` splices the extracted role into a local
+  copy of `task.tags` before calling `rank_engineers_for_task`, so
+  the synthetic tag participates in scoring without mutating the
+  on-disk task file. Requires the extracted token to contain a
+  hyphen, which matches the repo's role-name shape (`priya-writer`,
+  `kai-devrel`, `sam-designer`, `alex-dev`) and safely rejects
+  degenerate prose like `Owner: TBD`. Regression tests:
+  `parse_body_owner_role_extracts_first_role_from_prose` covers
+  markdown-bullet, bold-wrapped, and rejection cases;
+  `dispatch_honors_explicit_body_owner_when_tags_do_not_match_role`
+  reproduces the #553 scenario end-to-end.
+
 ## 0.11.33 — 2026-04-17
 
 Field-report fix: persisted `dispatch_queue` entries carried routing

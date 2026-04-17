@@ -33,7 +33,7 @@ where
 }
 
 /// A parsed kanban-md task file.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Task {
     pub id: u32,
     pub title: String,
@@ -72,7 +72,7 @@ pub struct Task {
 }
 
 /// Per-task overrides from `## Batty Config` section.
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Deserialize, Default, Clone)]
 pub struct TaskBattyConfig {
     pub agent: Option<String>,
     pub policy: Option<Policy>,
