@@ -285,8 +285,15 @@ pub(crate) fn supervisory_pressure_snapshots(
     let tasks = crate::task::load_tasks_from_dir(&tasks_dir).unwrap_or_default();
     let inbox_root = inbox::inboxes_root(project_root);
     let direct_reports = crate::team::status::direct_reports_by_member(members);
+    // #712: DispatchGap pressure warns that idle engineers have runnable work
+    // they could pick up. Tasks owned by the architect or manager
+    // (frontmatter `assignee:` or body `Owner:` naming a non-engineer) are
+    // runnable-in-general but not engineer-dispatchable — surfacing them here
+    // fires a false "dispatch gap" signal at both the architect and manager,
+    // which then costs a supervisory turn to diagnose and dismiss. Same
+    // classification gap as #709/#711; fix by filtering to engineer-runnable.
     let dispatchable_task_ids: std::collections::HashSet<u32> =
-        crate::team::resolver::dispatchable_tasks(&board_dir)
+        crate::team::resolver::engineer_dispatchable_tasks(&board_dir, members)
             .unwrap_or_default()
             .into_iter()
             .map(|task| task.id)
@@ -550,5 +557,112 @@ mod tests {
     #[test]
     fn extract_task_id_falls_back_to_hash_reference() {
         assert_eq!(extract_task_id("Task #42 is done"), Some("42".to_string()));
+    }
+
+    // #712 regression — when the only runnable tasks are architect-owned,
+    // dispatch-gap pressure must NOT fire at managers or architects: engineers
+    // cannot pick them up, so it's not a real dispatch gap.
+    #[test]
+    fn supervisory_pressure_snapshots_skip_dispatch_gap_for_non_engineer_runnable() {
+        use std::fs;
+
+        fn eng(name: &str, reports_to: &str) -> MemberInstance {
+            MemberInstance {
+                name: name.to_string(),
+                role_name: name.to_string(),
+                role_type: RoleType::Engineer,
+                agent: Some("codex".to_string()),
+                model: None,
+                prompt: None,
+                posture: None,
+                model_class: None,
+                provider_overlay: None,
+                reports_to: Some(reports_to.to_string()),
+                use_worktrees: false,
+            }
+        }
+        fn mgr(name: &str, reports_to: &str) -> MemberInstance {
+            MemberInstance {
+                name: name.to_string(),
+                role_name: name.to_string(),
+                role_type: RoleType::Manager,
+                agent: Some("codex".to_string()),
+                model: None,
+                prompt: None,
+                posture: None,
+                model_class: None,
+                provider_overlay: None,
+                reports_to: Some(reports_to.to_string()),
+                use_worktrees: false,
+            }
+        }
+        fn arch(name: &str) -> MemberInstance {
+            MemberInstance {
+                name: name.to_string(),
+                role_name: name.to_string(),
+                role_type: RoleType::Architect,
+                agent: Some("codex".to_string()),
+                model: None,
+                prompt: None,
+                posture: None,
+                model_class: None,
+                provider_overlay: None,
+                reports_to: None,
+                use_worktrees: false,
+            }
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = tmp
+            .path()
+            .join(".batty")
+            .join("team_config")
+            .join("board")
+            .join("tasks");
+        fs::create_dir_all(&tasks_dir).unwrap();
+        // The only runnable task is body-owned by the architect — like
+        // batty_marketing's #542 STRATEGY item.
+        fs::write(
+            tasks_dir.join("001-strategy.md"),
+            "---\nid: 1\ntitle: Strategy\nstatus: todo\npriority: high\nclass: standard\n---\n\n**Owner:** maya-lead (architect strategy)\n",
+        )
+        .unwrap();
+
+        let members = vec![
+            arch("maya-lead"),
+            mgr("jordan-pm", "maya-lead"),
+            eng("eng-1", "jordan-pm"),
+            eng("eng-2", "jordan-pm"),
+        ];
+        let mut activity = HashMap::new();
+        activity.insert(
+            "eng-1".to_string(),
+            SupervisoryMemberActivity { idle: true },
+        );
+        activity.insert(
+            "eng-2".to_string(),
+            SupervisoryMemberActivity { idle: true },
+        );
+        activity.insert(
+            "jordan-pm".to_string(),
+            SupervisoryMemberActivity { idle: true },
+        );
+        activity.insert(
+            "maya-lead".to_string(),
+            SupervisoryMemberActivity { idle: true },
+        );
+
+        let snapshots = supervisory_pressure_snapshots(tmp.path(), &members, &activity);
+        for supervisor in ["maya-lead", "jordan-pm"] {
+            let snap = snapshots.get(supervisor).unwrap_or_else(|| {
+                panic!("expected snapshot for {supervisor}");
+            });
+            assert_eq!(
+                snap.counts.get(&SupervisoryPressure::DispatchGap).copied(),
+                None,
+                "{supervisor} should not surface DispatchGap pressure when the \
+                 only runnable task is architect-owned (not engineer-dispatchable)"
+            );
+        }
     }
 }

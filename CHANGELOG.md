@@ -2,6 +2,34 @@
 
 All notable changes to Batty are documented here.
 
+## 0.11.51 — 2026-04-17
+
+Third follow-up to the #709/#711 "architect-owned task counted as
+engineer-runnable" classification family. After v0.11.50 fixed the
+`idle_with_runnable` signal, `batty status` in batty-marketing
+still showed `pressure 1: dispatch gap (2)` on both `maya-lead`
+and `jordan-pm` while the only two runnable tasks were
+`maya-lead`-owned strategy items (#542 STRATEGY and #573 Thread A
+coordinator doc). Each supervisor turn that consumed this status
+saw a false dispatch-gap signal and spent tokens diagnosing a
+non-existent bottleneck.
+
+### Fixes
+
+- **`supervisory_pressure_snapshots` filters for engineer-runnable**
+  (#712) — the pressure-snapshot pass in
+  `src/team/supervisory_notice.rs` now calls
+  `resolver::engineer_dispatchable_tasks(..., members)` instead of
+  `resolver::dispatchable_tasks(...)` when computing the
+  `dispatchable_task_ids` set that gates `DispatchGap` pressure
+  for managers and architects. Tasks body-owned or
+  assignee-gated to a non-engineer role no longer inflate
+  `idle_unassigned.min(dispatchable_task_ids.len())`, so the status
+  pressure indicator and supervisory stall classifier both stop
+  raising "dispatch gap" on boards where all runnable work is
+  owned by a supervisor. Regression test:
+  `supervisory_pressure_snapshots_skip_dispatch_gap_for_non_engineer_runnable`.
+
 ## 0.11.50 — 2026-04-17
 
 Field-report follow-up to #709: the same "architect-owned task
