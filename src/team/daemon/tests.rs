@@ -375,6 +375,13 @@ fn daemon_state_round_trip_preserves_runtime_fields() {
         optional_subsystem_disabled_remaining_secs: HashMap::new(),
         planning_cycle_last_fired_elapsed_secs: Some(120),
         planning_cycle_consecutive_empty: 3,
+        recently_rescued_tasks: HashMap::from([(
+            55,
+            PersistedRescueRecord {
+                last_rescued_elapsed_secs: 240,
+                count: 3,
+            },
+        )]),
     };
 
     save_daemon_state(tmp.path(), &state).unwrap();
@@ -415,6 +422,44 @@ fn restore_runtime_state_preserves_planning_cycle_backoff_across_restart() {
         restored_elapsed.as_secs() >= 115 && restored_elapsed.as_secs() <= 130,
         "expected restored last_fired elapsed to be ~120s, got {}s",
         restored_elapsed.as_secs()
+    );
+}
+
+#[test]
+fn restore_runtime_state_preserves_recently_rescued_tasks_across_restart() {
+    // #689: before this fix, `recently_rescued_tasks` was in-memory only.
+    // A daemon that had climbed to count=4 (40-min cooldown) on a
+    // cascading task would reset to count=1 (5-min cooldown) on restart,
+    // and the cascade would immediately resume at base cadence. The map
+    // now round-trips through PersistedDaemonState as elapsed-seconds +
+    // count entries so the cooldown survives.
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(tmp.path().join(".batty").join("team_config")).unwrap();
+
+    let mut daemon = make_test_daemon(tmp.path(), vec![manager_member("manager", None)]);
+    daemon.recently_rescued_tasks.insert(
+        519,
+        super::RescueRecord {
+            last_rescued_at: std::time::Instant::now()
+                - std::time::Duration::from_secs(180),
+            count: 4,
+        },
+    );
+    daemon.persist_runtime_state(true).unwrap();
+
+    let mut restored = make_test_daemon(tmp.path(), vec![manager_member("manager", None)]);
+    assert!(restored.recently_rescued_tasks.is_empty());
+    restored.restore_runtime_state();
+    let restored_record = restored
+        .recently_rescued_tasks
+        .get(&519)
+        .copied()
+        .expect("rescue record must survive restart");
+    assert_eq!(restored_record.count, 4);
+    let restored_elapsed = restored_record.last_rescued_at.elapsed().as_secs();
+    assert!(
+        restored_elapsed >= 175 && restored_elapsed <= 195,
+        "expected restored last_rescued elapsed to be ~180s, got {restored_elapsed}s",
     );
 }
 
@@ -5348,6 +5393,7 @@ fn save_daemon_state_returns_error_on_readonly_dir() {
             optional_subsystem_disabled_remaining_secs: HashMap::new(),
             planning_cycle_last_fired_elapsed_secs: None,
             planning_cycle_consecutive_empty: 0,
+            recently_rescued_tasks: HashMap::new(),
         };
 
         let result = save_daemon_state(tmp.path(), &state);
