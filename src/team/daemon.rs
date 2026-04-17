@@ -158,6 +158,28 @@ pub(crate) struct MainSmokeState {
     pub summary: Option<String>,
 }
 
+/// #686: per-task record used to derive the orphan-rescue dispatch
+/// cooldown. `count` grows each time a task is rescued while still in
+/// its current cooldown window; the effective quiet-time becomes
+/// `orphan_rescue_cooldown_secs * 2^min(count-1, 4)` (i.e. 1×, 2×, 4×,
+/// 8×, 16× — capped at 16× to avoid a pinned-forever task).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct RescueRecord {
+    pub last_rescued_at: Instant,
+    pub count: u32,
+}
+
+impl RescueRecord {
+    pub(crate) fn effective_cooldown(&self, base: Duration) -> Duration {
+        let multiplier_shift = self.count.saturating_sub(1).min(4);
+        base.saturating_mul(1u32 << multiplier_shift)
+    }
+
+    pub(crate) fn is_active(&self, base: Duration) -> bool {
+        self.last_rescued_at.elapsed() < self.effective_cooldown(base)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum CleanroomBackend {
     SkoolKit,
@@ -238,12 +260,12 @@ pub struct TeamDaemon {
     pub(super) auto_merge_overrides: HashMap<u32, bool>,
     /// Tracks recent (task_id, engineer) dispatch pairs for deduplication.
     pub(super) recent_dispatches: HashMap<(u32, String), Instant>,
-    /// #684: tasks the auto/runtime orphan rescue just moved back to todo.
-    /// Dispatch skips these for `orphan_rescue_cooldown_secs` so the
-    /// releasing engineer or manager has a window to reclaim/re-route
-    /// before the task is auto-dispatched to a peer (which is usually the
-    /// wrong answer when the original claimer parked intentionally).
-    pub(super) recently_rescued_tasks: HashMap<u32, Instant>,
+    /// #684 / #686: tasks the auto/runtime orphan rescue just moved back
+    /// to todo. Dispatch skips these for an exponentially-growing cooldown
+    /// window derived from `orphan_rescue_cooldown_secs` × 2^(count-1)
+    /// (capped at 16×) so repeated rescues of the same task widen the
+    /// quiet period instead of re-cascading every base window.
+    pub(super) recently_rescued_tasks: HashMap<u32, RescueRecord>,
     /// Tracks recent escalation keys to suppress repeated alerts.
     pub(super) recent_escalations: HashMap<String, Instant>,
     /// Latest periodic main smoke-test outcome.

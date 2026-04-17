@@ -2,6 +2,31 @@
 
 All notable changes to Batty are documented here.
 
+## 0.11.24 — 2026-04-17
+
+Seventh-round field-report fix: stop the cascade that resumes the moment
+the rescue cooldown expires.
+
+### Fixes
+
+- **Exponential-backoff orphan-rescue cooldown** (#686) — v0.11.22 added
+  a 5-minute dispatch cooldown after an orphan rescue, but observation
+  in `batty_marketing` showed the cascade simply resumed once the window
+  expired: 03:32:54 rescue → 03:37:56 dispatch to sam (5m 2s later) →
+  03:38:09 sam released (13s of "work") → 03:43:11 dispatch to alex →
+  03:43:29 alex released (18s of "work") → next rescue cycle, et cetera.
+  Each bounce burns ~200K tokens on a turn the engineer immediately
+  rejects. `recently_rescued_tasks` now carries a `RescueRecord` with a
+  `count` field; repeated rescues of the same task within the current
+  cooldown widen the effective window to `orphan_rescue_cooldown_secs *
+  2^min(count-1, 4)` (1×, 2×, 4×, 8×, 16× cap). With the default 300s
+  base, that's 5 / 10 / 20 / 40 / 80 minutes — enough total quiet time
+  (155 min after four rescues) for a human or an architect to notice
+  and re-route rather than letting the dispatch loop churn through
+  every idle peer. The pruning logic in `enqueue_dispatch_candidates`
+  and `rescued_task_ids` both consult the per-task effective cooldown
+  instead of the base value.
+
 ## 0.11.23 — 2026-04-17
 
 Sixth-round field-report fix: stop tearing down idle agents.
