@@ -722,21 +722,41 @@ impl TeamDaemon {
         )
     }
 
-    /// #697: record that `engineer` just released task `task_id` (state
-    /// reconciliation observed `claimed_by` cleared). Subsequent dispatch
-    /// cycles skip this pair until `release_exclusion_window` elapses.
+    /// #697 / #698: record that `engineer` just released task `task_id`
+    /// (state reconciliation observed `claimed_by` cleared). Subsequent
+    /// dispatch cycles skip this pair until the exclusion window
+    /// elapses. #698: if the previous release for this pair is still
+    /// inside the cascade-observation window (2× effective window), the
+    /// counter grows — widening the next exclusion window exponentially
+    /// up to 16× base. This prevents a human-parked task (owner
+    /// awaiting a Saturday ping, for instance) from cycling through
+    /// dispatch→release every base window for ~14 hours.
     pub(in super::super) fn record_task_release_by(&mut self, task_id: u32, engineer: &str) {
+        let base = self.release_exclusion_window();
+        let now = Instant::now();
         self.recently_released_by
-            .insert((task_id, engineer.to_string()), Instant::now());
+            .entry((task_id, engineer.to_string()))
+            .and_modify(|record| {
+                if record.in_cascade_window(base) {
+                    record.count = record.count.saturating_add(1);
+                } else {
+                    record.count = 1;
+                }
+                record.last_released_at = now;
+            })
+            .or_insert(crate::team::daemon::ReleaseRecord {
+                last_released_at: now,
+                count: 1,
+            });
     }
 
-    /// #697: true if `engineer` is still within the release-exclusion
-    /// window for `task_id`.
+    /// #697 / #698: true if `engineer` is still within the current
+    /// (exponentially-grown) release-exclusion window for `task_id`.
     pub(in super::super) fn is_release_excluded(&self, task_id: u32, engineer: &str) -> bool {
-        let window = self.release_exclusion_window();
+        let base = self.release_exclusion_window();
         self.recently_released_by
             .get(&(task_id, engineer.to_string()))
-            .map(|released_at| released_at.elapsed() < window)
+            .map(|record| record.dispatch_excluded(base))
             .unwrap_or(false)
     }
 
@@ -771,10 +791,14 @@ impl TeamDaemon {
         // Expire stale dedup entries.
         self.recent_dispatches
             .retain(|_, dispatched_at| dispatched_at.elapsed() < dedup_window);
-        // #697: expire stale release-exclusion entries.
-        let release_exclusion_window = self.release_exclusion_window();
+        // #697 / #698: retain release-exclusion records through the
+        // full cascade-observation window (2× effective window). Dropping
+        // the record the moment the gate opens would reset `count` to 1
+        // on every release, killing the exponential backoff the same way
+        // the pre-#689 rescue map did.
+        let release_base_window = self.release_exclusion_window();
         self.recently_released_by
-            .retain(|_, released_at| released_at.elapsed() < release_exclusion_window);
+            .retain(|_, record| record.in_cascade_window(release_base_window));
 
         // #684 / #686 / #689: retain rescue records through the full
         // cascade-observation window (2× effective cooldown), not just
@@ -3095,11 +3119,78 @@ mod tests {
         // Backdate the entry past the configured window — exclusion expires.
         daemon.recently_released_by.insert(
             (42, "eng-1".to_string()),
-            std::time::Instant::now() - Duration::from_secs(400),
+            crate::team::daemon::ReleaseRecord {
+                last_released_at: std::time::Instant::now() - Duration::from_secs(400),
+                count: 1,
+            },
         );
         assert!(
             !daemon.is_release_excluded(42, "eng-1"),
             "exclusion must expire after dispatch_release_exclusion_secs"
+        );
+    }
+
+    #[test]
+    fn record_task_release_by_grows_exclusion_exponentially_on_repeat() {
+        // #698: a parked task (owner awaiting human coordination) re-dispatched
+        // and re-released inside the cascade-observation window must climb
+        // the exponential backoff so the next exclusion lasts longer than
+        // the base window. Without this, the hourly dispatch→release loop
+        // observed on batty_marketing with task #597 (alex-dev awaiting
+        // Akim's Saturday ping) wastes ~14 engineer turns per weekend.
+        use std::time::Duration;
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![
+                manager_member("mgr", None),
+                engineer_member("eng-1", Some("mgr"), false),
+            ])
+            .build();
+        daemon
+            .config
+            .team_config
+            .board
+            .dispatch_release_exclusion_secs = 300;
+
+        // First release — count=1, base window (300s).
+        daemon.record_task_release_by(555, "eng-1");
+        assert_eq!(daemon.recently_released_by[&(555, "eng-1".to_string())].count, 1);
+
+        // Simulate a second release after the base window expires but still
+        // inside the cascade-observation window (2×300s = 600s). Count grows.
+        daemon.recently_released_by.insert(
+            (555, "eng-1".to_string()),
+            crate::team::daemon::ReleaseRecord {
+                last_released_at: std::time::Instant::now() - Duration::from_secs(310),
+                count: 1,
+            },
+        );
+        daemon.record_task_release_by(555, "eng-1");
+        let after_second = daemon.recently_released_by[&(555, "eng-1".to_string())];
+        assert_eq!(
+            after_second.count, 2,
+            "second release within cascade window must grow the counter"
+        );
+        // Effective window is now 2× base = 600s — exclusion still holds
+        // at 0s elapsed.
+        assert!(daemon.is_release_excluded(555, "eng-1"));
+
+        // A release well past the cascade window resets the counter to 1.
+        // At count=3 the effective window is 4× base (1200s) and the
+        // cascade window is 2× that (2400s). 3000s elapsed is unambiguously
+        // past the cascade window.
+        daemon.recently_released_by.insert(
+            (555, "eng-1".to_string()),
+            crate::team::daemon::ReleaseRecord {
+                last_released_at: std::time::Instant::now() - Duration::from_secs(3_000),
+                count: 3,
+            },
+        );
+        daemon.record_task_release_by(555, "eng-1");
+        let after_reset = daemon.recently_released_by[&(555, "eng-1".to_string())];
+        assert_eq!(
+            after_reset.count, 1,
+            "release past cascade window is a new cascade — counter resets"
         );
     }
 

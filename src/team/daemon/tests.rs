@@ -382,7 +382,13 @@ fn daemon_state_round_trip_preserves_runtime_fields() {
                 count: 3,
             },
         )]),
-        recently_released_by: HashMap::from([("55:kai-devrel-1-1".to_string(), 60)]),
+        recently_released_by: HashMap::from([(
+            "55:kai-devrel-1-1".to_string(),
+            PersistedReleaseRecord {
+                last_released_elapsed_secs: 60,
+                count: 2,
+            },
+        )]),
     };
 
     save_daemon_state(tmp.path(), &state).unwrap();
@@ -476,19 +482,25 @@ fn restore_runtime_state_preserves_recently_released_by_across_restart() {
     let mut daemon = make_test_daemon(tmp.path(), vec![manager_member("manager", None)]);
     daemon.recently_released_by.insert(
         (555, "kai-devrel-1-1".to_string()),
-        std::time::Instant::now() - std::time::Duration::from_secs(300),
+        super::ReleaseRecord {
+            last_released_at: std::time::Instant::now() - std::time::Duration::from_secs(300),
+            count: 3,
+        },
     );
     daemon.persist_runtime_state(true).unwrap();
 
     let mut restored = make_test_daemon(tmp.path(), vec![manager_member("manager", None)]);
     assert!(restored.recently_released_by.is_empty());
     restored.restore_runtime_state();
-    let restored_at = restored
+    let restored_record = restored
         .recently_released_by
         .get(&(555, "kai-devrel-1-1".to_string()))
         .copied()
         .expect("release-exclusion record must survive restart");
-    let restored_elapsed = restored_at.elapsed().as_secs();
+    // #698: count must round-trip so the exponential-backoff window
+    // isn't reset on restart.
+    assert_eq!(restored_record.count, 3);
+    let restored_elapsed = restored_record.last_released_at.elapsed().as_secs();
     assert!(
         restored_elapsed >= 295 && restored_elapsed <= 315,
         "expected restored release-exclusion elapsed ~300s, got {restored_elapsed}s",

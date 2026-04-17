@@ -135,8 +135,8 @@ pub(crate) use self::merge_queue::{MergeQueue, MergeRequest};
 pub use self::state::load_dispatch_queue_snapshot;
 #[cfg(test)]
 use self::state::{
-    PersistedDaemonState, PersistedNudgeState, PersistedRescueRecord, daemon_state_path,
-    load_daemon_state, save_daemon_state,
+    PersistedDaemonState, PersistedNudgeState, PersistedReleaseRecord, PersistedRescueRecord,
+    daemon_state_path, load_daemon_state, save_daemon_state,
 };
 pub(super) use super::delivery::MessageDelivery;
 
@@ -205,6 +205,54 @@ impl RescueRecord {
     /// counter or resets it, and (b) retain the record in memory.
     pub(crate) fn in_cascade_window(&self, base: Duration) -> bool {
         self.last_rescued_at.elapsed() < self.cascade_window(base)
+    }
+}
+
+/// #698: per-(task, engineer) release-exclusion record. Mirrors
+/// `RescueRecord` so that repeated dispatch→release cycles for the same
+/// (task, engineer) pair widen the exclusion window exponentially
+/// instead of re-firing on the same base cadence.
+///
+/// Motivation: task parked awaiting a human coordination signal (e.g.
+/// Akim's Saturday daily-ping) can't be made dispatchable until that
+/// signal arrives. With a fixed-window exclusion the owner-restricted
+/// task resurfaces every `dispatch_release_exclusion_secs`, is re-given
+/// to the parking engineer, read, released — burning one engineer turn
+/// per cycle. Growing the exclusion window exponentially after each
+/// release-in-cascade (1×, 2×, 4×, 8×, 16×, capped) collapses ~14 wasted
+/// turns over a 14h weekend park to ~4, while still eventually letting
+/// a legitimately-stuck parked task resurface.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ReleaseRecord {
+    pub last_released_at: Instant,
+    pub count: u32,
+}
+
+impl ReleaseRecord {
+    pub(crate) fn effective_window(&self, base: Duration) -> Duration {
+        let multiplier_shift = self.count.saturating_sub(1).min(4);
+        base.saturating_mul(1u32 << multiplier_shift)
+    }
+
+    /// Cascade-observation window: two effective exclusion windows since
+    /// the last release. Matches `RescueRecord::cascade_window` so the
+    /// counter grows only while the release→dispatch→release loop is
+    /// still visibly cycling, and resets once the pair has actually been
+    /// quiet for a full extra exclusion period.
+    pub(crate) fn cascade_window(&self, base: Duration) -> Duration {
+        self.effective_window(base).saturating_mul(2)
+    }
+
+    /// True while the dispatch gate must exclude this (task, engineer).
+    pub(crate) fn dispatch_excluded(&self, base: Duration) -> bool {
+        self.last_released_at.elapsed() < self.effective_window(base)
+    }
+
+    /// True while we still consider this pair part of an active release
+    /// cascade — used to (a) decide whether the next release grows the
+    /// counter or resets it, and (b) retain the record in memory.
+    pub(crate) fn in_cascade_window(&self, base: Duration) -> bool {
+        self.last_released_at.elapsed() < self.cascade_window(base)
     }
 }
 
@@ -301,7 +349,7 @@ pub struct TeamDaemon {
     /// `dispatch_release_exclusion_secs` so they do not immediately
     /// receive back a task they just parked. Other engineers remain
     /// eligible once the task-level rescue cooldown expires.
-    pub(super) recently_released_by: HashMap<(u32, String), Instant>,
+    pub(super) recently_released_by: HashMap<(u32, String), ReleaseRecord>,
     /// Tracks recent escalation keys to suppress repeated alerts.
     pub(super) recent_escalations: HashMap<String, Instant>,
     /// Latest periodic main smoke-test outcome.
