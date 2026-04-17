@@ -2,6 +2,97 @@
 
 All notable changes to Batty are documented here.
 
+## 0.11.58 — 2026-04-17
+
+Stop the auto-dispatch loop from stalling when the top-ranked
+available task is eligible only for an engineer blocked by the
+per-engineer release-exclusion (#697) or recent-dispatches map.
+In batty-marketing, task #597 (body-owner `alex-dev`, restricted
+via #705 to `alex-dev-1-1`) sorted first in
+`available_dispatch_tasks`. Alex was inside the 1h release-exclusion
+window after releasing the task, so `ranked_engineers.find(...)`
+returned None and the outer loop `break`'d — leaving idle
+`priya-writer-1-1`, `kai-devrel-1-1`, and `sam-designer-1-1` without
+their own body-owned work for 33 minutes until the manager
+dispatch-gap intervention's `fallback_direct_dispatch` kicked in.
+The intervention burned manager + architect tokens on every
+subsequent poll while masking the root cause.
+
+### Fixes
+
+- **Defer release-excluded tasks instead of stalling the queue**
+  (`src/team/dispatch/queue.rs`) — `enqueue_dispatch_candidates`
+  now tracks `eligibility_excluded_task_ids: HashSet<u32>` across
+  loop iterations, extends `unavailable_task_ids` with it so the
+  blocked task drops out of the next `available_dispatch_tasks`
+  call, and replaces the premature `break` on empty-engineer-pool
+  with `insert(task.id); continue;`. The loop now advances to the
+  next candidate so other idle engineers get their own tasks
+  without waiting for the excluded engineer's window to expire or
+  for the fallback intervention to fire.
+- **Regression test**
+  (`enqueue_dispatch_candidates_defers_release_excluded_task_and_dispatches_next_priority`)
+  — reproduces the batty-marketing shape: two body-owner-routed
+  tasks, one owner release-excluded, one idle. Before the fix,
+  `dispatch_queue` was empty; after, the non-excluded owner gets
+  their task.
+
+## 0.11.57 — 2026-04-17
+
+Two daemon-stability bugs that both showed up live in
+batty-marketing during the v0.11.54–56 deploy cycle.
+
+### Fixes
+
+- **Hot-reload SIGKILL after `cp` on macOS** — `cp
+  target/release/batty ~/.cargo/bin/batty` preserves the embedded
+  codesign bytes (so `codesign --verify` passes) but macOS amfi
+  keys exec trust on inode identity, so the kernel SIGKILLs the
+  replaced binary on exec. Before the fix, `binary_is_reloadable`
+  only ran `codesign --verify`, so the daemon detected the inode
+  change, decided the binary was reloadable, exec'd into it, got
+  SIGKILLed, crash-looped, and tripped the watchdog circuit
+  breaker (observed earlier in the day against ~/batty_marketing,
+  took down all 6 shims). Now refresh the adhoc signature with
+  `codesign --force --sign -` before the verify check so the amfi
+  cache is invalidated ahead of exec.
+- **Discord MESSAGE_CONTENT privileged-intent silent drop** —
+  `parse_messages_response` silently dropped every message whose
+  `content` field was empty, so a bot without MESSAGE_CONTENT in
+  the Developer Portal would log `0 inbound` with `Health: ok`.
+  Now track drop reasons, warn when the whole window drops (with
+  the hint that `dropped_empty_content == total_received` implies
+  the intent is off), and advance the cursor to the highest
+  snowflake seen regardless of filtering so a channel whose newest
+  messages are bot/unauthorized doesn't stall the poll loop
+  forever. Poll-error log bumped from debug to warn.
+
+## 0.11.56 — 2026-04-17
+
+Two independent health bugs were leaving a live shim indefinitely
+flagged as stale and its pending delivery queue stuck for the 600 s
+expiry window.
+
+### Fixes
+
+- **Keep pinging stale shim handles**
+  (`src/team/daemon/health/ping_pong.rs`) — once the daemon logged
+  `shim handle stale`, the stale branch `continue`'d past
+  `send_ping`, so the daemon stopped pinging that handle entirely.
+  `last_pong_at` could never advance even though the shim was
+  still alive (observed in production: stats and turn-completion
+  events kept flowing while `secs_since_pong` grew unbounded). The
+  stale branch now falls through and keeps pinging so the handle
+  can self-heal; code restructured to release the mutable borrow
+  before calling `record_orchestrator_action`.
+- **Drain pending delivery queue on Working → Idle transition**
+  (`src/team/daemon/health/poll_shim.rs`) —
+  `Event::StateChanged(to=Idle)` did not call
+  `drain_pending_queue`, so messages queued during a Working
+  window sat until `expire_stale_pending_messages` fell back to
+  the inbox 600 s later. `Event::Ready` and the force-idle timeout
+  both drain; the natural Working→Idle transition now does too.
+
 ## 0.11.55 — 2026-04-17
 
 Stop auto-doctor from resetting in-progress tasks whose claim
