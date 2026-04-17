@@ -20,6 +20,16 @@ pub(super) struct PersistedNudgeState {
     pub paused: bool,
 }
 
+/// #689: per-task orphan-rescue record persisted across daemon restarts.
+/// Without this, a restart in the middle of a rescue cascade wipes the
+/// exponential-backoff counter back to 1 and the cascade resumes at the
+/// base cooldown.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub(super) struct PersistedRescueRecord {
+    pub last_rescued_elapsed_secs: u64,
+    pub count: u32,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(super) struct PersistedDaemonState {
     pub clean_shutdown: bool,
@@ -49,6 +59,11 @@ pub(super) struct PersistedDaemonState {
     /// cycle. Must survive restart or the backoff is lost.
     #[serde(default)]
     pub planning_cycle_consecutive_empty: u32,
+    /// #689: per-task orphan-rescue records. Persisted so the
+    /// exponential-backoff counter (and therefore the quiet-time a
+    /// cascaded task earns) survives daemon restarts.
+    #[serde(default)]
+    pub recently_rescued_tasks: HashMap<u32, PersistedRescueRecord>,
 }
 
 impl TeamDaemon {
@@ -102,6 +117,24 @@ impl TeamDaemon {
                     .checked_sub(Duration::from_secs(elapsed_secs))
                     .unwrap_or_else(Instant::now)
             });
+        // #689: restore orphan-rescue records so the exponential-backoff
+        // counter survives a daemon restart mid-cascade.
+        self.recently_rescued_tasks = state
+            .recently_rescued_tasks
+            .into_iter()
+            .map(|(task_id, persisted)| {
+                let last_rescued_at = Instant::now()
+                    .checked_sub(Duration::from_secs(persisted.last_rescued_elapsed_secs))
+                    .unwrap_or_else(Instant::now);
+                (
+                    task_id,
+                    super::RescueRecord {
+                        last_rescued_at,
+                        count: persisted.count,
+                    },
+                )
+            })
+            .collect();
     }
 
     pub(super) fn persist_runtime_state(&self, clean_shutdown: bool) -> Result<()> {
@@ -141,6 +174,19 @@ impl TeamDaemon {
                 .planning_cycle_last_fired
                 .map(|t| t.elapsed().as_secs()),
             planning_cycle_consecutive_empty: self.planning_cycle_consecutive_empty,
+            recently_rescued_tasks: self
+                .recently_rescued_tasks
+                .iter()
+                .map(|(task_id, record)| {
+                    (
+                        *task_id,
+                        PersistedRescueRecord {
+                            last_rescued_elapsed_secs: record.last_rescued_at.elapsed().as_secs(),
+                            count: record.count,
+                        },
+                    )
+                })
+                .collect(),
         };
         save_daemon_state(&self.config.project_root, &state)
     }

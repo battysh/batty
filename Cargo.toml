@@ -1,6 +1,6 @@
 [package]
 name = "batty-cli"
-version = "0.11.27"
+version = "0.11.28"
 default-run = "batty"
 edition = "2024"
 rust-version = "1.85"

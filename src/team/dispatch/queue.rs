@@ -434,14 +434,16 @@ impl TeamDaemon {
         );
         self.recently_rescued_tasks
             .iter()
-            .filter(|(_, record)| record.is_active(base))
+            .filter(|(_, record)| record.dispatch_blocked(base))
             .map(|(task_id, _)| *task_id)
             .collect()
     }
 
-    /// #686: record a rescue event for `task_id`. If the task is still
-    /// within its current cooldown window, the count (and therefore the
-    /// next window) grows; otherwise the count resets to 1.
+    /// #686 / #689: record a rescue event for `task_id`. Growth condition
+    /// uses the cascade-observation window (2× effective cooldown), not
+    /// the dispatch-gate window — rescues can only fire *after* the
+    /// dispatch gate has opened, so gating growth on `dispatch_blocked`
+    /// meant the counter never climbed past 1 in production.
     pub(in super::super) fn record_task_rescue(&mut self, task_id: u32) {
         let base = Duration::from_secs(
             self.config.team_config.board.orphan_rescue_cooldown_secs,
@@ -450,7 +452,7 @@ impl TeamDaemon {
         self.recently_rescued_tasks
             .entry(task_id)
             .and_modify(|record| {
-                if record.is_active(base) {
+                if record.in_cascade_window(base) {
                     record.count = record.count.saturating_add(1);
                 } else {
                     record.count = 1;
@@ -495,18 +497,24 @@ impl TeamDaemon {
         self.recent_dispatches
             .retain(|_, dispatched_at| dispatched_at.elapsed() < dedup_window);
 
-        // #684 / #686: expire stale orphan-rescue cooldown entries, using
-        // the per-task exponential window so repeatedly-rescued tasks stay
-        // quiet longer than the base cooldown.
+        // #684 / #686 / #689: retain rescue records through the full
+        // cascade-observation window (2× effective cooldown), not just
+        // the dispatch gate. Dropping the record the moment the gate
+        // opens is what caused the counter to reset to 1 on every
+        // rescue in production — killing the exponential backoff.
         let rescue_base_cooldown = Duration::from_secs(
             self.config.team_config.board.orphan_rescue_cooldown_secs,
         );
         self.recently_rescued_tasks
-            .retain(|_, record| record.is_active(rescue_base_cooldown));
+            .retain(|_, record| record.in_cascade_window(rescue_base_cooldown));
+        // Only task IDs still behind the dispatch gate should block new
+        // dispatch; past-gate-but-in-window entries live on only so the
+        // next rescue can see them and grow the counter.
         let rescued_task_ids: HashSet<u32> = self
             .recently_rescued_tasks
-            .keys()
-            .copied()
+            .iter()
+            .filter(|(_, record)| record.dispatch_blocked(rescue_base_cooldown))
+            .map(|(task_id, _)| *task_id)
             .collect();
 
         let mut queued_task_ids: HashSet<u32> = self
@@ -668,6 +676,13 @@ impl TeamDaemon {
     pub(in super::super) fn process_dispatch_queue(&mut self) -> Result<()> {
         let board_dir = self.board_dir();
         let benched_engineers = crate::team::bench::benched_engineer_names(self.project_root())?;
+        // #689: re-check the rescue cooldown at drain time. An entry can
+        // be queued at `enqueue_dispatch_candidates` time, then the task
+        // enters the rescue cooldown later in the same tick (when the
+        // orphan-rescue runs after the queue was populated). Without
+        // this re-check, the stale entry consumes the new cooldown by
+        // dispatching on the very next drain.
+        let rescued_task_ids = self.rescued_task_ids();
         let mut pending: Vec<DispatchQueueEntry> = std::mem::take(&mut self.dispatch_queue);
         let mut retained = Vec::new();
 
@@ -682,6 +697,14 @@ impl TeamDaemon {
                     engineer = %entry.engineer,
                     task_id = entry.task_id,
                     "dispatch queue: pruning stale entry (task done/claimed/missing)"
+                );
+                continue;
+            }
+            if rescued_task_ids.contains(&entry.task_id) {
+                info!(
+                    engineer = %entry.engineer,
+                    task_id = entry.task_id,
+                    "dispatch queue: pruning entry — task re-entered orphan-rescue cooldown"
                 );
                 continue;
             }
@@ -1128,7 +1151,6 @@ impl TeamDaemon {
 mod tests {
     use std::collections::{HashMap, HashSet};
     use std::path::Path;
-    use std::time::Instant;
 
     use super::{OverlapConflict, find_overlapping_tasks, predicted_files};
     use crate::team::standup::MemberState;
@@ -1979,6 +2001,54 @@ mod tests {
         assert_eq!(
             capped.effective_cooldown(base),
             std::time::Duration::from_secs(1600)
+        );
+    }
+
+    #[test]
+    fn record_task_rescue_grows_count_across_dispatch_gate_openings() {
+        // #689 regression: the dispatch cooldown gates dispatch, so the
+        // next rescue always fires *after* the effective_cooldown has
+        // elapsed. The old `is_active`-gated growth check therefore never
+        // triggered in production — count reset to 1 on every rescue and
+        // the exponential backoff flatlined at base. Here we simulate
+        // that by backdating `last_rescued_at` past the dispatch gate
+        // but still within the cascade-observation window.
+        use std::time::Duration;
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![
+                manager_member("mgr", None),
+                engineer_member("eng-1", Some("mgr"), false),
+            ])
+            .build();
+        // 100s base cooldown → count=1 effective_cooldown=100s, cascade_window=200s.
+        daemon.config.team_config.board.orphan_rescue_cooldown_secs = 100;
+
+        daemon.record_task_rescue(42);
+        // Simulate 150s elapsed — past the 100s dispatch gate (so a
+        // re-dispatch happens and the rescued engineer quickly releases)
+        // but still inside the 200s cascade window.
+        let record = daemon.recently_rescued_tasks.get_mut(&42).unwrap();
+        record.last_rescued_at = std::time::Instant::now() - Duration::from_secs(150);
+
+        daemon.record_task_rescue(42);
+        let grown = daemon.recently_rescued_tasks[&42];
+        assert_eq!(
+            grown.count, 2,
+            "rescue after gate-open but inside cascade window must grow the counter"
+        );
+
+        // Same scenario but past the cascade window → counter resets.
+        daemon.record_task_rescue(77);
+        let record = daemon.recently_rescued_tasks.get_mut(&77).unwrap();
+        // cascade_window at count=1 is 2× base = 200s; go well past it.
+        record.last_rescued_at = std::time::Instant::now() - Duration::from_secs(500);
+
+        daemon.record_task_rescue(77);
+        let reset = daemon.recently_rescued_tasks[&77];
+        assert_eq!(
+            reset.count, 1,
+            "rescue past cascade window is a new cascade — counter resets"
         );
     }
 

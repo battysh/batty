@@ -129,8 +129,8 @@ pub(crate) use self::merge_queue::{MergeQueue, MergeRequest};
 pub use self::state::load_dispatch_queue_snapshot;
 #[cfg(test)]
 use self::state::{
-    PersistedDaemonState, PersistedNudgeState, daemon_state_path, load_daemon_state,
-    save_daemon_state,
+    PersistedDaemonState, PersistedNudgeState, PersistedRescueRecord, daemon_state_path,
+    load_daemon_state, save_daemon_state,
 };
 pub(super) use super::delivery::MessageDelivery;
 
@@ -160,9 +160,9 @@ pub(crate) struct MainSmokeState {
 
 /// #686: per-task record used to derive the orphan-rescue dispatch
 /// cooldown. `count` grows each time a task is rescued while still in
-/// its current cooldown window; the effective quiet-time becomes
-/// `orphan_rescue_cooldown_secs * 2^min(count-1, 4)` (i.e. 1×, 2×, 4×,
-/// 8×, 16× — capped at 16× to avoid a pinned-forever task).
+/// its current cascade-observation window; the effective quiet-time
+/// becomes `orphan_rescue_cooldown_secs * 2^min(count-1, 4)` (i.e. 1×,
+/// 2×, 4×, 8×, 16× — capped at 16× to avoid a pinned-forever task).
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct RescueRecord {
     pub last_rescued_at: Instant,
@@ -175,8 +175,30 @@ impl RescueRecord {
         base.saturating_mul(1u32 << multiplier_shift)
     }
 
-    pub(crate) fn is_active(&self, base: Duration) -> bool {
+    /// #689: cooldown gates dispatch; because the dispatch gate keeps the
+    /// task off-queue for the whole `effective_cooldown`, any subsequent
+    /// rescue will by definition fire *after* that window — so growing
+    /// `count` only when `elapsed < effective_cooldown` (old `is_active`)
+    /// never triggered in production. The "same cascade" check now uses a
+    /// wider window: two full effective cooldowns since the last rescue.
+    /// That keeps the count climbing when the rescue→dispatch→reject
+    /// loop repeats near-immediately after the cooldown expires, and
+    /// resets the counter only when the task actually held stable for a
+    /// full extra cooldown worth of time.
+    pub(crate) fn cascade_window(&self, base: Duration) -> Duration {
+        self.effective_cooldown(base).saturating_mul(2)
+    }
+
+    /// True while the dispatch gate must keep this task off the queue.
+    pub(crate) fn dispatch_blocked(&self, base: Duration) -> bool {
         self.last_rescued_at.elapsed() < self.effective_cooldown(base)
+    }
+
+    /// True while we still consider this task to be part of an active
+    /// cascade — used to (a) decide whether the next rescue grows the
+    /// counter or resets it, and (b) retain the record in memory.
+    pub(crate) fn in_cascade_window(&self, base: Duration) -> bool {
+        self.last_rescued_at.elapsed() < self.cascade_window(base)
     }
 }
 

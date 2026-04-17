@@ -2,6 +2,66 @@
 
 All notable changes to Batty are documented here.
 
+## 0.11.28 — 2026-04-17
+
+Field-report fix: the v0.11.24 "exponential orphan-rescue backoff"
+never actually grew in production — every rescue reset the counter to
+1, so cascades kept re-dispatching at the base 5-minute cadence.
+Three root-cause fixes.
+
+### Fixes
+
+- **Cascade-observation window replaces dispatch-gate window for
+  count growth** (#689) — the dispatch cooldown gates *dispatch*, so
+  the next rescue for a cascading task always fires *after*
+  `effective_cooldown` has elapsed (when the rescued task gets
+  re-dispatched and the new claimer quickly releases). The old
+  `is_active`-gated growth check in `record_task_rescue` therefore
+  never triggered: `elapsed` was always ≥ `effective_cooldown`, so
+  count reset to 1 on every rescue. Growth now checks a wider
+  cascade-observation window (2× effective cooldown) which succeeds
+  across real-world gaps like "dispatch opens at 5m, engineer
+  releases at 5m+15s → rescue fires, 5m+15s < 10m → count grows."
+  Observed on task #519 in batty_marketing: the cascade
+  re-dispatched every ~5 minutes (03:32:54 → 03:37:56 → 03:38:09 →
+  03:43:11 → 03:43:29 → 03:48:36 → 04:18:53 → 04:19:06) with count
+  pinned at 1. New `RescueRecord::cascade_window` +
+  `in_cascade_window` helpers distinguish the dispatch gate
+  (`dispatch_blocked`) from the cascade-membership check.
+
+- **Pre-queued dispatch entries now re-check the rescue cooldown at
+  drain time** (#689) — an entry can be queued by
+  `enqueue_dispatch_candidates` and then the same tick's
+  `rescue_orphaned_tasks` fires a rescue for that task. The
+  already-queued entry would then bypass the freshly-set cooldown
+  and dispatch on the very next drain.
+  `process_dispatch_queue` now prunes queued entries whose task
+  entered the rescue cooldown after queuing.
+
+- **`recently_rescued_tasks` survives daemon restarts** (#689) — the
+  rescue-record map was in-memory only, so any daemon restart or
+  hot-reload wiped the exponential-backoff counter and resumed the
+  cascade at count=1 / 5-min cooldown. New
+  `PersistedRescueRecord { last_rescued_elapsed_secs, count }` rides
+  on `PersistedDaemonState` with `#[serde(default)]`; restore
+  reconstructs the `Instant` via `Instant::now() - elapsed`,
+  matching the existing nudge / planning-cycle persistence pattern.
+  Retention also moved from the dispatch-gate window (`is_active`)
+  to the full cascade window (`in_cascade_window`) so records live
+  long enough for the next rescue to find them.
+
+### Tests
+
+- `record_task_rescue_grows_count_across_dispatch_gate_openings`
+  regression — simulates a rescue at 150s elapsed (past the 100s
+  dispatch gate but inside the 200s cascade window) and asserts
+  count grows to 2, then a rescue at 500s elapsed (past cascade
+  window) resets to 1.
+- `restore_runtime_state_preserves_recently_rescued_tasks_across_restart`
+  regression — persists a count=4 record with `last_rescued` 180s
+  ago, restores, asserts count=4 and elapsed ~180s on the restored
+  `Instant`.
+
 ## 0.11.27 — 2026-04-17
 
 Tenth-round field-report fix: slow empty cycles no longer re-fire on completion.
