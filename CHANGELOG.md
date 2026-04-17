@@ -2,6 +2,38 @@
 
 All notable changes to Batty are documented here.
 
+## 0.11.38 — 2026-04-17
+
+Field-report fix: Maya-style round headers were defeating the
+body-owner-role parser. Tasks whose bodies begin
+`**Round-8 task from maya-lead. Owner: alex-dev. …**` still got
+dispatched to the wrong role — the owner hint was embedded
+mid-line inside a prose preamble, and the parser only accepted
+`Owner:` at the start of a line (after trimming leading `-` /
+`*`). `strip_prefix("Owner:")` failed against "Round-8 task
+from maya-lead.", the hint was ignored, and the four-way batch
+dispatch at 08:45:23 UTC round-robined #518 ("Owner: alex-dev")
+to sam-designer-1-1, #524 ("Owner: alex-dev") to kai-devrel-1-1,
+and #517 ("Owner: kai-devrel") to priya-writer-1-1 in
+batty-marketing. Each wrong-role engineer then had to burn a
+turn refusing and blocking as a dispatcher-false-positive,
+wasting four engineer contexts per wave replenishment.
+
+### Fixes
+
+- **Owner-role parser finds `Owner:` inside prose preambles** (#699)
+  — `parse_body_owner_role` in `src/team/dispatch/queue.rs`
+  now scans each line for `Owner:` anywhere, with a word-boundary
+  guard so unrelated compounds like `CoOwner:` or `DataOwner:`
+  can't masquerade as the hint. The existing line-start cases
+  (`Owner: priya-writer …`, `- Owner: **kai-devrel** …`) still
+  resolve via the same path; the new path catches Maya-style
+  round headers that wrap the declaration inside prose
+  (`**Round-8 task from maya-lead. Owner: alex-dev. …**`).
+  Regression test
+  `parse_body_owner_role_finds_owner_inside_prose_preamble`
+  covers #518/#524 body shapes plus the CoOwner bypass guard.
+
 ## 0.11.37 — 2026-04-17
 
 Field-report fix: the orphan rescue was quietly destroying
