@@ -2,6 +2,50 @@
 
 All notable changes to Batty are documented here.
 
+## 0.11.53 — 2026-04-17
+
+Halt the orphan-rescue cascade that was silently walking
+unclaimed in-progress tasks across the entire engineer roster.
+In batty-marketing, task #523 bounced alex-dev → kai-devrel →
+sam-designer → priya-writer in 4 minutes on 2026-04-16 (10
+rescues across the day); task #572 bounced sam-designer →
+alex-dev in 6 minutes on 2026-04-17. Each hop burned one
+engineer-turn on a claim + read + release cycle with no
+production, because the task body already documented a
+gate-passed or parked state that engineers correctly declined
+to restart. The existing 300 s task-level rescue cooldown
+didn't hold: (a) the per-engineer release-exclusion from #697
+only blocks the releasing engineer from re-dispatch of the
+same task, letting the cascade simply pick a different
+engineer once the task-level cooldown expired; (b) races
+between `record_task_rescue` and already-queued dispatch
+entries can slip one dispatch past the gate within the same
+tick as the rescue. 98 orphan-rescue WARN events in one
+daemon log — the biggest remaining engineer-turn sink.
+
+### Fixes
+
+- **Orphan-rescue cascades escalate to `blocked` on 2nd rescue**
+  (#714) — `reconcile_active_tasks` in
+  `src/team/daemon/automation.rs` now checks the
+  `recently_rescued_tasks` record before the usual
+  in-progress-orphan transition; if the task is already inside
+  the cascade window (2× effective cooldown since the last
+  rescue), it calls `block_task_with_reason` with an
+  `"orphan-rescue cascade"` block_reason instead of moving to
+  todo. Tasks filed `blocked` are excluded from
+  `available_dispatch_tasks`, so dispatch stops re-cycling the
+  task entirely. An inbox message to the first configured
+  manager explains the escalation and lists the three normal
+  triage outcomes (correct assignee/role, clarify/split scope,
+  or transition to done if the body already documents gate-pass
+  or parked state). First rescues still fall through to the
+  existing todo transition so a single benign release doesn't
+  force manager intervention. Regression tests:
+  `reconcile_active_tasks_escalates_repeat_orphan_rescue_to_blocked`
+  and `reconcile_active_tasks_first_orphan_rescue_moves_to_todo`
+  in `src/team/daemon/automation.rs` confirm both branches.
+
 ## 0.11.52 — 2026-04-17
 
 Close the WIP-limit rejection round-trip observed in batty-marketing.
