@@ -2,6 +2,33 @@
 
 All notable changes to Batty are documented here.
 
+## 0.11.30 — 2026-04-17
+
+Field-report fix: role-specific task tags had no routing effect when
+engineers lacked completion history. Observed in batty-marketing:
+task #550 tagged `kai-devrel` + `engagement` + `x-twitter` +
+`star-conversion` was dispatched to sam-designer (alphabetically
+first idle engineer), who released it within seconds because the
+task belonged to kai-devrel's role. The fresh engineer profiles had
+empty `domain_tags` — so `tag_overlap` scored 0 for every candidate
+and ranking fell back to alphabetical order.
+
+### Fixes
+
+- **Seed `domain_tags` with `role_name` at dispatch time** (#691) —
+  `enqueue_dispatch_candidates` and `process_dispatch_queue` now
+  insert each engineer's `role_name` into their `EngineerProfile
+  .domain_tags` after `load_engineer_profiles` returns. This means
+  a task tagged with a role name (`kai-devrel`, `sam-designer`,
+  etc.) contributes a matching `tag_overlap` score *before* any
+  completion history exists, correctly preferring the role-matching
+  engineer over alphabetical fallback. Seeding is additive — does
+  not replace the completion-history tags already extended by
+  `apply_completed_profile`. Regression test:
+  `dispatch_queue_seeds_role_name_into_domain_tags_for_tag_routing`
+  verifies a `kai-devrel`-tagged task routes to `kai-devrel-1-1`
+  over `alex-dev-1-1` and `sam-designer-1-1` peers.
+
 ## 0.11.29 — 2026-04-17
 
 Field-report fix: the v0.11.23 guard that skipped zero-output

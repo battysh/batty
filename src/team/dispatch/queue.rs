@@ -540,7 +540,25 @@ impl TeamDaemon {
             .map(|member| member.name.clone())
             .collect();
         let non_engineer_names = self.non_engineer_member_names();
-        let profiles = load_engineer_profiles(self.project_root(), &all_engineers, &board_tasks)?;
+        let mut profiles =
+            load_engineer_profiles(self.project_root(), &all_engineers, &board_tasks)?;
+
+        // #691: seed domain_tags with each engineer's role_name so tasks
+        // tagged with the role (e.g. "kai-devrel") preferentially route to
+        // engineers of that role before any completion history exists.
+        // Without this, fresh engineer profiles have empty domain_tags and
+        // tag_overlap contributes 0 to routing scores — causing role-tagged
+        // tasks to be dispatched by alphabetical fallback (observed:
+        // task #550 tagged "kai-devrel" was dispatched to sam-designer,
+        // who immediately released it).
+        for member in &self.config.members {
+            if member.role_type != RoleType::Engineer {
+                continue;
+            }
+            if let Some(profile) = profiles.get_mut(&member.name) {
+                profile.domain_tags.insert(member.role_name.clone());
+            }
+        }
 
         loop {
             let mut unavailable_task_ids = queued_task_ids.clone();
@@ -1153,6 +1171,8 @@ mod tests {
     use std::path::Path;
 
     use super::{OverlapConflict, find_overlapping_tasks, predicted_files};
+    use crate::team::config::RoleType;
+    use crate::team::hierarchy::MemberInstance;
     use crate::team::standup::MemberState;
     use crate::team::task_loop::{
         current_worktree_branch, engineer_base_branch_name, setup_engineer_worktree,
@@ -1264,6 +1284,27 @@ mod tests {
             tasks_dir.join(format!("{id:03}-{title}.md")),
             format!(
                 "---\nid: {id}\ntitle: {title}\nstatus: todo\npriority: high\nassignee: {assignee}\nclass: standard\n---\n\nTask.\n"
+            ),
+        )
+        .unwrap();
+    }
+
+    fn write_task_with_tags(project_root: &Path, id: u32, title: &str, tags: &[&str]) {
+        let tasks_dir = project_root
+            .join(".batty")
+            .join("team_config")
+            .join("board")
+            .join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+        let tags_block = tags
+            .iter()
+            .map(|tag| format!("  - {tag}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(
+            tasks_dir.join(format!("{id:03}-{title}.md")),
+            format!(
+                "---\nid: {id}\ntitle: {title}\nstatus: todo\npriority: high\ntags:\n{tags_block}\nclass: standard\n---\n\nTask.\n"
             ),
         )
         .unwrap();
@@ -1893,6 +1934,56 @@ mod tests {
         assert!(
             daemon.dispatch_queue.is_empty(),
             "task must remain undispatched while named engineer is unavailable"
+        );
+    }
+
+    #[test]
+    fn dispatch_queue_seeds_role_name_into_domain_tags_for_tag_routing() {
+        // #691: fresh engineer profiles have empty domain_tags until the
+        // engineer completes tagged tasks. Without seeding, a task tagged
+        // with a role_name (e.g. `kai-devrel`) scores 0 tag-overlap for
+        // every idle engineer and the dispatcher falls back to alphabetical
+        // order. Observed in batty-marketing: task #550 tagged `kai-devrel`
+        // was dispatched to sam-designer, who immediately released it.
+        //
+        // After seeding, kai-devrel-1-1's profile has the `kai-devrel` tag,
+        // matching the task's tag for a non-zero score that beats peers
+        // whose role_name does not match.
+        let tmp = tempfile::tempdir().unwrap();
+        write_task_with_tags(tmp.path(), 90, "role-tagged", &["kai-devrel", "engagement"]);
+
+        let member_with_role = |name: &str, role_name: &str| MemberInstance {
+            name: name.to_string(),
+            role_name: role_name.to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("codex".to_string()),
+            reports_to: Some("mgr".to_string()),
+            use_worktrees: false,
+            ..MemberInstance::default()
+        };
+
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![
+                manager_member("mgr", None),
+                member_with_role("alex-dev-1-1", "alex-dev"),
+                member_with_role("kai-devrel-1-1", "kai-devrel"),
+                member_with_role("sam-designer-1-1", "sam-designer"),
+            ])
+            .states(HashMap::from([
+                ("alex-dev-1-1".to_string(), MemberState::Idle),
+                ("kai-devrel-1-1".to_string(), MemberState::Idle),
+                ("sam-designer-1-1".to_string(), MemberState::Idle),
+            ]))
+            .build();
+
+        daemon.enqueue_dispatch_candidates().unwrap();
+
+        assert_eq!(daemon.dispatch_queue.len(), 1);
+        assert_eq!(daemon.dispatch_queue[0].task_id, 90);
+        assert_eq!(
+            daemon.dispatch_queue[0].engineer, "kai-devrel-1-1",
+            "task tagged with a role_name must prefer the engineer whose role_name matches, \
+             not fall back to the first alphabetical peer"
         );
     }
 
