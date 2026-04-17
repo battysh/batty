@@ -3650,6 +3650,82 @@ fn orphan_rescue_still_clears_block_when_task_was_not_blocked() {
 }
 
 #[test]
+fn orphan_review_rescue_skips_freshly_transitioned_reviews() {
+    // #704: a task that just entered review should not be bounced back to
+    // todo within seconds of the transition. The manager needs time to
+    // pick up the audit. Observed batty-marketing 2026-04-17 10:35:16 UTC:
+    // kai drafted #528, moved to review at ~10:33, reconciler bounced to
+    // todo at 10:35:16 before jordan-pm could audit — wasting the whole
+    // drafting cycle. Grace period uses file mtime as a proxy for "last
+    // state transition". A freshly-written review file has mtime within
+    // seconds → skip the rescue.
+    let tmp = tempfile::tempdir().unwrap();
+    let tasks_dir = tmp
+        .path()
+        .join(".batty")
+        .join("team_config")
+        .join("board")
+        .join("tasks");
+    std::fs::create_dir_all(&tasks_dir).unwrap();
+    std::fs::write(
+        tasks_dir.join("528-fresh-review.md"),
+        "---\nid: 528\ntitle: fresh-review\nstatus: review\npriority: high\nclass: standard\n---\n\nTask body.\n",
+    )
+    .unwrap();
+    let mut daemon = make_test_daemon(
+        tmp.path(),
+        vec![engineer_member("eng-1", Some("manager"), false)],
+    );
+
+    daemon.reconcile_active_tasks().unwrap();
+
+    let task = crate::task::load_task_by_id(&tasks_dir, 528).unwrap();
+    assert_eq!(
+        task.status, "review",
+        "fresh review should remain in review state during grace window"
+    );
+}
+
+#[test]
+fn orphan_review_rescue_fires_on_stale_reviews() {
+    // #704: once the grace period has elapsed and the manager has still
+    // not picked the task up, the rescue should fire as before. Back-date
+    // the file's mtime past the grace threshold to simulate a stale
+    // review.
+    let tmp = tempfile::tempdir().unwrap();
+    let tasks_dir = tmp
+        .path()
+        .join(".batty")
+        .join("team_config")
+        .join("board")
+        .join("tasks");
+    std::fs::create_dir_all(&tasks_dir).unwrap();
+    let file = tasks_dir.join("529-stale-review.md");
+    std::fs::write(
+        &file,
+        "---\nid: 529\ntitle: stale-review\nstatus: review\npriority: high\nclass: standard\n---\n\nTask body.\n",
+    )
+    .unwrap();
+    let old = filetime::FileTime::from_system_time(
+        std::time::SystemTime::now() - std::time::Duration::from_secs(3_600),
+    );
+    filetime::set_file_mtime(&file, old).unwrap();
+
+    let mut daemon = make_test_daemon(
+        tmp.path(),
+        vec![engineer_member("eng-1", Some("manager"), false)],
+    );
+
+    daemon.reconcile_active_tasks().unwrap();
+
+    let task = crate::task::load_task_by_id(&tasks_dir, 529).unwrap();
+    assert_eq!(
+        task.status, "todo",
+        "stale review with no review_owner should still be bounced back to todo"
+    );
+}
+
+#[test]
 fn spawn_all_agents_resume_reports_missing_sessions_across_primary_roles() {
     let tmp = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(tmp.path().join(".batty").join("team_config")).unwrap();
