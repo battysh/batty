@@ -2,6 +2,35 @@
 
 All notable changes to Batty are documented here.
 
+## 0.11.45 — 2026-04-17
+
+Field-report fix: in batty-marketing jordan-pm reached `usage_pct=211`
+(2,114,196 used / 1,000,000 bumped) at 11:49 UTC and kept running.
+A stall-mid-turn retry then fired at 11:52:06 UTC with `attempt=3`
+and the restart path silently no-op'd: `warn: "context pressure
+restart requested but no active task is recorded member=jordan-pm
+reason=stalled mid-turn"`. The oversized shim never recycled, and
+`expiring stale pending messages to inbox fallback` fired every ~60s
+because the shim was too slow draining its delivery queue at 2M-token
+turns.
+
+### Fixes
+
+- **Managers/architects with no active task now cold-respawn on
+  stall-retry instead of silently no-op'ing** (#706) —
+  `restart_member_with_task_context` in
+  `src/team/daemon/health/context_exhaustion.rs` falls back to
+  task-less `restart_member` (pane respawn + fresh launch identity)
+  when `active_task(member_name)` returns None. Managers and
+  architects never claim board tasks, so the task-context path's
+  checkpoint-handoff is meaningless for them — the correct recovery
+  is plain pane respawn. Before this fix the stall-retry path
+  (`handle_stalled_mid_turn_completion` attempt ≥ 3) would request a
+  restart, hit the no-active-task guard, warn, and return Ok(()),
+  leaving the manager stuck in a stall cascade with unbounded
+  context growth. Regression test:
+  `restart_member_with_task_context_falls_back_to_pane_respawn_for_manager_without_task`.
+
 ## 0.11.44 — 2026-04-17
 
 Field-report fix: in batty-marketing the dispatcher cascade-bounced

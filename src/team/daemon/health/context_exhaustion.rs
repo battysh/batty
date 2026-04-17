@@ -170,12 +170,24 @@ impl TeamDaemon {
         reason: &str,
     ) -> Result<()> {
         let Some(task) = self.active_task(member_name)? else {
-            warn!(
+            // #706: managers and architects never claim board tasks, so
+            // `active_task` always returns None for them. Before this
+            // fallback the stall-retry path (attempt >=3 in
+            // `handle_stalled_mid_turn_completion`) silently no-op'd on
+            // managers, leaving them in a stall cascade indefinitely.
+            // Observed 2026-04-17 11:52 UTC: jordan-pm at 211%
+            // context_usage_pct stalled mid-turn attempt=3; restart was
+            // requested and immediately dropped with the warn below,
+            // so nothing recycled the oversized shim. Task-less
+            // `restart_member` (pane respawn + fresh launch identity)
+            // is the correct recovery — the engineer-side checkpoint
+            // handoff only applies when there's a task to resume.
+            info!(
                 member = %member_name,
                 reason,
-                "restart requested but no active task is recorded"
+                "restart without task context (no active task); falling back to pane respawn + relaunch"
             );
-            return Ok(());
+            return self.restart_member(member_name);
         };
         let Some(member) = self
             .config
@@ -746,6 +758,36 @@ mod tests {
             .unwrap();
 
         assert!(!restarted, "cooldown should suppress the proactive restart");
+    }
+
+    #[test]
+    fn restart_member_with_task_context_falls_back_to_pane_respawn_for_manager_without_task() {
+        // #706: pre-fix, `restart_member_with_task_context` warned and
+        // bailed when `active_task` returned None — which is always true
+        // for managers/architects. That left jordan-pm stuck in a
+        // stall-mid-turn loop at 211% context with no recovery path.
+        // After the fix the function falls back to `restart_member`
+        // (pane respawn + relaunch). In this test env there is no pane
+        // registered for the member, so `restart_member` itself bails at
+        // its own no-pane guard — we just need to confirm the outer
+        // function returns Ok(()) without panic (i.e. took the fallback
+        // branch rather than choking on a missing pane from a path that
+        // assumed a task existed).
+        let tmp = tempfile::tempdir().unwrap();
+        let member_name = "manager-1";
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![manager_member(member_name, None)])
+            .build();
+
+        let result = daemon.restart_member_with_task_context(member_name, "stalled mid-turn");
+        assert!(
+            result.is_ok(),
+            "restart fallback should not error when the member has no active task"
+        );
+        assert!(
+            !daemon.active_tasks.contains_key(member_name),
+            "manager should remain task-less after the fallback restart"
+        );
     }
 
     #[test]
