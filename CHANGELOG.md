@@ -2,6 +2,40 @@
 
 All notable changes to Batty are documented here.
 
+## 0.11.44 — 2026-04-17
+
+Field-report fix: in batty-marketing the dispatcher cascade-bounced
+task #549 ("Pillar B: Draft This Week in Rust submission") across
+three engineers on three ticks because the task body's explicit
+routing cue (`- Route: dispatch to priya-writer.`) was used only as
+a scoring boost, not a hard eligibility gate. First dispatch at
+09:13:35 UTC went to kai-devrel-1-1 (refused); 10:18:42 UTC went to
+alex-dev-1-1 (refused); 11:04:36 UTC looped back to kai-devrel-1-1
+(refused again) because priya-writer-1-1 was `working` at each tick.
+Only jordan-pm's manual inbox-reroute at 11:04:49 UTC broke the
+cycle. Three dispatch turns were burned on work that was always
+priya's.
+
+### Fixes
+
+- **Body-owner routing is now a hard eligibility gate, not just a
+  scoring boost** (#705) — `rank_dispatch_engineers` in
+  `src/team/dispatch/queue.rs` now restricts `eligible` to engineers
+  carrying the body-owner role_name when `parse_body_owner_role`
+  identifies one, mirroring #682's `assignee:` frontmatter behavior.
+  If no engineer with that role is idle, the task stays undispatched
+  until one becomes available — no more cascade-dispatching to a
+  peer who will immediately refuse. The gate is gated by role
+  existence: bodies naming a non-engineer role still fall through
+  to #703's filter in `available_dispatch_tasks`, and bodies naming
+  an unknown/unconfigured role fall through to scoring as before.
+  Regression tests:
+  `enqueue_dispatch_candidates_waits_when_body_owner_engineer_busy`
+  covers the #549 shape (named engineer busy → no dispatch);
+  `enqueue_dispatch_candidates_dispatches_to_body_owner_when_idle_even_with_other_idle_peers`
+  proves the gate also forces the named engineer to win when they
+  are idle alongside other idle peers.
+
 ## 0.11.43 — 2026-04-17
 
 Field-report fix: in batty-marketing, kai-devrel-1-1 drafted #528
