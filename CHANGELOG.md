@@ -2,6 +2,38 @@
 
 All notable changes to Batty are documented here.
 
+## 0.11.40 — 2026-04-17
+
+Field-report fix: the zero-diff completion tracker was cold-
+respawning engineers every two turns in non-git projects.
+`maybe_track_zero_diff_completion` runs `git show-ref` /
+`git rev-list` against `engineer-base..engineer-branch`; in a
+non-git project both calls fail, `branch_exists` stays false,
+`commits_ahead` stays 0, and the `branch_exists && commits_ahead
+> 0` short-circuit never fires. The counter increments on every
+engineer completion, crosses the threshold (2) in two events,
+and the engineer gets cold-respawned losing ~200K tokens of
+context. Observed in batty-marketing (a content-pipeline
+project with no git repo): alex-dev-1-1 cold-respawned at
+09:22:05 and 09:25:12 — every 3 minutes — on successful
+completions with `response_len=936` / `response_len=161`. The
+work-preservation path also errored with `permanent git error:
+fatal: not a git repository` on each respawn.
+
+### Fixes
+
+- **Zero-diff completion tracker skips non-git and multi-repo
+  projects** (#701) — `maybe_track_zero_diff_completion` in
+  `src/team/daemon/health/poll_shim.rs` now returns `None`
+  immediately when `!self.is_git_repo || self.is_multi_repo`,
+  matching the same gate `main_smoke_check` uses. The mechanism
+  relies on commit attribution against a single
+  `<base>..<engineer-branch>` range — without that range it
+  cannot tell success from failure and its default answer
+  (failure) causes catastrophic context loss. Regression tests:
+  `zero_diff_completion_tracking_skips_non_git_projects` and
+  `zero_diff_completion_tracking_skips_multi_repo_projects`.
+
 ## 0.11.39 — 2026-04-17
 
 Field-report fix: a second wrong-role dispatch incident in
