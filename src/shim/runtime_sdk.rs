@@ -876,6 +876,22 @@ fn resolved_model_context_limit_tokens(model: Option<&str>) -> u64 {
 /// genuinely over-1M agent still trips, but a 1M-variant agent running
 /// under budget no longer gets panicked into a restart loop.
 fn effective_context_limit_tokens(model: Option<&str>, used_tokens: u64) -> u64 {
+    // Once a shim has ever observed used_tokens exceeding the nominal limit,
+    // the SDK is reporting a stripped model name for a 1M-tier agent. Latch
+    // onto the bumped limit for the remainder of the shim's lifetime.
+    // Without the latch, token counts fluctuate across turns (a /compact or
+    // cache-churn drops used_tokens back under nominal), and the phantom
+    // 200K limit re-engages — firing `proactive context pressure` at 85-95%
+    // for a 1M agent at ~20% real usage. Each firing increments the
+    // context_pressure_tracker's pressure_score, cycling on/off and
+    // eventually escalating to Nudge and Restart against a healthy agent.
+    static BUMP_LATCHED: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+    let bumped = 1_000_000;
+    if BUMP_LATCHED.load(std::sync::atomic::Ordering::Relaxed) {
+        return bumped;
+    }
+
     let nominal = resolved_model_context_limit_tokens(model);
     if used_tokens <= nominal {
         return nominal;
@@ -885,8 +901,8 @@ fn effective_context_limit_tokens(model: Option<&str>, used_tokens: u64) -> u64 
     // Claude currently ships 200K and 1M-context variants; any usage that
     // already exceeds 200K must be the 1M variant (or a future tier we'll
     // pick up when it ships).
-    let bumped = 1_000_000;
     if bumped > nominal {
+        BUMP_LATCHED.store(true, std::sync::atomic::Ordering::Relaxed);
         // Log the bump once per shim lifetime at warn level (retains
         // observability of the SDK reporting a stripped model name) and
         // thereafter at debug level. Without this guard, a busy agent
