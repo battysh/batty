@@ -97,7 +97,7 @@ pub(super) fn build_worktree_statuses(
     members
         .iter()
         .filter(|member| member.role_type == RoleType::Engineer)
-        .map(|member| {
+        .flat_map(|member| {
             let path = if member.use_worktrees {
                 project_root
                     .join(".batty")
@@ -107,6 +107,34 @@ pub(super) fn build_worktree_statuses(
                 project_root.to_path_buf()
             };
 
+            // Multi-repo mode: worktree root isn't a git repo, it holds
+            // per-package git worktrees underneath. Emit one status row per
+            // sub-repo with the member name suffixed (e.g. "eng-1-3:Foo").
+            // Single-repo mode falls through unchanged.
+            if path.exists() && !git_cmd::is_git_repo(&path) {
+                let sub_repos = git_cmd::discover_sub_repos(&path);
+                if !sub_repos.is_empty() {
+                    return sub_repos
+                        .into_iter()
+                        .map(|repo| {
+                            let repo_name = repo
+                                .file_name()
+                                .map(|n| n.to_string_lossy().into_owned())
+                                .unwrap_or_default();
+                            let branch = git_output(&repo, &["branch", "--show-current"]);
+                            let dirty = git_output(&repo, &["status", "--porcelain"])
+                                .map(|output| !output.is_empty());
+                            WorktreeStatus {
+                                member: format!("{}:{}", member.name, repo_name),
+                                path: repo,
+                                branch,
+                                dirty,
+                            }
+                        })
+                        .collect::<Vec<_>>();
+                }
+            }
+
             let branch = git_output(&path, &["branch", "--show-current"]);
             let dirty = if path.exists() {
                 git_output(&path, &["status", "--porcelain"]).map(|output| !output.is_empty())
@@ -114,12 +142,12 @@ pub(super) fn build_worktree_statuses(
                 None
             };
 
-            WorktreeStatus {
+            vec![WorktreeStatus {
                 member: member.name.clone(),
                 path,
                 branch,
                 dirty,
-            }
+            }]
         })
         .collect()
 }

@@ -1015,10 +1015,56 @@ impl TeamDaemon {
                         }
                     }
                     inbox::MessageType::Assign => {
-                        // Check WIP limit: don't assign if engineer already has active work
+                        // B-1(1.4) status guard: before ANY auto-save / WIP / frontmatter
+                        // mutation, re-read the target task's current status. If the task
+                        // is already terminal (done/review), this is a stale assignment
+                        // (e.g. from a pre-reclaim inbox that drained after the task was
+                        // reassigned and completed by another engineer). Dropping early
+                        // prevents the done-task regression documented in Appendix B:
+                        // an auto-save on a now-stale worktree can fabricate a block_reason
+                        // and overwrite the task's canonical branch/worktree_path frontmatter.
                         let board_dir = self.board_dir();
                         let tasks_dir = board_dir.join("tasks");
-                        let active_count = if tasks_dir.exists() {
+                        let task_id = extract_task_id_from_body(&msg.body);
+                        let stale_terminal_status: Option<String> =
+                            if let Some(tid) = task_id
+                                && tasks_dir.exists()
+                            {
+                                crate::task::load_tasks_from_dir(&tasks_dir)
+                                    .unwrap_or_default()
+                                    .into_iter()
+                                    .find(|t| t.id == tid)
+                                    .and_then(|t| match t.status.as_str() {
+                                        "done" | "review" => Some(t.status),
+                                        _ => None,
+                                    })
+                            } else {
+                                None
+                            };
+                        if let Some(status) = stale_terminal_status {
+                            let tid = task_id.expect("task_id is Some when status was resolved");
+                            warn!(
+                                to = %name,
+                                from = %msg.from,
+                                task_id = tid,
+                                status = %status,
+                                id = %msg.id,
+                                "dropping stale assign for completed task; task already terminal"
+                            );
+                            // Treat as delivered so the stale message clears the inbox.
+                            // Do NOT trigger any worktree auto-save / frontmatter write.
+                            let _ = self.queue_message(
+                                "daemon",
+                                &msg.from,
+                                &format!(
+                                    "Assignment of task #{tid} to {name} dropped: task is already {status}. \
+                                     This is almost certainly a stale message from before the task was reassigned/completed."
+                                ),
+                            );
+                            Ok(MessageDelivery::OrchestratorLogged)
+                        } else {
+                            // Check WIP limit: don't assign if engineer already has active work
+                            let active_count = if tasks_dir.exists() {
                             crate::task::load_tasks_from_dir(&tasks_dir)
                                 .unwrap_or_default()
                                 .iter()
@@ -1092,6 +1138,7 @@ impl TeamDaemon {
                                 );
                                 MessageDelivery::LivePane
                             })
+                        }
                         }
                     }
                 };
