@@ -998,30 +998,15 @@ pub fn reset_worktree_to_base_with_options_for(
             "archived preserved base-branch work before reset"
         );
     } else {
-        // #659: guard destructive `checkout -B <base_branch> main` by archiving
-        // any commits already on `base_branch` that are ahead of main. This
+        // #659: guard destructive `checkout -B <base_branch> <default>` by archiving
+        // any commits already on `base_branch` that are ahead of default. This
         // covers the case where `base_branch` already had unmerged commits from
         // a prior session (e.g. completed task work that hasn't been merged
-        // yet) and the branch ref is about to be rewritten to `main`.
-        let _ = archive_branch_if_commits_ahead(worktree_path, base_branch, "main", subsystem);
+        // yet) and the branch ref is about to be rewritten to default.
+        archive_branch_if_commits_ahead_across_repos(worktree_path, base_branch, subsystem);
     }
 
-    crate::team::task_loop::log_worktree_mutation_audit(
-        worktree_path,
-        subsystem,
-        "git checkout -B",
-        &crate::team::task_loop::current_worktree_user_change_paths(worktree_path)
-            .unwrap_or_default(),
-    );
-    let checkout = run_git(worktree_path, ["checkout", "-B", base_branch, "main"])?;
-    if !checkout.status.success() {
-        bail!(
-            "failed to recreate '{}' from 'main' in {}: {}",
-            base_branch,
-            worktree_path.display(),
-            String::from_utf8_lossy(&checkout.stderr).trim()
-        );
-    }
+    checkout_base_branch_across_repos(worktree_path, base_branch, subsystem)?;
     Ok(reason)
 }
 
@@ -1112,24 +1097,10 @@ pub fn reset_worktree_to_base_if_clean(
     }
 
     let _ = run_git(worktree_path, ["merge", "--abort"]);
-    // #659: archive commits ahead of main on `base_branch` before the
-    // destructive `checkout -B base_branch main` below.
-    let _ = archive_branch_if_commits_ahead(worktree_path, base_branch, "main", subsystem);
-    crate::team::task_loop::log_worktree_mutation_audit(
-        worktree_path,
-        subsystem,
-        "git checkout -B",
-        &dirty_paths,
-    );
-    let checkout = run_git(worktree_path, ["checkout", "-B", base_branch, "main"])?;
-    if !checkout.status.success() {
-        bail!(
-            "failed to recreate '{}' from 'main' in {}: {}",
-            base_branch,
-            worktree_path.display(),
-            String::from_utf8_lossy(&checkout.stderr).trim()
-        );
-    }
+    // #659: archive commits ahead of default branch on `base_branch` before the
+    // destructive `checkout -B base_branch <default>` below.
+    archive_branch_if_commits_ahead_across_repos(worktree_path, base_branch, subsystem);
+    checkout_base_branch_across_repos(worktree_path, base_branch, subsystem)?;
 
     Ok(WorktreeResetReason::CleanReset)
 }
@@ -1151,6 +1122,94 @@ fn archive_preserved_base_branch_head(worktree_path: &Path, base_branch: &str) -
         );
     }
     Ok(branch)
+}
+
+/// Iterate sub-repos (or the single repo at `worktree_path`) and archive any
+/// commits on `base_branch` that are ahead of each repo's default branch
+/// before a destructive `checkout -B`. Errors are logged but non-fatal: this
+/// mirrors the single-repo caller's `let _ = archive_branch_if_commits_ahead`
+/// best-effort behavior.
+///
+/// In multi-repo mode (worktree root is not a git repo), each sub-repo is
+/// processed independently. The default branch is resolved per-repo so
+/// repos with different conventions (mainline vs main) are both handled.
+fn archive_branch_if_commits_ahead_across_repos(
+    worktree_path: &Path,
+    base_branch: &str,
+    subsystem: &str,
+) {
+    for repo in iter_repos_for_mutation(worktree_path) {
+        let base_ref = crate::team::git_cmd::default_branch_name(&repo)
+            .unwrap_or_else(|| "main".to_string());
+        let _ = archive_branch_if_commits_ahead(&repo, base_branch, &base_ref, subsystem);
+    }
+}
+
+/// Run `git checkout -B <base_branch> <default>` in each sub-repo (or the
+/// single repo at `worktree_path`). Multi-repo-aware replacement for the
+/// historic hardcoded `run_git(worktree_path, ["checkout", "-B", base_branch, "main"])`.
+///
+/// Failure modes:
+/// - Multi-repo with no sub-repos at all: returns Ok (nothing to do). Old
+///   code would have bailed with `fatal: not a git repository` here; the new
+///   behavior is a no-op consistent with an empty workspace.
+/// - Single-repo or per-sub-repo checkout failure: bails with the same
+///   "failed to recreate '<branch>' from '<default>' in <path>: <stderr>"
+///   shape as the legacy error (just with the resolved default branch name
+///   instead of hardcoded "main").
+fn checkout_base_branch_across_repos(
+    worktree_path: &Path,
+    base_branch: &str,
+    subsystem: &str,
+) -> Result<()> {
+    let dirty_paths = crate::team::task_loop::current_worktree_user_change_paths(worktree_path)
+        .unwrap_or_default();
+    let repos = iter_repos_for_mutation(worktree_path);
+    if repos.is_empty() {
+        // Multi-repo container with zero sub-repos: nothing to check out. This
+        // is the exact shape that used to emit `fatal: not a git repository`
+        // and block the lane. Treat it as a no-op and let higher layers decide.
+        info!(
+            subsystem,
+            worktree = %worktree_path.display(),
+            "skipping checkout -B: no git repos found at worktree root or in immediate sub-dirs"
+        );
+        return Ok(());
+    }
+    for repo in repos {
+        let start = crate::team::git_cmd::default_branch_name(&repo)
+            .unwrap_or_else(|| "main".to_string());
+        crate::team::task_loop::log_worktree_mutation_audit(
+            &repo,
+            subsystem,
+            "git checkout -B",
+            &dirty_paths,
+        );
+        let checkout = run_git(&repo, ["checkout", "-B", base_branch, &start])?;
+        if !checkout.status.success() {
+            bail!(
+                "failed to recreate '{}' from '{}' in {}: {}",
+                base_branch,
+                start,
+                repo.display(),
+                String::from_utf8_lossy(&checkout.stderr).trim()
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Enumerate the set of repos to mutate for a worktree path. Returns
+/// `[worktree_path]` for single-repo worktrees, or the immediate sub-repos
+/// discovered by `git_cmd::discover_sub_repos` for multi-repo worktrees.
+/// Returns empty when the path is neither a git repo nor a container with
+/// git sub-repos — callers decide how to handle that (usually a no-op).
+fn iter_repos_for_mutation(worktree_path: &Path) -> Vec<PathBuf> {
+    if crate::team::git_cmd::is_git_repo(worktree_path) {
+        vec![worktree_path.to_path_buf()]
+    } else {
+        crate::team::git_cmd::discover_sub_repos(worktree_path)
+    }
 }
 
 /// Archive a branch to `preserved/<slug>-<timestamp>` if it has commits ahead
