@@ -27,8 +27,20 @@ impl TeamDaemon {
             .iter()
             .any(|m| m.role_type == RoleType::Engineer && m.use_worktrees);
         if needs_git {
-            ensure_git_ready(&self.config.project_root)?;
-            ensure_worktree_operations(&self.config.project_root)?;
+            if self.is_multi_repo {
+                // Multi-repo mode: project root is not a git repo (by design
+                // — it's a Brazil-style workspace holding multiple sibling
+                // git packages). Skip the root check; worktrees are created
+                // per sub-repo by dispatch/mod.rs which already handles
+                // discover_sub_repos.
+                info!(
+                    sub_repos = ?self.sub_repo_names,
+                    "multi-repo project: skipping root-level git preflight"
+                );
+            } else {
+                ensure_git_ready(&self.config.project_root)?;
+                ensure_worktree_operations(&self.config.project_root)?;
+            }
         } else {
             info!("skipping git preflight: no engineer members use worktrees (use_worktrees=true)");
         }
