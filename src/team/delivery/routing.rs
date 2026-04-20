@@ -35,6 +35,33 @@ fn extract_task_id_from_body(body: &str) -> Option<u32> {
     None
 }
 
+/// B-1(1.4) status-guard predicate: inspect `tasks_dir` and determine whether
+/// an inbox assignment for `body` should be dropped because the target task
+/// is already in a terminal state.
+///
+/// Returns `Some((task_id, status))` when the assign MUST be dropped (status
+/// is `done` or `review`). Returns `None` when the assign should proceed
+/// (task is todo/in-progress/blocked/unknown, body has no parseable task id,
+/// or the board is unavailable).
+///
+/// Pure helper so the status-guard can be unit-tested without constructing a
+/// full `TeamDaemon`.
+fn assign_stale_terminal_status(tasks_dir: &std::path::Path, body: &str) -> Option<(u32, String)> {
+    let tid = extract_task_id_from_body(body)?;
+    if !tasks_dir.exists() {
+        return None;
+    }
+    let status = crate::task::load_tasks_from_dir(tasks_dir)
+        .ok()?
+        .into_iter()
+        .find(|t| t.id == tid)
+        .map(|t| t.status)?;
+    match status.as_str() {
+        "done" | "review" => Some((tid, status)),
+        _ => None,
+    }
+}
+
 fn shim_log_preview(body: &str) -> String {
     let single_line = body.split_whitespace().collect::<Vec<_>>().join(" ");
     let mut preview = single_line.chars().take(160).collect::<String>();
@@ -1025,24 +1052,7 @@ impl TeamDaemon {
                         // and overwrite the task's canonical branch/worktree_path frontmatter.
                         let board_dir = self.board_dir();
                         let tasks_dir = board_dir.join("tasks");
-                        let task_id = extract_task_id_from_body(&msg.body);
-                        let stale_terminal_status: Option<String> =
-                            if let Some(tid) = task_id
-                                && tasks_dir.exists()
-                            {
-                                crate::task::load_tasks_from_dir(&tasks_dir)
-                                    .unwrap_or_default()
-                                    .into_iter()
-                                    .find(|t| t.id == tid)
-                                    .and_then(|t| match t.status.as_str() {
-                                        "done" | "review" => Some(t.status),
-                                        _ => None,
-                                    })
-                            } else {
-                                None
-                            };
-                        if let Some(status) = stale_terminal_status {
-                            let tid = task_id.expect("task_id is Some when status was resolved");
+                        if let Some((tid, status)) = assign_stale_terminal_status(&tasks_dir, &msg.body) {
                             warn!(
                                 to = %name,
                                 from = %msg.from,
@@ -3697,5 +3707,108 @@ mod tests {
 
         let daemon_msgs: Vec<_> = messages.iter().filter(|m| m.from == "daemon").collect();
         assert_eq!(daemon_msgs.len(), 2);
+    }
+
+    // ---------------------------------------------------------------------
+    // B-1(1.4) status-guard helper
+    // ---------------------------------------------------------------------
+
+    fn write_task_file(tasks_dir: &std::path::Path, id: u32, status: &str) {
+        std::fs::create_dir_all(tasks_dir).unwrap();
+        let path = tasks_dir.join(format!("{id:03}-test.md"));
+        let content = format!(
+            "---\nid: {id}\ntitle: test\nstatus: {status}\npriority: medium\nclass: standard\n---\n\nBody.\n"
+        );
+        std::fs::write(path, content).unwrap();
+    }
+
+    #[test]
+    fn assign_stale_terminal_status_drops_done_task() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = tmp.path().join("tasks");
+        write_task_file(&tasks_dir, 7, "done");
+        let result = super::assign_stale_terminal_status(&tasks_dir, "Task #7: some body");
+        assert_eq!(result, Some((7, "done".to_string())));
+    }
+
+    #[test]
+    fn assign_stale_terminal_status_drops_review_task() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = tmp.path().join("tasks");
+        write_task_file(&tasks_dir, 18, "review");
+        let result = super::assign_stale_terminal_status(&tasks_dir, "Task #18: review it");
+        assert_eq!(result, Some((18, "review".to_string())));
+    }
+
+    #[test]
+    fn assign_stale_terminal_status_allows_todo_task() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = tmp.path().join("tasks");
+        write_task_file(&tasks_dir, 19, "todo");
+        assert_eq!(
+            super::assign_stale_terminal_status(&tasks_dir, "Task #19: new work"),
+            None
+        );
+    }
+
+    #[test]
+    fn assign_stale_terminal_status_allows_in_progress_task() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = tmp.path().join("tasks");
+        write_task_file(&tasks_dir, 19, "in-progress");
+        assert_eq!(
+            super::assign_stale_terminal_status(&tasks_dir, "Task #19: continuing"),
+            None
+        );
+    }
+
+    #[test]
+    fn assign_stale_terminal_status_allows_blocked_task() {
+        // B-1 specifically calls out done/review as terminal. A blocked task
+        // may need reassignment when the block clears, so the guard must NOT
+        // drop it.
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = tmp.path().join("tasks");
+        write_task_file(&tasks_dir, 19, "blocked");
+        assert_eq!(
+            super::assign_stale_terminal_status(&tasks_dir, "Task #19: after unblock"),
+            None
+        );
+    }
+
+    #[test]
+    fn assign_stale_terminal_status_handles_body_with_no_task_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = tmp.path().join("tasks");
+        write_task_file(&tasks_dir, 7, "done");
+        assert_eq!(
+            super::assign_stale_terminal_status(&tasks_dir, "Please work on the eval harness"),
+            None
+        );
+    }
+
+    #[test]
+    fn assign_stale_terminal_status_handles_missing_tasks_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        // No tasks dir at all.
+        assert_eq!(
+            super::assign_stale_terminal_status(&tmp.path().join("tasks"), "Task #7: x"),
+            None
+        );
+    }
+
+    #[test]
+    fn assign_stale_terminal_status_handles_unknown_task_id() {
+        // Assign body references a task that doesn't exist on the board —
+        // must not false-positive into dropping the message. The caller will
+        // handle it as a normal assign attempt (which may itself fail with a
+        // clearer error than a silent drop).
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = tmp.path().join("tasks");
+        write_task_file(&tasks_dir, 7, "done");
+        assert_eq!(
+            super::assign_stale_terminal_status(&tasks_dir, "Task #999: does not exist"),
+            None
+        );
     }
 }

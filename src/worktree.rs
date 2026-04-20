@@ -2462,4 +2462,99 @@ mod tests {
                 .unwrap();
         assert!(result.is_none(), "missing branch should return None");
     }
+
+    // ---------------------------------------------------------------------
+    // B-1 multi-repo-aware helpers
+    // ---------------------------------------------------------------------
+
+    fn init_sub_repo(parent: &Path, name: &str) -> PathBuf {
+        let sub = parent.join(name);
+        fs::create_dir_all(&sub).unwrap();
+        git(&sub, &["init", "-q", "-b", "mainline"]);
+        git(
+            &sub,
+            &["config", "user.email", "batty-test@example.com"],
+        );
+        git(&sub, &["config", "user.name", "Batty Test"]);
+        fs::write(sub.join("README.md"), format!("{name}\n")).unwrap();
+        git(&sub, &["add", "README.md"]);
+        git(&sub, &["commit", "-q", "-m", "init"]);
+        // Set origin/HEAD so default_branch_name picks up mainline without a remote.
+        // In tests we leave it unset and rely on the show-ref fallback probe.
+        sub
+    }
+
+    #[test]
+    fn iter_repos_for_mutation_returns_single_repo_for_standalone_worktree() {
+        if !git_available() {
+            return;
+        }
+        let Some(tmp) = init_repo() else {
+            return;
+        };
+        let repos = iter_repos_for_mutation(tmp.path());
+        assert_eq!(repos.len(), 1);
+        assert_eq!(repos[0], tmp.path());
+    }
+
+    #[test]
+    fn iter_repos_for_mutation_returns_sub_repos_for_multi_repo_container() {
+        if !git_available() {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        // Container dir is NOT a git repo, but holds 3 sub-repos.
+        let r1 = init_sub_repo(tmp.path(), "PkgA");
+        let r2 = init_sub_repo(tmp.path(), "PkgB");
+        let r3 = init_sub_repo(tmp.path(), "PkgC");
+        let mut repos = iter_repos_for_mutation(tmp.path());
+        repos.sort();
+        let mut expected = vec![r1, r2, r3];
+        expected.sort();
+        assert_eq!(repos, expected);
+    }
+
+    #[test]
+    fn iter_repos_for_mutation_returns_empty_for_non_git_non_container() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Empty dir: no .git, no git sub-dirs.
+        let repos = iter_repos_for_mutation(tmp.path());
+        assert!(repos.is_empty());
+    }
+
+    #[test]
+    fn checkout_base_branch_across_repos_handles_container_with_no_git_no_fatal() {
+        // B-1(1.1) regression: container-shaped worktree must NOT bail with
+        // 'fatal: not a git repository'. The fix treats a no-sub-repo container
+        // as a no-op. This was the exact shape that kept blocking #7 TTL reclaim.
+        if !git_available() {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let result = checkout_base_branch_across_repos(tmp.path(), "eng-1-3/99", "test");
+        assert!(
+            result.is_ok(),
+            "container with no sub-repos must NOT fatal; got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn checkout_base_branch_across_repos_switches_branch_in_each_sub_repo() {
+        // B-1(1.2): three-sub-repo workspace must get the new branch created in
+        // each repo. Verifies multi-repo fan-out works for the base-branch reset
+        // that TTL reclaim runs.
+        if !git_available() {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let r1 = init_sub_repo(tmp.path(), "PkgA");
+        let r2 = init_sub_repo(tmp.path(), "PkgB");
+        let r3 = init_sub_repo(tmp.path(), "PkgC");
+        checkout_base_branch_across_repos(tmp.path(), "eng-1-3/19", "test").unwrap();
+        for repo in [&r1, &r2, &r3] {
+            let out = run_git(repo, ["branch", "--show-current"]).unwrap();
+            let branch = String::from_utf8_lossy(&out.stdout);
+            assert_eq!(branch.trim(), "eng-1-3/19", "repo {} should be on new branch", repo.display());
+        }
+    }
 }
