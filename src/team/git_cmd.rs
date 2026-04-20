@@ -115,6 +115,33 @@ pub fn run_git(repo_dir: &Path, args: &[&str]) -> Result<GitOutput, GitError> {
     }
 }
 
+/// Resolve the default branch name for a repo. Tries `origin/HEAD` first
+/// (correct if the remote was cloned recently), falls back to probing
+/// common candidates. Returns None if the repo has no recognizable
+/// default branch.
+pub fn default_branch_name(repo: &Path) -> Option<String> {
+    // Fast path: symbolic-ref of origin HEAD (set by `git clone`)
+    if let Ok(out) = run_git(repo, &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"])
+        && !out.stdout.trim().is_empty()
+    {
+        // "origin/mainline" -> "mainline"
+        let s = out.stdout.trim();
+        if let Some(rest) = s.strip_prefix("origin/") {
+            return Some(rest.to_string());
+        }
+        return Some(s.to_string());
+    }
+    // Fallback: probe common default branch names in Amazon + open-source order.
+    for candidate in ["mainline", "main", "master", "trunk"] {
+        if run_git(repo, &["show-ref", "--verify", "--quiet", &format!("refs/heads/{candidate}")])
+            .is_ok()
+        {
+            return Some(candidate.to_string());
+        }
+    }
+    None
+}
+
 pub fn worktree_add(
     repo: &Path,
     path: &Path,

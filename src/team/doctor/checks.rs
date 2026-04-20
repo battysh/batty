@@ -97,7 +97,7 @@ pub(super) fn build_worktree_statuses(
     members
         .iter()
         .filter(|member| member.role_type == RoleType::Engineer)
-        .map(|member| {
+        .flat_map(|member| {
             let path = if member.use_worktrees {
                 project_root
                     .join(".batty")
@@ -107,6 +107,34 @@ pub(super) fn build_worktree_statuses(
                 project_root.to_path_buf()
             };
 
+            // Multi-repo mode: worktree root isn't a git repo, it holds
+            // per-package git worktrees underneath. Emit one status row per
+            // sub-repo with the member name suffixed (e.g. "eng-1-3:Foo").
+            // Single-repo mode falls through unchanged.
+            if path.exists() && !git_cmd::is_git_repo(&path) {
+                let sub_repos = git_cmd::discover_sub_repos(&path);
+                if !sub_repos.is_empty() {
+                    return sub_repos
+                        .into_iter()
+                        .map(|repo| {
+                            let repo_name = repo
+                                .file_name()
+                                .map(|n| n.to_string_lossy().into_owned())
+                                .unwrap_or_default();
+                            let branch = git_output(&repo, &["branch", "--show-current"]);
+                            let dirty = git_output(&repo, &["status", "--porcelain"])
+                                .map(|output| !output.is_empty());
+                            WorktreeStatus {
+                                member: format!("{}:{}", member.name, repo_name),
+                                path: repo,
+                                branch,
+                                dirty,
+                            }
+                        })
+                        .collect::<Vec<_>>();
+                }
+            }
+
             let branch = git_output(&path, &["branch", "--show-current"]);
             let dirty = if path.exists() {
                 git_output(&path, &["status", "--porcelain"]).map(|output| !output.is_empty())
@@ -114,12 +142,12 @@ pub(super) fn build_worktree_statuses(
                 None
             };
 
-            WorktreeStatus {
+            vec![WorktreeStatus {
                 member: member.name.clone(),
                 path,
                 branch,
                 dirty,
-            }
+            }]
         })
         .collect()
 }
@@ -1199,5 +1227,93 @@ roles:
 
         assert_eq!(statuses.len(), 1);
         assert_eq!(statuses[0].member, "eng-1");
+    }
+
+    #[test]
+    fn build_worktree_statuses_fans_out_per_sub_repo_for_multi_repo_worktree() {
+        // B-1(1.3): in a Brazil multi-repo workspace, the engineer's worktree
+        // root is NOT a git repo — it holds per-package git worktrees. doctor
+        // must emit one status per sub-repo with member-qualified name.
+        use std::process::Command;
+
+        let git_ok = Command::new("git").arg("--version").output().is_ok();
+        if !git_ok {
+            return;
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let project_root = tmp.path();
+
+        // Engineer worktree at <project>/.batty/worktrees/eng-1 with 2 git sub-repos.
+        let worktree_root = project_root
+            .join(".batty")
+            .join("worktrees")
+            .join("eng-1");
+        std::fs::create_dir_all(&worktree_root).unwrap();
+
+        for sub_name in ["PkgA", "PkgB"] {
+            let sub = worktree_root.join(sub_name);
+            std::fs::create_dir_all(&sub).unwrap();
+            let _ = Command::new("git")
+                .current_dir(&sub)
+                .args(["init", "-q", "-b", "mainline"])
+                .output();
+            let _ = Command::new("git")
+                .current_dir(&sub)
+                .args(["config", "user.email", "t@e.x"])
+                .output();
+            let _ = Command::new("git")
+                .current_dir(&sub)
+                .args(["config", "user.name", "t"])
+                .output();
+            std::fs::write(sub.join("README.md"), "x\n").unwrap();
+            let _ = Command::new("git")
+                .current_dir(&sub)
+                .args(["add", "."])
+                .output();
+            let _ = Command::new("git")
+                .current_dir(&sub)
+                .args(["commit", "-q", "-m", "init"])
+                .output();
+        }
+
+        let members = vec![MemberInstance {
+            name: "eng-1".to_string(),
+            role_name: "engineer".to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("codex".to_string()),
+            model: None,
+            prompt: None,
+            posture: None,
+            model_class: None,
+            provider_overlay: None,
+            reports_to: Some("manager".to_string()),
+            use_worktrees: true,
+        }];
+
+        let statuses = build_worktree_statuses(project_root, &members);
+
+        // One row per sub-repo (not one row for the container with missing status).
+        assert_eq!(statuses.len(), 2, "expected 2 sub-repo rows, got {statuses:?}");
+        for s in &statuses {
+            assert!(
+                s.member.starts_with("eng-1:"),
+                "member name should be qualified as 'eng-1:<repo>', got '{}'",
+                s.member
+            );
+            // Branch should resolve (not missing like the B-1 bug report).
+            assert!(s.branch.is_some(), "branch should be discovered for {}", s.member);
+            // Clean sub-repo: git status --porcelain is empty; git_output
+            // returns None for empty output, so dirty is None (treated as
+            // "missing" in the display). Not Some(false). This matches the
+            // pre-existing single-repo behavior — the B-1 fix preserves it
+            // per sub-repo instead of hiding every sub-repo behind the
+            // container's non-git state.
+            assert!(
+                !matches!(s.dirty, Some(true)),
+                "fresh sub-repo should not be dirty, got {:?}",
+                s.dirty
+            );
+        }
     }
 }
