@@ -3154,7 +3154,10 @@ mod tests {
 
         // First release — count=1, base window (300s).
         daemon.record_task_release_by(555, "eng-1");
-        assert_eq!(daemon.recently_released_by[&(555, "eng-1".to_string())].count, 1);
+        assert_eq!(
+            daemon.recently_released_by[&(555, "eng-1".to_string())].count,
+            1
+        );
 
         // Simulate a second release after the base window expires but still
         // inside the cascade-observation window (2×300s = 600s). Count grows.
