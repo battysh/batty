@@ -5,12 +5,30 @@
 //! while it runs.
 
 use std::path::Path;
+use std::time::Duration;
 
 use anyhow::Result;
 use tracing::{debug, info, warn};
 
 use super::super::events::{QualityMetricsInfo, TeamEvent, VerificationPhaseChangeInfo};
 use super::*;
+
+const BINARY_FRESHNESS_INTERVAL: Duration = Duration::from_secs(3600);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BinaryFreshnessTrigger {
+    Periodic,
+    PostMerge,
+}
+
+impl BinaryFreshnessTrigger {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Periodic => "periodic",
+            Self::PostMerge => "post_merge",
+        }
+    }
+}
 
 impl TeamDaemon {
     pub(crate) fn emit_event(&mut self, event: TeamEvent) {
@@ -48,12 +66,19 @@ impl TeamDaemon {
     /// Check whether the running binary is stale relative to the git HEAD
     /// of the batty source tree (#675). Gated to run at most once per hour.
     pub(super) fn maybe_check_binary_freshness(&mut self) {
-        use std::time::{Duration, Instant};
-
-        const BINARY_FRESHNESS_INTERVAL: Duration = Duration::from_secs(3600);
         if self.last_binary_freshness_check.elapsed() < BINARY_FRESHNESS_INTERVAL {
             return;
         }
+        self.check_binary_freshness(BinaryFreshnessTrigger::Periodic);
+    }
+
+    pub(crate) fn check_binary_freshness_after_merge(&mut self) {
+        self.check_binary_freshness(BinaryFreshnessTrigger::PostMerge);
+    }
+
+    fn check_binary_freshness(&mut self, trigger: BinaryFreshnessTrigger) {
+        use std::time::Instant;
+
         self.last_binary_freshness_check = Instant::now();
 
         let binary_path = match std::env::current_exe() {
@@ -66,18 +91,7 @@ impl TeamDaemon {
         let repo_root = &self.config.project_root;
         match super::health::binary_freshness::evaluate_binary_freshness(&binary_path, repo_root) {
             Ok(Some(report)) => {
-                if report.fresh {
-                    info!("{}", report.status_line());
-                } else {
-                    warn!("{}", report.status_line());
-                    self.emit_event(TeamEvent::daemon_binary_stale(
-                        report.commits_behind,
-                        &report.last_subject,
-                        &report.last_hash,
-                        report.binary_mtime,
-                        report.head_ts,
-                    ));
-                }
+                self.record_binary_freshness_report(report, trigger);
             }
             Ok(None) => {
                 debug!("binary freshness check skipped (binary missing or not a git repo)");
@@ -86,6 +100,60 @@ impl TeamDaemon {
                 debug!(error = %error, "binary freshness check failed");
             }
         }
+    }
+
+    pub(crate) fn record_binary_freshness_report(
+        &mut self,
+        report: super::health::binary_freshness::BinaryFreshness,
+        trigger: BinaryFreshnessTrigger,
+    ) {
+        if report.fresh {
+            info!(trigger = trigger.as_str(), "{}", report.status_line());
+            return;
+        }
+
+        warn!(trigger = trigger.as_str(), "{}", report.status_line());
+        if self.recent_daemon_binary_stale_event() {
+            debug!(
+                trigger = trigger.as_str(),
+                commits_behind = report.commits_behind,
+                "daemon binary stale event suppressed by cooldown"
+            );
+            return;
+        }
+
+        let mut event = TeamEvent::daemon_binary_stale(
+            report.commits_behind,
+            &report.last_subject,
+            &report.last_hash,
+            report.binary_mtime,
+            report.head_ts,
+        );
+        let dirty_marker = if report.worktree_dirty {
+            "dirty=true"
+        } else {
+            "dirty=false"
+        };
+        event.details = Some(format!(
+            "{} trigger={} {}; {}",
+            event.details.unwrap_or_default(),
+            trigger.as_str(),
+            dirty_marker,
+            report.recovery_action()
+        ));
+        self.emit_event(event);
+    }
+
+    fn recent_daemon_binary_stale_event(&self) -> bool {
+        let now = crate::team::now_unix();
+        crate::team::events::read_events(&crate::team::team_events_path(&self.config.project_root))
+            .map(|events| {
+                events.into_iter().rev().any(|event| {
+                    event.event == "daemon_binary_stale"
+                        && now.saturating_sub(event.ts) < BINARY_FRESHNESS_INTERVAL.as_secs()
+                })
+            })
+            .unwrap_or(false)
     }
 
     /// Sweep expired messages from the tiered inbox sub-queues (#658).
@@ -408,6 +476,7 @@ impl TeamDaemon {
             lines_changed,
             Some(merge_mode),
         ));
+        self.check_binary_freshness_after_merge();
     }
 
     pub(crate) fn record_task_manual_merged(
@@ -419,6 +488,7 @@ impl TeamDaemon {
             &task_id.to_string(),
             Some(merge_mode),
         ));
+        self.check_binary_freshness_after_merge();
     }
 
     pub(crate) fn record_task_merge_failed(
@@ -1029,6 +1099,111 @@ mod tests {
             pane_map: HashMap::new(),
         })
         .unwrap()
+    }
+
+    fn stale_binary_report(
+        worktree_dirty: bool,
+    ) -> crate::team::daemon::health::binary_freshness::BinaryFreshness {
+        crate::team::daemon::health::binary_freshness::BinaryFreshness {
+            fresh: false,
+            commits_behind: 2,
+            last_subject: "Fix daemon routing".to_string(),
+            last_hash: "abc1234".to_string(),
+            binary_mtime: 1_700_000_000,
+            head_ts: 1_700_001_000,
+            worktree_dirty,
+        }
+    }
+
+    #[test]
+    fn binary_freshness_report_fresh_is_noop() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = daemon_for_orchestrator_logging(tmp.path(), WorkflowMode::Hybrid, true);
+        daemon.record_binary_freshness_report(
+            crate::team::daemon::health::binary_freshness::BinaryFreshness {
+                fresh: true,
+                commits_behind: 0,
+                last_subject: String::new(),
+                last_hash: String::new(),
+                binary_mtime: 1_700_000_000,
+                head_ts: 1_700_000_100,
+                worktree_dirty: false,
+            },
+            BinaryFreshnessTrigger::PostMerge,
+        );
+
+        let events = read_events(&crate::team::team_events_path(tmp.path())).unwrap();
+        assert!(
+            !events
+                .iter()
+                .any(|event| event.event == "daemon_binary_stale")
+        );
+    }
+
+    #[test]
+    fn post_merge_binary_freshness_report_emits_actionable_stale_event() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = daemon_for_orchestrator_logging(tmp.path(), WorkflowMode::Hybrid, true);
+        daemon.record_binary_freshness_report(
+            stale_binary_report(false),
+            BinaryFreshnessTrigger::PostMerge,
+        );
+
+        let events = read_events(&crate::team::team_events_path(tmp.path())).unwrap();
+        let stale = events
+            .iter()
+            .find(|event| event.event == "daemon_binary_stale")
+            .expect("stale event");
+        assert_eq!(stale.restart_count, Some(2));
+        assert_eq!(stale.reason.as_deref(), Some("Fix daemon routing"));
+        let details = stale.details.as_deref().unwrap_or_default();
+        assert!(details.contains("abc1234"));
+        assert!(details.contains("trigger=post_merge"));
+        assert!(details.contains("dirty=false"));
+        assert!(
+            details.contains(crate::team::daemon::health::binary_freshness::STALE_RECOVERY_COMMAND)
+        );
+    }
+
+    #[test]
+    fn binary_freshness_report_cooldown_dedupes_repeated_stale_events() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = daemon_for_orchestrator_logging(tmp.path(), WorkflowMode::Hybrid, true);
+
+        daemon.record_binary_freshness_report(
+            stale_binary_report(false),
+            BinaryFreshnessTrigger::PostMerge,
+        );
+        daemon.record_binary_freshness_report(
+            stale_binary_report(false),
+            BinaryFreshnessTrigger::PostMerge,
+        );
+
+        let events = read_events(&crate::team::team_events_path(tmp.path())).unwrap();
+        let stale_count = events
+            .iter()
+            .filter(|event| event.event == "daemon_binary_stale")
+            .count();
+        assert_eq!(stale_count, 1);
+    }
+
+    #[test]
+    fn binary_freshness_report_records_dirty_refusal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = daemon_for_orchestrator_logging(tmp.path(), WorkflowMode::Hybrid, true);
+        daemon.record_binary_freshness_report(
+            stale_binary_report(true),
+            BinaryFreshnessTrigger::PostMerge,
+        );
+
+        let events = read_events(&crate::team::team_events_path(tmp.path())).unwrap();
+        let stale = events
+            .iter()
+            .find(|event| event.event == "daemon_binary_stale")
+            .expect("stale event");
+        let details = stale.details.as_deref().unwrap_or_default();
+        assert!(details.contains("dirty=true"));
+        assert!(details.contains("auto-rebuild refused"));
     }
 
     #[test]
