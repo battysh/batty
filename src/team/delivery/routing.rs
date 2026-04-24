@@ -1651,6 +1651,8 @@ fn is_engineer_ambient_chatter(body: &str) -> bool {
         || normalized.starts_with("[digest]")
         || normalized.starts_with("[manager-digest]")
         || normalized.starts_with("recovery:")
+        || normalized.starts_with("review urgency:")
+        || normalized.starts_with("stale review normalization:")
         || normalized.starts_with("triage backlog detected:")
         || normalized.starts_with("dispatch recovery needed:")
         || normalized.contains("utilization recovery")
@@ -3972,6 +3974,97 @@ mod tests {
     }
 
     #[test]
+    fn deliver_inbox_diverts_stale_review_normalization_from_engineer_context() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = failed_delivery_test_daemon(&tmp);
+        daemon.config.team_config.workflow_mode = WorkflowMode::Hybrid;
+        let mut receiver = install_idle_test_shim(&mut daemon, &tmp, "eng-1");
+        receiver
+            .set_read_timeout(Some(Duration::from_millis(50)))
+            .unwrap();
+
+        let root = inbox::inboxes_root(tmp.path());
+        let body = "Stale review normalization: task #42 has been stuck in review for 7200s.\n\
+                    Task: already merged upstream\n\
+                    Reason: branch has no commits ahead of main.\n\
+                    Next step: normalize review backlog.";
+        let first_id = inbox::deliver_to_inbox(
+            &root,
+            &inbox::InboxMessage::new_send("manager", "eng-1", body),
+        )
+        .unwrap();
+        let second_id = inbox::deliver_to_inbox(
+            &root,
+            &inbox::InboxMessage::new_send("manager", "eng-1", body),
+        )
+        .unwrap();
+
+        daemon.deliver_inbox_messages().unwrap();
+
+        assert!(
+            receiver.recv::<crate::shim::protocol::Command>().is_err(),
+            "stale review normalization chatter should not enter engineer shim context"
+        );
+        assert!(inbox::pending_messages(&root, "eng-1").unwrap().is_empty());
+        let all = inbox::all_messages(&root, "eng-1").unwrap();
+        assert!(
+            all.iter()
+                .any(|(message, delivered)| message.id == first_id && *delivered),
+            "filtered first message should remain visible in raw inbox history"
+        );
+        assert!(
+            all.iter()
+                .any(|(message, delivered)| message.id == second_id && *delivered),
+            "filtered duplicate should remain visible in raw inbox history"
+        );
+
+        let log = std::fs::read_to_string(crate::team::orchestrator_log_path(tmp.path())).unwrap();
+        assert!(log.contains("diverted non-actionable engineer notice"));
+        assert!(log.contains("Stale review normalization"));
+    }
+
+    #[test]
+    fn deliver_inbox_keeps_stale_review_normalization_visible_to_manager() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = failed_delivery_test_daemon(&tmp);
+        daemon
+            .config
+            .pane_map
+            .insert("manager".to_string(), "%123".to_string());
+        let mut receiver = install_idle_test_shim(&mut daemon, &tmp, "manager");
+        receiver
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+
+        let root = inbox::inboxes_root(tmp.path());
+        let body = "Stale review normalization: task #42 has been stuck in review for 7200s.\n\
+                    Task: already merged upstream\n\
+                    Reason: branch has no commits ahead of main.\n\
+                    Next step: normalize review backlog.";
+        inbox::deliver_to_inbox(
+            &root,
+            &inbox::InboxMessage::new_send("architect", "manager", body),
+        )
+        .unwrap();
+
+        daemon.deliver_inbox_messages().unwrap();
+
+        let cmd = receiver
+            .recv::<crate::shim::protocol::Command>()
+            .unwrap()
+            .unwrap();
+        match cmd {
+            crate::shim::protocol::Command::SendMessage {
+                body: delivered, ..
+            } => {
+                assert!(delivered.contains("Stale review normalization"));
+                assert!(delivered.contains("normalize review backlog"));
+            }
+            other => panic!("expected SendMessage, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn deliver_message_keeps_engineer_retry_feedback_inline() {
         let tmp = tempfile::tempdir().unwrap();
         inbox::init_inbox(&inbox::inboxes_root(tmp.path()), "eng-1").unwrap();
@@ -4023,6 +4116,40 @@ mod tests {
                 ..
             }) => {
                 assert_eq!(from, "batty");
+                assert_eq!(delivered, body);
+            }
+            other => panic!("expected SendMessage, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn deliver_message_keeps_engineer_rework_inline() {
+        let tmp = tempfile::tempdir().unwrap();
+        inbox::init_inbox(&inbox::inboxes_root(tmp.path()), "eng-1").unwrap();
+
+        let mut daemon = failed_delivery_test_daemon(&tmp);
+        let mut receiver = install_idle_test_shim(&mut daemon, &tmp, "eng-1");
+        receiver
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+
+        let body =
+            "Task #42: rework required.\nFix the failing routing test and report completion again.";
+        let result = daemon.deliver_message("manager", "eng-1", body);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), MessageDelivery::LivePane);
+
+        let cmd = receiver
+            .recv::<crate::shim::protocol::Command>()
+            .unwrap()
+            .unwrap();
+        match cmd {
+            crate::shim::protocol::Command::SendMessage {
+                from,
+                body: delivered,
+                ..
+            } => {
+                assert_eq!(from, "manager");
                 assert_eq!(delivered, body);
             }
             other => panic!("expected SendMessage, got {other:?}"),
