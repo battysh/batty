@@ -10,6 +10,7 @@ use crate::team::completion;
 use crate::team::config::RoleType;
 use crate::team::daemon::{PendingAckInboxMessage, PendingShimAck, TeamDaemon};
 use crate::team::errors::DeliveryError;
+use crate::team::events::TeamEvent;
 use crate::team::inbox;
 use crate::team::message;
 use crate::team::standup::MemberState;
@@ -241,6 +242,12 @@ struct ReviewPacketTriageNudge {
     cooldown_key: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StaleDoneTaskNotice {
+    task_id: u32,
+    proof_ref: String,
+}
+
 fn extract_bracketed_sender(body: &str) -> Option<String> {
     let trimmed = body.trim_start();
     let rest = trimmed.strip_prefix('[')?;
@@ -276,6 +283,108 @@ fn extract_json_string_field(body: &str, field: &str) -> Option<String> {
     let end = rest.find('"')?;
     let value = rest[..end].trim();
     (!value.is_empty()).then(|| value.to_string())
+}
+
+fn is_stale_done_task_notice_candidate(normalized: &str) -> bool {
+    normalized.starts_with("branch/task mismatch detected for task #")
+        || normalized.starts_with("reconciliation alert:")
+        || normalized.starts_with("review urgency:")
+        || normalized.starts_with("stale review normalization:")
+        || normalized.starts_with("dispatch recovery needed:")
+}
+
+fn extract_expected_branch_from_notice(body: &str) -> Option<String> {
+    for line in body.lines() {
+        let lower = line.to_ascii_lowercase();
+        if let Some(label_start) = lower.find("expected branch") {
+            let after_label = &line[label_start + "expected branch".len()..];
+            if let Some((_, value)) = after_label.split_once(':')
+                && let Some(branch) = extract_branch_value(value.trim())
+            {
+                return Some(branch);
+            }
+        }
+        if let Some(label_start) = lower.find("instead of") {
+            let value = &line[label_start + "instead of".len()..];
+            if let Some(branch) = extract_branch_value(value) {
+                return Some(branch);
+            }
+        }
+        if let Some(label_start) = lower.find("should be on") {
+            let value = &line[label_start + "should be on".len()..];
+            if let Some(branch) = extract_branch_value(value) {
+                return Some(branch);
+            }
+        }
+    }
+    None
+}
+
+fn extract_branch_value(value: &str) -> Option<String> {
+    for quote in ['\'', '"', '`'] {
+        if let Some(start) = value.find(quote) {
+            let rest = &value[start + quote.len_utf8()..];
+            if let Some(end) = rest.find(quote) {
+                let quoted = rest[..end].trim();
+                if !quoted.is_empty() {
+                    return Some(quoted.to_string());
+                }
+            }
+        }
+    }
+    let value = value
+        .trim_matches(|ch: char| ch == '\'' || ch == '"' || ch == '`' || ch == '.')
+        .trim();
+    let value = value
+        .split_whitespace()
+        .next()
+        .unwrap_or_default()
+        .trim_matches(|ch: char| ch == '\'' || ch == '"' || ch == '`' || ch == '.' || ch == ',');
+    (!value.is_empty()).then(|| value.to_string())
+}
+
+fn merged_done_task_notice(
+    project_root: &std::path::Path,
+    body: &str,
+    trunk_branch: &str,
+) -> Option<StaleDoneTaskNotice> {
+    let normalized = normalized_body(body);
+    if !is_stale_done_task_notice_candidate(&normalized) {
+        return None;
+    }
+
+    let task_id = extract_task_id_number(body)?;
+    let tasks_dir = project_root
+        .join(".batty")
+        .join("team_config")
+        .join("board")
+        .join("tasks");
+    let task_path = crate::task::find_task_path_by_id(&tasks_dir, task_id).ok()?;
+    let task = crate::task::Task::from_file(&task_path).ok()?;
+    if !matches!(task.status.as_str(), "done" | "archived") {
+        return None;
+    }
+    if task.claimed_by.is_some() {
+        return None;
+    }
+
+    let mut proof_refs = Vec::new();
+    if let Some(commit) = task.commit.as_deref().filter(|value| !value.is_empty()) {
+        proof_refs.push(commit.to_string());
+    }
+    if let Some(branch) = task.branch.as_deref().filter(|value| !value.is_empty()) {
+        proof_refs.push(branch.to_string());
+    }
+    if let Some(branch) = extract_expected_branch_from_notice(body) {
+        proof_refs.push(branch);
+    }
+
+    proof_refs.into_iter().find_map(|proof_ref| {
+        crate::team::git_cmd::merge_base_is_ancestor(project_root, &proof_ref, trunk_branch)
+            .ok()
+            .filter(|merged| *merged)
+            .map(|_| StaleDoneTaskNotice { task_id, proof_ref })
+    })
 }
 
 fn extract_line_field(body: &str, field: &str) -> Option<String> {
@@ -712,6 +821,34 @@ impl TeamDaemon {
         }
     }
 
+    fn suppress_stale_done_task_notice(
+        &mut self,
+        from: &str,
+        recipient: &str,
+        notice: &StaleDoneTaskNotice,
+    ) {
+        let cooldown_key = format!(
+            "stale-done-task-notice:{}:{}:{}",
+            recipient, notice.task_id, notice.proof_ref
+        );
+        if self.intervention_cooldowns.contains_key(&cooldown_key) {
+            return;
+        }
+
+        self.intervention_cooldowns
+            .insert(cooldown_key, Instant::now());
+        let task = notice.task_id.to_string();
+        self.emit_event(TeamEvent::state_reconciliation(
+            Some(recipient),
+            Some(&task),
+            "stale_done_notice_suppressed",
+        ));
+        self.record_orchestrator_action(format!(
+            "stale done notice suppressed: {recipient} from {from} for task #{} already merged via {}",
+            notice.task_id, notice.proof_ref
+        ));
+    }
+
     fn pending_ack_contains_inbox_id(&self, inbox_id: &str) -> bool {
         self.pending_shim_acks.values().any(|pending| {
             pending
@@ -974,6 +1111,24 @@ impl TeamDaemon {
         body: &str,
         message_id: Option<String>,
     ) -> Result<MessageDelivery> {
+        if from != "human"
+            && let Some(notice) = merged_done_task_notice(
+                &self.config.project_root,
+                body,
+                self.config.team_config.trunk_branch(),
+            )
+        {
+            info!(
+                from,
+                to = recipient,
+                task_id = notice.task_id,
+                proof_ref = %notice.proof_ref,
+                "suppressing stale done-task notice"
+            );
+            self.suppress_stale_done_task_notice(from, recipient, &notice);
+            return Ok(MessageDelivery::OrchestratorLogged);
+        }
+
         if let Some(channel) = self.channels.get(recipient) {
             let _ = channel;
             return self.deliver_channel_message(from, recipient, body);
@@ -1138,9 +1293,36 @@ impl TeamDaemon {
             let mut suppressed_ids = std::collections::HashSet::new();
             let mut pending_manager_digest: Option<Vec<inbox::InboxMessage>> = None;
             let mut pending_manager_digest_ids = std::collections::HashSet::new();
+            for message in &messages {
+                if !matches!(message.msg_type, inbox::MessageType::Send) || message.from == "human"
+                {
+                    continue;
+                }
+                let Some(notice) = merged_done_task_notice(
+                    &self.config.project_root,
+                    &message.body,
+                    self.config.team_config.trunk_branch(),
+                ) else {
+                    continue;
+                };
+                if let Err(error) = inbox::mark_delivered(&root, name, &message.id) {
+                    warn!(
+                        member = %name,
+                        id = %message.id,
+                        error = %error,
+                        "failed to mark stale done-task notice delivered"
+                    );
+                    continue;
+                }
+                suppressed_ids.insert(message.id.clone());
+                self.suppress_stale_done_task_notice(&message.from, name, &notice);
+            }
             if self.is_manager_member(name) {
                 let suppression_window = Duration::from_secs(600);
                 for message in &messages {
+                    if suppressed_ids.contains(&message.id) {
+                        continue;
+                    }
                     if !matches!(message.msg_type, inbox::MessageType::Send) {
                         continue;
                     }
@@ -1685,8 +1867,8 @@ mod tests {
     use crate::team::message;
     use crate::team::standup::MemberState;
     use crate::team::test_support::{
-        TestDaemonBuilder, architect_member, engineer_member, inferred_role_defs, manager_member,
-        test_channel_config,
+        TestDaemonBuilder, architect_member, engineer_member, git_ok, inferred_role_defs,
+        init_git_repo, manager_member, test_channel_config, write_board_task_file,
     };
 
     struct RecordingChannel {
@@ -4060,6 +4242,269 @@ mod tests {
                 assert!(delivered.contains("Stale review normalization"));
                 assert!(delivered.contains("normalize review backlog"));
             }
+            other => panic!("expected SendMessage, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn deliver_inbox_suppresses_stale_done_task_notice_after_merge() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "routing-stale-done");
+        git_ok(&repo, &["branch", "eng-1-2/683"]);
+        write_board_task_file(&repo, 683, "merged-task", "done", None, &[], None);
+
+        let mut daemon = TestDaemonBuilder::new(&repo)
+            .members(vec![
+                architect_member("architect"),
+                manager_member("manager", Some("architect")),
+            ])
+            .pane_map(HashMap::from([(
+                "manager".to_string(),
+                "%manager".to_string(),
+            )]))
+            .build();
+        daemon.config.team_config.workflow_mode = WorkflowMode::Hybrid;
+        let mut receiver = install_idle_test_shim(&mut daemon, &tmp, "manager");
+        receiver
+            .set_read_timeout(Some(Duration::from_millis(50)))
+            .unwrap();
+
+        let body = "Branch/task mismatch detected for task #683. Current branch: \
+                    'eng-main/eng-1-3'. Expected branch: 'eng-1-2/683'. \
+                    Automatic recovery is paused.";
+        let root = inbox::inboxes_root(&repo);
+        let first_id = inbox::deliver_to_inbox(
+            &root,
+            &inbox::InboxMessage::new_send("architect", "manager", body),
+        )
+        .unwrap();
+        let second_id = inbox::deliver_to_inbox(
+            &root,
+            &inbox::InboxMessage::new_send("architect", "manager", body),
+        )
+        .unwrap();
+
+        daemon.deliver_inbox_messages().unwrap();
+
+        assert!(
+            receiver.recv::<crate::shim::protocol::Command>().is_err(),
+            "merged done-task notices should stay out of manager context"
+        );
+        assert!(
+            inbox::pending_messages(&root, "manager")
+                .unwrap()
+                .is_empty()
+        );
+        let all = inbox::all_messages(&root, "manager").unwrap();
+        assert!(
+            all.iter()
+                .any(|(message, delivered)| message.id == first_id && *delivered)
+        );
+        assert!(
+            all.iter()
+                .any(|(message, delivered)| message.id == second_id && *delivered)
+        );
+
+        let events =
+            std::fs::read_to_string(repo.join(".batty").join("team_config").join("events.jsonl"))
+                .unwrap();
+        assert_eq!(events.matches("stale_done_notice_suppressed").count(), 1);
+
+        let log = std::fs::read_to_string(crate::team::orchestrator_log_path(&repo)).unwrap();
+        assert!(log.contains("stale done notice suppressed"));
+        assert!(log.contains("task #683"));
+    }
+
+    #[test]
+    fn deliver_inbox_suppresses_reconciliation_instead_of_done_task_notice() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "routing-stale-done-instead-of");
+        git_ok(&repo, &["branch", "eng-1-2/683"]);
+        write_board_task_file(&repo, 683, "merged-task", "done", None, &[], None);
+
+        let mut daemon = TestDaemonBuilder::new(&repo)
+            .members(vec![
+                architect_member("architect"),
+                manager_member("manager", Some("architect")),
+            ])
+            .pane_map(HashMap::from([(
+                "manager".to_string(),
+                "%manager".to_string(),
+            )]))
+            .build();
+        daemon.config.team_config.workflow_mode = WorkflowMode::Hybrid;
+        let mut receiver = install_idle_test_shim(&mut daemon, &tmp, "manager");
+        receiver
+            .set_read_timeout(Some(Duration::from_millis(50)))
+            .unwrap();
+
+        let body = "Reconciliation alert: eng-1-3 is claimed on task #683 but the worktree is on \
+                    'eng-main/eng-1-3' instead of 'eng-1-2/683'. Batty will refuse new \
+                    assignment until the branch is corrected manually.";
+        let root = inbox::inboxes_root(&repo);
+        inbox::deliver_to_inbox(
+            &root,
+            &inbox::InboxMessage::new_send("architect", "manager", body),
+        )
+        .unwrap();
+
+        daemon.deliver_inbox_messages().unwrap();
+
+        assert!(
+            receiver.recv::<crate::shim::protocol::Command>().is_err(),
+            "done-task reconciliation alerts using instead-of wording should be suppressed"
+        );
+        assert!(
+            inbox::pending_messages(&root, "manager")
+                .unwrap()
+                .is_empty()
+        );
+        let events =
+            std::fs::read_to_string(repo.join(".batty").join("team_config").join("events.jsonl"))
+                .unwrap();
+        assert!(events.contains("stale_done_notice_suppressed"));
+    }
+
+    #[test]
+    fn deliver_message_uses_configured_trunk_for_done_task_proof() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "routing-stale-done-mainline");
+        git_ok(&repo, &["checkout", "-b", "mainline"]);
+        std::fs::write(repo.join("src").join("mainline.rs"), "pub fn trunk() {}\n").unwrap();
+        git_ok(&repo, &["add", "."]);
+        git_ok(&repo, &["commit", "-m", "mainline trunk proof"]);
+        git_ok(&repo, &["branch", "eng-1-2/685"]);
+        git_ok(&repo, &["checkout", "main"]);
+        write_board_task_file(&repo, 685, "merged-mainline-task", "done", None, &[], None);
+
+        let mut daemon = TestDaemonBuilder::new(&repo)
+            .members(vec![
+                architect_member("architect"),
+                manager_member("manager", Some("architect")),
+            ])
+            .pane_map(HashMap::from([(
+                "manager".to_string(),
+                "%manager".to_string(),
+            )]))
+            .build();
+        daemon.config.team_config.workflow_mode = WorkflowMode::Hybrid;
+        daemon.config.team_config.trunk_branch = "mainline".to_string();
+        let mut receiver = install_idle_test_shim(&mut daemon, &tmp, "manager");
+        receiver
+            .set_read_timeout(Some(Duration::from_millis(50)))
+            .unwrap();
+
+        let body = "Review urgency: task #685 has been in review for 7200s.\n\
+                    Expected branch: 'eng-1-2/685'.\n\
+                    Next step: merge it, request rework, or escalate immediately.";
+        let result = daemon
+            .deliver_message("architect", "manager", body)
+            .unwrap();
+
+        assert_eq!(result, MessageDelivery::OrchestratorLogged);
+        assert!(
+            receiver.recv::<crate::shim::protocol::Command>().is_err(),
+            "configured-trunk done-task notices should stay out of manager context"
+        );
+
+        let events =
+            std::fs::read_to_string(repo.join(".batty").join("team_config").join("events.jsonl"))
+                .unwrap();
+        assert!(events.contains("stale_done_notice_suppressed"));
+    }
+
+    #[test]
+    fn deliver_message_suppresses_reconciliation_should_be_on_done_task() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "routing-stale-reconciliation");
+        git_ok(&repo, &["branch", "eng-1-2/683"]);
+        write_board_task_file(&repo, 683, "merged-task", "done", None, &[], None);
+
+        let mut daemon = TestDaemonBuilder::new(&repo)
+            .members(vec![
+                architect_member("architect"),
+                manager_member("manager", Some("architect")),
+            ])
+            .pane_map(HashMap::from([(
+                "architect".to_string(),
+                "%architect".to_string(),
+            )]))
+            .build();
+        daemon.config.team_config.workflow_mode = WorkflowMode::Hybrid;
+        let mut receiver = install_idle_test_shim(&mut daemon, &tmp, "architect");
+        receiver
+            .set_read_timeout(Some(Duration::from_millis(50)))
+            .unwrap();
+
+        let body = "Reconciliation alert: eng-1-3 is claimed on task #683 but should be on \
+                    eng-1-2/683. Batty will refuse new assignment until corrected.";
+        let result = daemon
+            .deliver_message("manager", "architect", body)
+            .unwrap();
+
+        assert_eq!(result, MessageDelivery::OrchestratorLogged);
+        assert!(
+            receiver.recv::<crate::shim::protocol::Command>().is_err(),
+            "stale reconciliation alerts should stay out of architect context"
+        );
+
+        let events =
+            std::fs::read_to_string(repo.join(".batty").join("team_config").join("events.jsonl"))
+                .unwrap();
+        assert!(events.contains("stale_done_notice_suppressed"));
+
+        let log = std::fs::read_to_string(crate::team::orchestrator_log_path(&repo)).unwrap();
+        assert!(log.contains("stale done notice suppressed"));
+        assert!(log.contains("eng-1-2/683"));
+    }
+
+    #[test]
+    fn deliver_message_keeps_unmerged_done_task_notice_visible() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "routing-unmerged-done");
+        git_ok(&repo, &["checkout", "-b", "eng-1-2/684"]);
+        std::fs::write(
+            repo.join("src").join("unmerged.rs"),
+            "pub fn unmerged() {}\n",
+        )
+        .unwrap();
+        git_ok(&repo, &["add", "."]);
+        git_ok(&repo, &["commit", "-m", "unmerged task work"]);
+        git_ok(&repo, &["checkout", "main"]);
+        write_board_task_file(&repo, 684, "unmerged-task", "done", None, &[], None);
+
+        let mut daemon = TestDaemonBuilder::new(&repo)
+            .members(vec![
+                architect_member("architect"),
+                manager_member("manager", Some("architect")),
+            ])
+            .pane_map(HashMap::from([(
+                "manager".to_string(),
+                "%manager".to_string(),
+            )]))
+            .build();
+        daemon.config.team_config.workflow_mode = WorkflowMode::Hybrid;
+        let mut receiver = install_idle_test_shim(&mut daemon, &tmp, "manager");
+        receiver
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+
+        let body = "Branch/task mismatch detected for task #684. Current branch: \
+                    'eng-main/eng-1-3'. Expected branch: 'eng-1-2/684'. \
+                    Automatic recovery is paused.";
+        let result = daemon
+            .deliver_message("architect", "manager", body)
+            .unwrap();
+
+        assert_eq!(result, MessageDelivery::LivePane);
+        let cmd = receiver
+            .recv::<crate::shim::protocol::Command>()
+            .unwrap()
+            .unwrap();
+        match cmd {
+            crate::shim::protocol::Command::SendMessage {
+                body: delivered, ..
+            } => assert!(delivered.contains("Branch/task mismatch detected for task #684")),
             other => panic!("expected SendMessage, got {other:?}"),
         }
     }
