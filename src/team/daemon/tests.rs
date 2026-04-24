@@ -464,7 +464,7 @@ fn restore_runtime_state_preserves_recently_rescued_tasks_across_restart() {
     assert_eq!(restored_record.count, 4);
     let restored_elapsed = restored_record.last_rescued_at.elapsed().as_secs();
     assert!(
-        restored_elapsed >= 175 && restored_elapsed <= 195,
+        (175..=195).contains(&restored_elapsed),
         "expected restored last_rescued elapsed to be ~180s, got {restored_elapsed}s",
     );
 }
@@ -502,7 +502,7 @@ fn restore_runtime_state_preserves_recently_released_by_across_restart() {
     assert_eq!(restored_record.count, 3);
     let restored_elapsed = restored_record.last_released_at.elapsed().as_secs();
     assert!(
-        restored_elapsed >= 295 && restored_elapsed <= 315,
+        (295..=315).contains(&restored_elapsed),
         "expected restored release-exclusion elapsed ~300s, got {restored_elapsed}s",
     );
 }
