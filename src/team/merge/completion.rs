@@ -1950,6 +1950,48 @@ mod tests {
         (tmp, repo, worktree_dir)
     }
 
+    fn setup_auto_merge_repo_without_work(
+        engineer: &str,
+        task_title: &str,
+    ) -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "batty-auto-merge-test");
+        write_task_file(&repo, 42, task_title);
+
+        let team_config_dir = repo.join(".batty").join("team_config");
+        let worktree_dir = repo.join(".batty").join("worktrees").join(engineer);
+        setup_engineer_worktree(&repo, &worktree_dir, engineer, &team_config_dir).unwrap();
+
+        (tmp, repo, worktree_dir)
+    }
+
+    fn commit_all(worktree_dir: &Path, message: &str) {
+        git_ok(worktree_dir, &["add", "."]);
+        git_ok(worktree_dir, &["commit", "-m", message]);
+    }
+
+    fn assert_auto_merge_decision(
+        repo: &Path,
+        expected_action: &str,
+        expected_reason_fragment: &str,
+    ) {
+        let events_path = repo.join(".batty").join("team_config").join("events.jsonl");
+        let events = read_events(&events_path).unwrap();
+        let decision_event = events
+            .iter()
+            .find(|event| event.event == "auto_merge_decision_recorded")
+            .expect("should record auto-merge decision");
+        assert_eq!(decision_event.action_type.as_deref(), Some(expected_action));
+        assert!(
+            decision_event
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains(expected_reason_fragment)),
+            "decision reason should contain `{expected_reason_fragment}`: {:?}",
+            decision_event.reason
+        );
+    }
+
     fn setup_failing_test_repo(engineer: &str) -> (tempfile::TempDir, PathBuf, PathBuf) {
         let tmp = tempfile::tempdir().unwrap();
         let repo = init_git_repo(&tmp, "batty-failing-test");
@@ -3285,6 +3327,174 @@ mod tests {
             .expect("should record post-merge verification result");
         assert_eq!(post_verify_event.success, Some(true));
         assert_eq!(post_verify_event.reason.as_deref(), Some("passed"));
+    }
+
+    #[test]
+    fn completion_auto_merges_rust_source_plus_docs_diff() {
+        let (_tmp, repo, worktree_dir) =
+            setup_auto_merge_repo_without_work("eng-1", "rust-docs-task");
+        std::fs::create_dir_all(worktree_dir.join("docs")).unwrap();
+        std::fs::write(
+            worktree_dir.join("src").join("feature.rs"),
+            "pub fn feature_flag() -> &'static str { \"ready\" }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            worktree_dir.join("docs").join("feature.md"),
+            "Feature notes.\n",
+        )
+        .unwrap();
+        commit_all(&worktree_dir, "rust source plus docs");
+
+        let policy = AutoMergePolicy {
+            enabled: true,
+            ..AutoMergePolicy::default()
+        };
+        let mut daemon = auto_merge_daemon(&repo, policy);
+
+        handle_engineer_completion(&mut daemon, "eng-1").unwrap();
+
+        assert_eq!(daemon.queued_merge_count_for_test(), 1);
+        assert_eq!(daemon.active_task_id("eng-1"), Some(42));
+        assert_auto_merge_decision(&repo, "accepted", "accepted for auto-merge");
+    }
+
+    #[test]
+    fn completion_auto_merges_config_plus_board_metadata_diff() {
+        let (_tmp, repo, worktree_dir) =
+            setup_auto_merge_repo_without_work("eng-1", "config-board-task");
+        std::fs::create_dir_all(worktree_dir.join("config")).unwrap();
+        std::fs::create_dir_all(
+            worktree_dir
+                .join(".batty")
+                .join("team_config")
+                .join("board")
+                .join("metadata"),
+        )
+        .unwrap();
+        std::fs::write(
+            worktree_dir.join("config").join("agent.yml"),
+            "mode: automatic\n",
+        )
+        .unwrap();
+        std::fs::write(
+            worktree_dir
+                .join(".batty")
+                .join("team_config")
+                .join("board")
+                .join("metadata")
+                .join("release-lanes.md"),
+            "release lane metadata\n",
+        )
+        .unwrap();
+        commit_all(&worktree_dir, "config plus board metadata");
+
+        let policy = AutoMergePolicy {
+            enabled: true,
+            ..AutoMergePolicy::default()
+        };
+        let mut daemon = auto_merge_daemon(&repo, policy);
+
+        handle_engineer_completion(&mut daemon, "eng-1").unwrap();
+
+        assert_eq!(daemon.queued_merge_count_for_test(), 1);
+        assert_eq!(daemon.active_task_id("eng-1"), Some(42));
+        assert_auto_merge_decision(&repo, "accepted", "accepted for auto-merge");
+    }
+
+    #[test]
+    fn completion_auto_merges_deleted_file_plus_modified_source_diff() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "batty-auto-merge-test");
+        write_task_file(&repo, 42, "delete-modify-task");
+        std::fs::create_dir_all(repo.join("docs")).unwrap();
+        std::fs::write(repo.join("docs").join("obsolete.md"), "old notes\n").unwrap();
+        std::fs::write(
+            repo.join("src").join("cleanup.rs"),
+            "pub fn cleaned_docs() -> bool { false }\n",
+        )
+        .unwrap();
+        git_ok(&repo, &["add", "docs/obsolete.md", "src/cleanup.rs"]);
+        git_ok(
+            &repo,
+            &["commit", "-m", "add obsolete docs and cleanup helper"],
+        );
+
+        let team_config_dir = repo.join(".batty").join("team_config");
+        let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
+        setup_engineer_worktree(&repo, &worktree_dir, "eng-1", &team_config_dir).unwrap();
+
+        std::fs::remove_file(worktree_dir.join("docs").join("obsolete.md")).unwrap();
+        std::fs::write(
+            worktree_dir.join("src").join("cleanup.rs"),
+            "pub fn cleaned_docs() -> bool { true }\n",
+        )
+        .unwrap();
+        git_ok(&worktree_dir, &["add", "-A"]);
+        git_ok(
+            &worktree_dir,
+            &["commit", "-m", "delete obsolete docs and update source"],
+        );
+
+        let policy = AutoMergePolicy {
+            enabled: true,
+            ..AutoMergePolicy::default()
+        };
+        let mut daemon = auto_merge_daemon(&repo, policy);
+
+        handle_engineer_completion(&mut daemon, "eng-1").unwrap();
+
+        assert_eq!(daemon.queued_merge_count_for_test(), 1);
+        assert_eq!(daemon.active_task_id("eng-1"), Some(42));
+        assert_auto_merge_decision(&repo, "accepted", "accepted for auto-merge");
+    }
+
+    #[test]
+    fn completion_routes_generated_report_artifacts_to_review() {
+        let (_tmp, repo, worktree_dir) =
+            setup_auto_merge_repo_without_work("eng-1", "report-artifact-task");
+        std::fs::write(
+            worktree_dir.join("src").join("report.rs"),
+            "pub fn report_ready() -> bool { true }\n",
+        )
+        .unwrap();
+        let report_dir = worktree_dir.join(".batty").join("reports").join("release");
+        std::fs::create_dir_all(&report_dir).unwrap();
+        std::fs::write(report_dir.join("readiness.json"), "{\"generated\":true}\n").unwrap();
+        commit_all(&worktree_dir, "source plus generated report artifact");
+
+        let policy = AutoMergePolicy {
+            enabled: true,
+            ..AutoMergePolicy::default()
+        };
+        let mut daemon = auto_merge_daemon(&repo, policy);
+
+        complete_task_and_process_queue(&mut daemon, "eng-1");
+
+        assert_eq!(daemon.queued_merge_count_for_test(), 0);
+        assert!(!repo.join(".batty").join("reports").join("release").exists());
+        let task = crate::task::Task::from_file(
+            &repo
+                .join(".batty")
+                .join("team_config")
+                .join("board")
+                .join("tasks")
+                .join("042-report-artifact-task.md"),
+        )
+        .unwrap();
+        assert_eq!(task.status, "review");
+        assert_eq!(task.review_owner.as_deref(), Some("manager"));
+        assert_auto_merge_decision(&repo, "manual_review", "generated/report artifacts");
+
+        let manager_messages =
+            inbox::pending_messages(&inbox::inboxes_root(&repo), "manager").unwrap();
+        assert!(
+            manager_messages
+                .iter()
+                .any(|message| message.body.contains("generated/report artifacts")),
+            "manager should receive generated/report artifact reason: {:?}",
+            manager_messages
+        );
     }
 
     #[test]

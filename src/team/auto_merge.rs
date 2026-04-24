@@ -47,6 +47,8 @@ pub struct DiffSummary {
     pub generated_lines_removed: usize,
     pub modules_touched: HashSet<String>,
     pub sensitive_files: Vec<String>,
+    /// Generated runtime/report artifacts that should not be merged unattended.
+    pub generated_report_artifacts: Vec<String>,
     pub has_unsafe: bool,
     pub has_conflicts: bool,
     /// Number of renamed files (pure renames are lower risk).
@@ -164,6 +166,7 @@ pub fn analyze_diff(repo: &Path, base: &str, branch: &str) -> Result<DiffSummary
     let mut generated_lines_removed = 0usize;
     let mut modules_touched = HashSet::new();
     let mut changed_paths = Vec::new();
+    let mut generated_report_artifacts = Vec::new();
 
     for line in stat_str.lines() {
         let parts: Vec<&str> = line.split('\t').collect();
@@ -188,6 +191,9 @@ pub fn analyze_diff(repo: &Path, base: &str, branch: &str) -> Result<DiffSummary
             if let Some(removed) = removed {
                 generated_lines_removed += removed;
             }
+        }
+        if is_generated_report_artifact(path) {
+            generated_report_artifacts.push(path.to_string());
         }
 
         // Extract top-level module (first component under src/)
@@ -241,6 +247,7 @@ pub fn analyze_diff(repo: &Path, base: &str, branch: &str) -> Result<DiffSummary
         generated_lines_removed,
         modules_touched,
         sensitive_files: changed_paths, // filtered by caller via policy
+        generated_report_artifacts,
         has_unsafe,
         has_conflicts,
         rename_count,
@@ -291,6 +298,16 @@ fn is_generated_data_file(path: &str) -> bool {
         && !lower.starts_with("src/")
 }
 
+fn is_generated_report_artifact(path: &str) -> bool {
+    let lower = path.to_lowercase();
+    lower.starts_with(".batty/reports/")
+        || lower.starts_with(".batty/releases/")
+        || lower.starts_with(".batty/retrospectives/")
+        || lower.starts_with("reports/")
+        || lower.starts_with("coverage/")
+        || lower.starts_with("target/")
+}
+
 /// Returns true if the path looks like a config file (not source code).
 ///
 /// Generated data files (under `generated/`, `reference/`, test fixtures,
@@ -336,6 +353,10 @@ pub fn compute_merge_confidence(summary: &DiffSummary, policy: &AutoMergePolicy)
         .iter()
         .any(|f| policy.sensitive_paths.iter().any(|s| f.contains(s)));
     if touches_sensitive {
+        confidence -= 0.3;
+    }
+
+    if !summary.generated_report_artifacts.is_empty() {
         confidence -= 0.3;
     }
 
@@ -443,6 +464,27 @@ pub fn evaluate_auto_merge_candidate(
         .any(|f| policy.sensitive_paths.iter().any(|s| f.contains(s)));
     if touches_sensitive {
         reasons.push("touches sensitive paths".to_string());
+    }
+
+    if !summary.generated_report_artifacts.is_empty() {
+        let paths = summary
+            .generated_report_artifacts
+            .iter()
+            .take(3)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ");
+        let suffix = if summary.generated_report_artifacts.len() > 3 {
+            format!(
+                ", and {} more",
+                summary.generated_report_artifacts.len() - 3
+            )
+        } else {
+            String::new()
+        };
+        reasons.push(format!(
+            "contains generated/report artifacts: {paths}{suffix}"
+        ));
     }
 
     if summary.has_unsafe {
@@ -591,6 +633,7 @@ mod tests {
             generated_lines_removed: 0,
             modules_touched: modules.into_iter().map(String::from).collect(),
             sensitive_files: sensitive.into_iter().map(String::from).collect(),
+            generated_report_artifacts: Vec::new(),
             has_unsafe,
             has_conflicts: false,
             rename_count: 0,
@@ -936,6 +979,37 @@ mod tests {
             AutoMergeDecision::AutoMerge { .. } => {}
             other => panic!(
                 "generated data extraction should auto-merge, got {:?}",
+                other
+            ),
+        }
+    }
+
+    #[test]
+    fn generated_report_artifacts_route_to_review() {
+        let mut summary = make_summary(
+            2,
+            20,
+            0,
+            vec!["team"],
+            vec!["src/team/merge/completion.rs"],
+            false,
+        );
+        summary.generated_report_artifacts =
+            vec![".batty/reports/verification/completion/task-042.json".to_string()];
+        let policy = enabled_policy();
+        let decision = should_auto_merge(&summary, &policy, true);
+        match decision {
+            AutoMergeDecision::ManualReview { reasons, .. } => {
+                assert!(
+                    reasons
+                        .iter()
+                        .any(|reason| reason.contains("generated/report artifacts")),
+                    "should mention generated/report artifacts: {:?}",
+                    reasons
+                );
+            }
+            other => panic!(
+                "generated/report artifacts should route to manual review, got {:?}",
                 other
             ),
         }
