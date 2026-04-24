@@ -696,6 +696,35 @@ mod tests {
     }
 
     #[test]
+    fn root_dirty_state_separates_mixed_source_and_runtime_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "root-dirty-mixed");
+        std::fs::write(repo.join("src").join("lib.rs"), "pub fn changed() {}\n").unwrap();
+        git_ok(&repo, &["add", "src/lib.rs"]);
+        std::fs::create_dir_all(repo.join("docs")).unwrap();
+        std::fs::write(repo.join("docs").join("recovery.md"), "manual recovery\n").unwrap();
+        let runtime_dir = repo.join(".batty").join("team_config").join("board");
+        std::fs::create_dir_all(&runtime_dir).unwrap();
+        std::fs::write(runtime_dir.join("activity.jsonl"), "{\"event\":\"tick\"}\n").unwrap();
+
+        let state = inspect_root_dirty_state(&repo).unwrap();
+
+        assert_eq!(state.staged_paths, vec!["src/lib.rs"]);
+        assert_eq!(
+            state.unstaged_paths,
+            vec![
+                ".batty/team_config/board/activity.jsonl",
+                "docs/recovery.md"
+            ]
+        );
+        assert_eq!(state.source_paths, vec!["docs/recovery.md", "src/lib.rs"]);
+        assert_eq!(
+            state.runtime_paths,
+            vec![".batty/team_config/board/activity.jsonl"]
+        );
+    }
+
+    #[test]
     fn root_dirty_state_allows_runtime_only_noise() {
         let tmp = tempfile::tempdir().unwrap();
         let repo = init_git_repo(&tmp, "root-dirty-runtime");
