@@ -36,7 +36,7 @@ exhaustive clap-generated output, see [reference/cli.md](reference/cli.md).
 | `batty review <id> <disposition>`              | Record approve/request-changes/reject decisions                                      |
 | `batty task schedule <id> --at ... --cron ...` | Delay or recur a task                                                                |
 | `batty merge <engineer>`                       | Merge an engineer branch manually                                                    |
-| `batty release [--tag ...]`                    | Verify clean green `main`, write release notes, and create the tagged release record |
+| `batty release [--tag ...]`                    | Verify clean green `main`, write release notes, create the tag, and write a guarded publish handoff |
 
 ## Observability
 

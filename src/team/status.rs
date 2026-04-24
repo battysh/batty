@@ -284,6 +284,8 @@ pub(crate) struct TeamStatusJsonReport {
     pub(crate) watchdog: WatchdogStatus,
     pub(crate) health: TeamStatusHealth,
     pub(crate) workflow_metrics: Option<WorkflowMetrics>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) publish_handoff: Option<crate::release::ReleasePublishHandoff>,
     pub(crate) active_tasks: Vec<StatusTaskEntry>,
     pub(crate) review_queue: Vec<StatusTaskEntry>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1977,6 +1979,7 @@ pub(crate) struct TeamStatusJsonReportInput {
     pub(crate) main_smoke: Option<MainSmokeState>,
     pub(crate) watchdog: WatchdogStatus,
     pub(crate) workflow_metrics: Option<WorkflowMetrics>,
+    pub(crate) publish_handoff: Option<crate::release::ReleasePublishHandoff>,
     pub(crate) active_tasks: Vec<StatusTaskEntry>,
     pub(crate) review_queue: Vec<StatusTaskEntry>,
     pub(crate) optional_subsystems: Option<Vec<OptionalSubsystemStatus>>,
@@ -2012,6 +2015,17 @@ pub(crate) fn format_main_smoke_summary(main_smoke: &MainSmokeState) -> String {
     }
 }
 
+pub(crate) fn format_publish_handoff_summary(
+    handoff: &crate::release::ReleasePublishHandoff,
+) -> String {
+    let mut summary = format!("{} ({})", handoff.path, handoff.status);
+    if !handoff.blocked_reasons.is_empty() {
+        summary.push_str(": ");
+        summary.push_str(&handoff.blocked_reasons.join("; "));
+    }
+    summary
+}
+
 pub(crate) fn build_team_status_json_report(
     input: TeamStatusJsonReportInput,
 ) -> TeamStatusJsonReport {
@@ -2023,6 +2037,7 @@ pub(crate) fn build_team_status_json_report(
         main_smoke,
         watchdog,
         workflow_metrics,
+        publish_handoff,
         active_tasks,
         review_queue,
         optional_subsystems,
@@ -2039,6 +2054,7 @@ pub(crate) fn build_team_status_json_report(
         watchdog,
         health,
         workflow_metrics,
+        publish_handoff,
         active_tasks,
         review_queue,
         optional_subsystems,
@@ -4346,6 +4362,32 @@ mod tests {
                 runnable_count: 1,
                 ..WorkflowMetrics::default()
             }),
+            publish_handoff: Some(crate::release::ReleasePublishHandoff {
+                generated_at: "2026-04-24T00:00:00Z".to_string(),
+                path: ".batty/reports/release/publish-handoff.json".to_string(),
+                markdown_path: ".batty/releases/publish-handoff.md".to_string(),
+                status: "blocked".to_string(),
+                package_name: Some("batty".to_string()),
+                version: Some("0.10.0".to_string()),
+                tag: Some("v0.10.0".to_string()),
+                git_ref: Some("abc123".to_string()),
+                branch: Some("main".to_string()),
+                release_notes_path: Some(".batty/releases/v0.10.0.md".to_string()),
+                changelog_path: "CHANGELOG.md".to_string(),
+                release_record_success: true,
+                release_record_reason: "created annotated tag".to_string(),
+                verification: crate::release::ReleasePublishVerificationEvidence {
+                    command: Some("cargo test".to_string()),
+                    summary: Some("cargo test passed".to_string()),
+                    passed: true,
+                },
+                manual_publish_commands: vec![
+                    "git push origin main".to_string(),
+                    "git push origin v0.10.0".to_string(),
+                    "cargo publish --package batty".to_string(),
+                ],
+                blocked_reasons: vec!["missing_publish_credentials: token missing".to_string()],
+            }),
             active_tasks: Vec::new(),
             review_queue: Vec::new(),
             optional_subsystems: None,
@@ -4385,8 +4427,45 @@ mod tests {
         assert_eq!(json["watchdog"]["restart_count"], 2);
         assert_eq!(json["health"]["member_count"], 1);
         assert_eq!(json["workflow_metrics"]["runnable_count"], 1);
+        assert_eq!(
+            json["publish_handoff"]["path"],
+            ".batty/reports/release/publish-handoff.json"
+        );
+        assert_eq!(json["publish_handoff"]["status"], "blocked");
         assert!(json["members"].is_array());
         assert_eq!(json["engineer_profiles"][0]["role"], "eng-1");
+    }
+
+    #[test]
+    fn format_publish_handoff_summary_reports_path_and_blocked_state() {
+        let handoff = crate::release::ReleasePublishHandoff {
+            generated_at: "2026-04-24T00:00:00Z".to_string(),
+            path: ".batty/reports/release/publish-handoff.json".to_string(),
+            markdown_path: ".batty/releases/publish-handoff.md".to_string(),
+            status: "blocked".to_string(),
+            package_name: Some("batty".to_string()),
+            version: Some("0.10.0".to_string()),
+            tag: Some("v0.10.0".to_string()),
+            git_ref: Some("abc123".to_string()),
+            branch: Some("main".to_string()),
+            release_notes_path: Some(".batty/releases/v0.10.0.md".to_string()),
+            changelog_path: "CHANGELOG.md".to_string(),
+            release_record_success: false,
+            release_record_reason: "dirty_main".to_string(),
+            verification: crate::release::ReleasePublishVerificationEvidence {
+                command: Some("cargo test".to_string()),
+                summary: Some("cargo test passed".to_string()),
+                passed: false,
+            },
+            manual_publish_commands: vec!["git push origin main".to_string()],
+            blocked_reasons: vec!["dirty_main: main worktree has uncommitted changes".to_string()],
+        };
+
+        let rendered = format_publish_handoff_summary(&handoff);
+
+        assert!(rendered.contains(".batty/reports/release/publish-handoff.json"));
+        assert!(rendered.contains("(blocked)"));
+        assert!(rendered.contains("dirty_main"));
     }
 
     #[test]
@@ -4953,6 +5032,7 @@ mod tests {
                 oldest_assignment_age_secs: Some(120),
                 ..Default::default()
             }),
+            publish_handoff: None,
             active_tasks: vec![StatusTaskEntry {
                 id: 41,
                 title: "Active task".to_string(),
@@ -5309,6 +5389,7 @@ mod tests {
                 ..WatchdogStatus::default()
             },
             workflow_metrics: None,
+            publish_handoff: None,
             active_tasks: Vec::new(),
             review_queue: Vec::new(),
             optional_subsystems: None,

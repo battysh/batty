@@ -1515,10 +1515,10 @@ Options:
 
 ## `batty release`
 
-Validate clean main, assemble release notes, and create a release tag
+Validate clean main, assemble release notes, create a release tag, and write a guarded publish handoff
 
 ```text
-Validate clean main, assemble release notes, and create a release tag
+Validate clean main, assemble release notes, create a release tag, and write a guarded publish handoff
 
 Usage: batty release [OPTIONS]
 
@@ -1534,6 +1534,16 @@ Options:
 
   -h, --help
           Print help
+```
+
+`batty release` never pushes branches, pushes tags, or publishes packages.
+Every attempt writes `.batty/reports/release/publish-handoff.json`; blocked
+attempts include explicit `blocked_reasons`. After inspection, publish manually:
+
+```sh
+git push origin main
+git push origin v<version>
+cargo publish --package batty-cli
 ```
 
 ## `batty reload`

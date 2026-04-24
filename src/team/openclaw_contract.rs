@@ -1178,6 +1178,7 @@ mod tests {
                 review_escalation_count: 1,
                 avg_review_latency_secs: Some(42.0),
             }),
+            publish_handoff: None,
             active_tasks: vec![status::StatusTaskEntry {
                 id: 42,
                 title: "Fix contract".to_string(),

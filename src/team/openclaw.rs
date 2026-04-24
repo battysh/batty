@@ -943,6 +943,7 @@ fn load_status_report(project_root: &Path) -> Result<status::TeamStatusJsonRepor
             main_smoke: status::load_main_smoke_state(project_root),
             watchdog,
             workflow_metrics,
+            publish_handoff: None,
             active_tasks,
             review_queue,
             optional_subsystems: None,
@@ -1030,6 +1031,7 @@ mod tests {
                 unhealthy_members: vec!["eng-1-2".to_string()],
             },
             workflow_metrics: None,
+            publish_handoff: None,
             active_tasks: vec![status::StatusTaskEntry {
                 id: 12,
                 title: "Active".to_string(),

@@ -404,6 +404,13 @@ pub fn team_status(project_root: &Path, json: bool, detail: bool, health: bool) 
     }
 
     let workflow_metrics = status::workflow_metrics_section(project_root, &members);
+    let publish_handoff = match crate::release::latest_publish_handoff(project_root) {
+        Ok(handoff) => handoff,
+        Err(error) => {
+            warn!(error = %error, "failed to load latest publish handoff for status");
+            None
+        }
+    };
     let watchdog = status::load_watchdog_status(project_root, session_running);
     let main_smoke = status::load_main_smoke_state(project_root);
     let bench_state = match crate::team::bench::load_bench_state(project_root) {
@@ -446,6 +453,7 @@ pub fn team_status(project_root: &Path, json: bool, detail: bool, health: bool) 
             workflow_metrics: workflow_metrics
                 .as_ref()
                 .map(|(_, metrics)| metrics.clone()),
+            publish_handoff: publish_handoff.clone(),
             active_tasks,
             review_queue,
             optional_subsystems,
@@ -469,6 +477,12 @@ pub fn team_status(project_root: &Path, json: bool, detail: bool, health: bool) 
             println!(
                 "Main smoke: {}",
                 status::format_main_smoke_summary(main_smoke)
+            );
+        }
+        if let Some(handoff) = publish_handoff.as_ref() {
+            println!(
+                "Publish handoff: {}",
+                status::format_publish_handoff_summary(handoff)
             );
         }
         println!();

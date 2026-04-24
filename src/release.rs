@@ -12,12 +12,15 @@ use crate::team::events::{EventSink, TeamEvent};
 use crate::team::github_feedback::{GithubReleaseFeedbackItem, GithubReleaseFeedbackSummary};
 
 const RELEASES_DIR: &str = ".batty/releases";
+const RELEASE_REPORTS_DIR: &str = ".batty/reports/release";
 const RELEASE_HISTORY_FILE: &str = "history.jsonl";
 const RELEASE_LATEST_JSON: &str = "latest.json";
 const RELEASE_LATEST_MARKDOWN: &str = "latest.md";
 const RELEASE_PUBLISH_HANDOFF_MARKDOWN: &str = "publish-handoff.md";
+const RELEASE_PUBLISH_HANDOFF_JSON: &str = "publish-handoff.json";
 const RELEASE_READINESS_JSON: &str = "readiness.json";
 const RELEASE_READINESS_MARKDOWN: &str = "readiness.md";
+const CHANGELOG_PATH: &str = "CHANGELOG.md";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ReleaseMetadata {
@@ -78,6 +81,39 @@ pub struct ReleaseReadinessReport {
     pub verification_summary: Option<String>,
     pub github_feedback: GithubReleaseFeedbackSummary,
     pub blockers: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReleasePublishVerificationEvidence {
+    pub command: Option<String>,
+    pub summary: Option<String>,
+    pub passed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReleasePublishHandoff {
+    pub generated_at: String,
+    pub path: String,
+    pub markdown_path: String,
+    pub status: String,
+    pub package_name: Option<String>,
+    pub version: Option<String>,
+    pub tag: Option<String>,
+    pub git_ref: Option<String>,
+    pub branch: Option<String>,
+    pub release_notes_path: Option<String>,
+    pub changelog_path: String,
+    pub release_record_success: bool,
+    pub release_record_reason: String,
+    pub verification: ReleasePublishVerificationEvidence,
+    pub manual_publish_commands: Vec<String>,
+    pub blocked_reasons: Vec<String>,
+}
+
+impl ReleasePublishHandoff {
+    pub fn ready(&self) -> bool {
+        self.blocked_reasons.is_empty()
+    }
 }
 
 impl ReleaseReadinessReport {
@@ -162,6 +198,12 @@ pub fn cmd_release(project_root: &Path, requested_tag: Option<&str>) -> Result<(
                 println!("Release notes: {path}");
             }
             println!("Publish handoff: {}", publish_handoff_path.display());
+            if let Ok(Some(handoff)) = latest_publish_handoff(project_root) {
+                println!(
+                    "Publish state: {}",
+                    if handoff.ready() { "ready" } else { "blocked" }
+                );
+            }
             println!(
                 "Verification: {}",
                 record
@@ -174,8 +216,13 @@ pub fn cmd_release(project_root: &Path, requested_tag: Option<&str>) -> Result<(
         Err(failure) => {
             persist_release_record(project_root, &failure.record)?;
             write_latest_report(project_root, &failure.report_markdown)?;
+            let publish_handoff_path = write_publish_handoff(project_root, &failure.record)?;
             emit_release_record(project_root, &failure.record)?;
-            bail!("{}", failure.message);
+            bail!(
+                "{}\nPublish handoff: {}",
+                failure.message,
+                publish_handoff_path.display()
+            );
         }
     }
 }
@@ -211,6 +258,18 @@ pub fn latest_record(project_root: &Path) -> Result<Option<ReleaseRecord>> {
     let record = serde_json::from_str(&content)
         .with_context(|| format!("failed to parse {}", path.display()))?;
     Ok(Some(record))
+}
+
+pub fn latest_publish_handoff(project_root: &Path) -> Result<Option<ReleasePublishHandoff>> {
+    let path = publish_handoff_json_path(project_root);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let content =
+        fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
+    let handoff = serde_json::from_str(&content)
+        .with_context(|| format!("failed to parse {}", path.display()))?;
+    Ok(Some(handoff))
 }
 
 fn generate_release_readiness_with_verifier(
@@ -549,6 +608,18 @@ fn run_release_with_verifier(
 
 fn releases_dir(project_root: &Path) -> PathBuf {
     project_root.join(RELEASES_DIR)
+}
+
+fn release_reports_dir(project_root: &Path) -> PathBuf {
+    project_root.join(RELEASE_REPORTS_DIR)
+}
+
+fn publish_handoff_json_path(project_root: &Path) -> PathBuf {
+    release_reports_dir(project_root).join(RELEASE_PUBLISH_HANDOFF_JSON)
+}
+
+fn publish_handoff_markdown_path(project_root: &Path) -> PathBuf {
+    releases_dir(project_root).join(RELEASE_PUBLISH_HANDOFF_MARKDOWN)
 }
 
 fn resolve_verification_command(
@@ -1125,18 +1196,49 @@ fn write_latest_report(project_root: &Path, report_markdown: &str) -> Result<()>
 }
 
 fn write_publish_handoff(project_root: &Path, record: &ReleaseRecord) -> Result<PathBuf> {
-    let dir = releases_dir(project_root);
-    fs::create_dir_all(&dir).with_context(|| format!("failed to create {}", dir.display()))?;
-    let path = dir.join(RELEASE_PUBLISH_HANDOFF_MARKDOWN);
-    fs::write(&path, render_publish_handoff(record))
-        .with_context(|| format!("failed to write {}", path.display()))?;
-    Ok(path)
+    let handoff = build_publish_handoff(project_root, record);
+    write_publish_handoff_artifact(project_root, record, &handoff)
 }
 
-fn render_publish_handoff(record: &ReleaseRecord) -> String {
+#[cfg(test)]
+fn write_publish_handoff_with_credentials(
+    project_root: &Path,
+    record: &ReleaseRecord,
+    cargo_credentials_configured: bool,
+) -> Result<PathBuf> {
+    let handoff =
+        build_publish_handoff_with_credentials(project_root, record, cargo_credentials_configured);
+    write_publish_handoff_artifact(project_root, record, &handoff)
+}
+
+fn write_publish_handoff_artifact(
+    project_root: &Path,
+    record: &ReleaseRecord,
+    handoff: &ReleasePublishHandoff,
+) -> Result<PathBuf> {
+    let markdown_path = publish_handoff_markdown_path(project_root);
+    if let Some(parent) = markdown_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    fs::write(&markdown_path, render_publish_handoff(record, handoff))
+        .with_context(|| format!("failed to write {}", markdown_path.display()))?;
+
+    let json_path = publish_handoff_json_path(project_root);
+    if let Some(parent) = json_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    fs::write(&json_path, serde_json::to_vec_pretty(&handoff)?)
+        .with_context(|| format!("failed to write {}", json_path.display()))?;
+    Ok(json_path)
+}
+
+fn render_publish_handoff(record: &ReleaseRecord, handoff: &ReleasePublishHandoff) -> String {
     let tag = record.tag.as_deref().unwrap_or("unknown-tag");
     let git_ref = record.git_ref.as_deref().unwrap_or("unknown-ref");
     let branch = record.branch.as_deref().unwrap_or("unknown-branch");
+    let status = handoff.status.as_str();
     let notes_path = record.notes_path.as_deref().unwrap_or("not recorded");
     let verification_command = record
         .verification_command
@@ -1146,9 +1248,24 @@ fn render_publish_handoff(record: &ReleaseRecord) -> String {
         .verification_summary
         .as_deref()
         .unwrap_or("not recorded");
+    let mut blocked = String::new();
+    if !handoff.blocked_reasons.is_empty() {
+        blocked.push_str("\n## Blocked Reasons\n\n");
+        for reason in &handoff.blocked_reasons {
+            blocked.push_str("- ");
+            blocked.push_str(reason);
+            blocked.push('\n');
+        }
+    }
+    let guardrail = if handoff.ready() {
+        "Batty created only the local release record and annotated tag. It did not push branches, push tags, or publish packages."
+    } else {
+        "Batty did not push branches, push tags, publish packages, or complete the release. Resolve the blocked reasons before running any manual publish command."
+    };
 
     format!(
         "# Release Publish Handoff\n\n\
+- Status: {status}\n\
 - Tag: {tag}\n\
 - Git Ref: {git_ref}\n\
 - Branch: {branch}\n\
@@ -1156,14 +1273,265 @@ fn render_publish_handoff(record: &ReleaseRecord) -> String {
 - Verification Command: {verification_command}\n\
 - Verification Summary: {verification_summary}\n\n\
 ## Guardrail\n\n\
-Batty created only the local release record and annotated tag. It did not push branches, push tags, or publish packages.\n\n\
+{guardrail}\n\
+{blocked}\n\
 ## Manual Publish Commands\n\n\
 ```sh\n\
 git push origin {branch}\n\
 git push origin {tag}\n\
+cargo publish --package {}\n\
 ```\n\n\
-Run these commands only after inspecting the release record, release notes, and the intended remote.\n"
+Run these commands only after inspecting the release record, release notes, and the intended remote.\n",
+        handoff.package_name.as_deref().unwrap_or("unknown-package")
     )
+}
+
+fn build_publish_handoff(project_root: &Path, record: &ReleaseRecord) -> ReleasePublishHandoff {
+    build_publish_handoff_with_credentials(
+        project_root,
+        record,
+        cargo_publish_credentials_configured(),
+    )
+}
+
+fn build_publish_handoff_with_credentials(
+    project_root: &Path,
+    record: &ReleaseRecord,
+    cargo_credentials_configured: bool,
+) -> ReleasePublishHandoff {
+    let mut blocked_reasons =
+        publish_blocked_reasons(project_root, record, cargo_credentials_configured);
+    blocked_reasons.sort();
+    blocked_reasons.dedup();
+    let package_name = record
+        .package_name
+        .as_deref()
+        .unwrap_or("unknown-package")
+        .to_string();
+    let branch = record.branch.as_deref().unwrap_or("main");
+    let tag = record.tag.as_deref().unwrap_or("unknown-tag");
+    ReleasePublishHandoff {
+        generated_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        path: publish_handoff_json_path(project_root)
+            .display()
+            .to_string(),
+        markdown_path: publish_handoff_markdown_path(project_root)
+            .display()
+            .to_string(),
+        status: if blocked_reasons.is_empty() {
+            "ready".to_string()
+        } else {
+            "blocked".to_string()
+        },
+        package_name: record.package_name.clone(),
+        version: record.version.clone(),
+        tag: record.tag.clone(),
+        git_ref: record.git_ref.clone(),
+        branch: record.branch.clone(),
+        release_notes_path: record.notes_path.clone(),
+        changelog_path: project_root.join(CHANGELOG_PATH).display().to_string(),
+        release_record_success: record.success,
+        release_record_reason: record.reason.clone(),
+        verification: ReleasePublishVerificationEvidence {
+            command: record.verification_command.clone(),
+            summary: record.verification_summary.clone(),
+            passed: record.success,
+        },
+        manual_publish_commands: vec![
+            format!("git push origin {branch}"),
+            format!("git push origin {tag}"),
+            format!("cargo publish --package {package_name}"),
+        ],
+        blocked_reasons,
+    }
+}
+
+fn publish_blocked_reasons(
+    project_root: &Path,
+    record: &ReleaseRecord,
+    cargo_credentials_configured: bool,
+) -> Vec<String> {
+    let mut reasons = Vec::new();
+    if !record.success {
+        reasons.push(blocked_reason_for_release_record(record));
+    }
+    if record.version.as_deref().is_none_or(str::is_empty) {
+        reasons.push("missing_version: Cargo.toml package.version is required".to_string());
+    }
+    if record.tag.as_deref().is_none_or(str::is_empty) {
+        reasons.push("missing_tag: release tag is required before publishing".to_string());
+    }
+    if record.git_ref.as_deref().is_none_or(str::is_empty) {
+        reasons.push("missing_git_ref: main git ref is required before publishing".to_string());
+    }
+    if record.notes_path.as_deref().is_none_or(str::is_empty) {
+        reasons.push("missing_release_notes: release notes path is required".to_string());
+    }
+    if record
+        .verification_summary
+        .as_deref()
+        .is_none_or(str::is_empty)
+    {
+        reasons.push("missing_verification_evidence: verification summary is required".to_string());
+    }
+    reasons.extend(publish_configuration_blockers(
+        project_root,
+        cargo_credentials_configured,
+    ));
+    reasons
+}
+
+fn blocked_reason_for_release_record(record: &ReleaseRecord) -> String {
+    match record.reason.as_str() {
+        "dirty_main" => "dirty_main: main worktree has uncommitted changes; commit, stash, or remove them before publishing".to_string(),
+        "verification_failed" => format!(
+            "verification_failed: {}",
+            record
+                .details
+                .as_deref()
+                .or(record.verification_summary.as_deref())
+                .unwrap_or("release verification failed")
+        ),
+        "missing_release_metadata" => format!(
+            "missing_release_metadata: {}",
+            record
+                .details
+                .as_deref()
+                .unwrap_or("Cargo.toml version/tag or CHANGELOG entry is missing")
+        ),
+        reason => format!(
+            "{reason}: {}",
+            record.details.as_deref().unwrap_or("release attempt is blocked")
+        ),
+    }
+}
+
+fn publish_configuration_blockers(
+    project_root: &Path,
+    cargo_credentials_configured: bool,
+) -> Vec<String> {
+    let mut blockers = Vec::new();
+    let cargo_toml_path = project_root.join("Cargo.toml");
+    match load_publish_package_config(&cargo_toml_path) {
+        Ok(config) => {
+            blockers.extend(config.blockers(project_root));
+        }
+        Err(error) => blockers.push(format!("missing_publish_config: {error}")),
+    }
+    if !cargo_credentials_configured {
+        blockers.push(
+            "missing_publish_credentials: set CARGO_REGISTRY_TOKEN or configure cargo credentials before manual cargo publish"
+                .to_string(),
+        );
+    }
+    blockers
+}
+
+#[derive(Debug, Clone, Default)]
+struct PublishPackageConfig {
+    description: Option<String>,
+    license: Option<String>,
+    license_file: Option<String>,
+    readme: Option<String>,
+    publish: Option<toml::Value>,
+}
+
+impl PublishPackageConfig {
+    fn blockers(&self, project_root: &Path) -> Vec<String> {
+        let mut blockers = Vec::new();
+        if self.description.as_deref().is_none_or(str::is_empty) {
+            blockers.push(
+                "missing_publish_config: Cargo.toml package.description is required".to_string(),
+            );
+        }
+        if self.license.as_deref().is_none_or(str::is_empty)
+            && self.license_file.as_deref().is_none_or(str::is_empty)
+        {
+            blockers.push(
+                "missing_publish_config: Cargo.toml package.license or package.license-file is required"
+                    .to_string(),
+            );
+        }
+        if let Some(readme) = self.readme.as_deref().filter(|readme| !readme.is_empty())
+            && !project_root.join(readme).is_file()
+        {
+            blockers.push(format!(
+                "missing_publish_config: Cargo.toml package.readme points to missing file `{readme}`"
+            ));
+        }
+        if self.publish.as_ref().is_some_and(publish_disabled) {
+            blockers.push(
+                "missing_publish_config: Cargo.toml package.publish disables crates.io publishing"
+                    .to_string(),
+            );
+        }
+        blockers
+    }
+}
+
+fn load_publish_package_config(cargo_toml_path: &Path) -> Result<PublishPackageConfig> {
+    #[derive(Deserialize)]
+    struct CargoToml {
+        package: Option<CargoPackage>,
+    }
+
+    #[derive(Deserialize)]
+    struct CargoPackage {
+        description: Option<String>,
+        license: Option<String>,
+        #[serde(rename = "license-file")]
+        license_file: Option<String>,
+        readme: Option<String>,
+        publish: Option<toml::Value>,
+    }
+
+    let content = fs::read_to_string(cargo_toml_path)
+        .with_context(|| format!("failed to read {}", cargo_toml_path.display()))?;
+    let parsed: CargoToml = toml::from_str(&content)
+        .with_context(|| format!("failed to parse {}", cargo_toml_path.display()))?;
+    let package = parsed
+        .package
+        .context("Cargo.toml is missing `[package]` publish metadata")?;
+    Ok(PublishPackageConfig {
+        description: package.description.map(|value| value.trim().to_string()),
+        license: package.license.map(|value| value.trim().to_string()),
+        license_file: package.license_file.map(|value| value.trim().to_string()),
+        readme: package.readme.map(|value| value.trim().to_string()),
+        publish: package.publish,
+    })
+}
+
+fn publish_disabled(value: &toml::Value) -> bool {
+    match value {
+        toml::Value::Boolean(enabled) => !enabled,
+        toml::Value::Array(registries) => registries
+            .iter()
+            .filter_map(toml::Value::as_str)
+            .all(|registry| registry != "crates-io"),
+        _ => false,
+    }
+}
+
+fn cargo_publish_credentials_configured() -> bool {
+    std::env::var_os("CARGO_REGISTRY_TOKEN").is_some()
+        || std::env::var_os("CARGO_REGISTRIES_CRATES_IO_TOKEN").is_some()
+        || cargo_home()
+            .map(|home| {
+                [home.join("credentials.toml"), home.join("credentials")]
+                    .iter()
+                    .any(|path| {
+                        fs::read_to_string(path)
+                            .map(|content| !content.trim().is_empty())
+                            .unwrap_or(false)
+                    })
+            })
+            .unwrap_or(false)
+}
+
+fn cargo_home() -> Option<PathBuf> {
+    std::env::var_os("CARGO_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cargo")))
 }
 
 fn persist_release_record(project_root: &Path, record: &ReleaseRecord) -> Result<()> {
@@ -1326,7 +1694,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         fs::write(
             tmp.path().join("Cargo.toml"),
-            "[package]\nname = \"batty\"\nversion = \"0.10.0\"\nedition = \"2024\"\n",
+            "[package]\nname = \"batty\"\nversion = \"0.10.0\"\nedition = \"2024\"\ndescription = \"Batty test package\"\nlicense = \"MIT\"\nreadme = \"README.md\"\n",
         )
         .unwrap();
         fs::write(
@@ -1760,27 +2128,80 @@ mod tests {
         let verifier = passing_verifier(Arc::new(AtomicUsize::new(0)));
         let (record, _) = run_release_with_verifier(tmp.path(), None, &verifier).unwrap();
 
-        let handoff_path = write_publish_handoff(tmp.path(), &record).unwrap();
-        let handoff = fs::read_to_string(&handoff_path).unwrap();
+        let handoff_path =
+            write_publish_handoff_with_credentials(tmp.path(), &record, true).unwrap();
+        let handoff = latest_publish_handoff(tmp.path()).unwrap().unwrap();
+        let markdown = fs::read_to_string(
+            tmp.path()
+                .join(".batty")
+                .join("releases")
+                .join("publish-handoff.md"),
+        )
+        .unwrap();
 
         assert_eq!(
             handoff_path,
             tmp.path()
                 .join(".batty")
-                .join("releases")
-                .join("publish-handoff.md")
+                .join("reports")
+                .join("release")
+                .join("publish-handoff.json")
         );
-        assert!(handoff.contains("# Release Publish Handoff"));
-        assert!(handoff.contains("- Tag: v0.10.0"));
-        assert!(handoff.contains("- Branch: main"));
-        assert!(handoff.contains("- Verification Summary: cargo test passed"));
-        assert!(handoff.contains("Batty created only the local release record and annotated tag"));
-        assert!(handoff.contains("git push origin main"));
-        assert!(handoff.contains("git push origin v0.10.0"));
+        assert!(handoff.ready());
+        assert_eq!(handoff.status, "ready");
+        assert_eq!(handoff.tag.as_deref(), Some("v0.10.0"));
+        assert_eq!(handoff.version.as_deref(), Some("0.10.0"));
+        assert!(handoff.git_ref.is_some());
+        assert_eq!(handoff.release_notes_path, record.notes_path);
+        assert!(handoff.changelog_path.ends_with("CHANGELOG.md"));
+        assert_eq!(
+            handoff.verification.summary.as_deref(),
+            Some("cargo test passed")
+        );
+        assert!(
+            handoff
+                .manual_publish_commands
+                .contains(&"git push origin main".to_string())
+        );
+        assert!(
+            handoff
+                .manual_publish_commands
+                .contains(&"git push origin v0.10.0".to_string())
+        );
+        assert!(
+            handoff
+                .manual_publish_commands
+                .contains(&"cargo publish --package batty".to_string())
+        );
+        assert!(markdown.contains("# Release Publish Handoff"));
+        assert!(markdown.contains("Batty created only the local release record and annotated tag"));
     }
 
     #[test]
-    fn release_handoff_is_not_created_when_validation_fails() {
+    fn release_handoff_records_dirty_main_blocked_reason() {
+        let tmp = init_repo();
+        fs::write(tmp.path().join("README.md"), "dirty\n").unwrap();
+        let verifier = passing_verifier(Arc::new(AtomicUsize::new(0)));
+
+        let error = run_release_with_verifier(tmp.path(), None, &verifier).unwrap_err();
+        assert_eq!(error.record.reason, "dirty_main");
+
+        let handoff_path =
+            write_publish_handoff_with_credentials(tmp.path(), &error.record, true).unwrap();
+        let handoff: ReleasePublishHandoff =
+            serde_json::from_slice(&fs::read(&handoff_path).unwrap()).unwrap();
+
+        assert_eq!(handoff.status, "blocked");
+        assert!(
+            handoff
+                .blocked_reasons
+                .iter()
+                .any(|reason| reason.starts_with("dirty_main:"))
+        );
+    }
+
+    #[test]
+    fn release_handoff_records_failed_verification_blocked_reason() {
         let tmp = init_repo();
         let verifier = StubVerifier {
             result: ReleaseVerification {
@@ -1794,12 +2215,75 @@ mod tests {
 
         let error = run_release_with_verifier(tmp.path(), None, &verifier).unwrap_err();
         assert_eq!(error.record.reason, "verification_failed");
+        let handoff = build_publish_handoff_with_credentials(tmp.path(), &error.record, true);
+
+        assert_eq!(handoff.status, "blocked");
         assert!(
-            !tmp.path()
-                .join(".batty")
-                .join("releases")
-                .join("publish-handoff.md")
-                .exists()
+            handoff
+                .blocked_reasons
+                .iter()
+                .any(|reason| reason == "verification_failed: suite::fails")
+        );
+    }
+
+    #[test]
+    fn release_handoff_records_missing_publish_credential_and_config_blockers() {
+        let tmp = init_repo();
+        let verifier = passing_verifier(Arc::new(AtomicUsize::new(0)));
+        let (mut record, _) = run_release_with_verifier(tmp.path(), None, &verifier).unwrap();
+        fs::write(
+            tmp.path().join("Cargo.toml"),
+            "[package]\nname = \"batty\"\nversion = \"0.10.0\"\nedition = \"2024\"\n",
+        )
+        .unwrap();
+        record.notes_path = Some(".batty/releases/v0.10.0.md".to_string());
+
+        let handoff = build_publish_handoff_with_credentials(tmp.path(), &record, false);
+
+        assert_eq!(handoff.status, "blocked");
+        assert!(
+            handoff
+                .blocked_reasons
+                .iter()
+                .any(|reason| reason.starts_with("missing_publish_credentials:"))
+        );
+        assert!(
+            handoff
+                .blocked_reasons
+                .iter()
+                .any(|reason| reason.starts_with("missing_publish_config:"))
+        );
+    }
+
+    #[test]
+    fn release_handoff_records_missing_tag_and_version_blockers() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(
+            tmp.path().join("Cargo.toml"),
+            "[package]\nname = \"batty\"\nedition = \"2024\"\n",
+        )
+        .unwrap();
+        fs::write(tmp.path().join("CHANGELOG.md"), "# Changelog\n").unwrap();
+        git(tmp.path(), &["init", "-b", "main"]);
+        git(tmp.path(), &["config", "user.name", "Batty Tests"]);
+        git(tmp.path(), &["config", "user.email", "batty@example.com"]);
+        let verifier = passing_verifier(Arc::new(AtomicUsize::new(0)));
+
+        let error = run_release_with_verifier(tmp.path(), None, &verifier).unwrap_err();
+        let handoff = build_publish_handoff_with_credentials(tmp.path(), &error.record, true);
+
+        assert_eq!(handoff.status, "blocked");
+        assert!(
+            handoff
+                .blocked_reasons
+                .iter()
+                .any(|reason| reason.starts_with("missing_version:"))
+        );
+        assert!(
+            handoff
+                .blocked_reasons
+                .iter()
+                .any(|reason| reason.starts_with("missing_tag:"))
         );
     }
 
@@ -1822,7 +2306,14 @@ mod tests {
             notes_path: Some(".batty/releases/v0.11.0.md".to_string()),
         };
 
-        let handoff = render_publish_handoff(&record);
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(
+            tmp.path().join("Cargo.toml"),
+            "[package]\nname = \"batty\"\nversion = \"0.11.0\"\nedition = \"2024\"\ndescription = \"Batty test package\"\nlicense = \"MIT\"\n",
+        )
+        .unwrap();
+        let handoff_artifact = build_publish_handoff_with_credentials(tmp.path(), &record, true);
+        let handoff = render_publish_handoff(&record, &handoff_artifact);
 
         assert!(handoff.contains("It did not push branches, push tags, or publish packages."));
         assert!(handoff.contains("git push origin main"));
