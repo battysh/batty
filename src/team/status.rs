@@ -70,6 +70,7 @@ pub(crate) struct OwnedTaskBuckets {
 pub(crate) struct AgentHealthSummary {
     pub(crate) restart_count: u32,
     pub(crate) context_exhaustion_count: u32,
+    pub(crate) proactive_handoff_count: u32,
     pub(crate) delivery_failure_count: u32,
     pub(crate) supervisory_digest_count: u32,
     pub(crate) dispatch_fallback_count: u32,
@@ -102,6 +103,7 @@ impl AgentHealthSummary {
     pub(crate) fn has_operator_warning(&self) -> bool {
         self.restart_count > 0
             || self.context_exhaustion_count > 0
+            || self.proactive_handoff_count > 0
             || self.delivery_failure_count > 0
             || self.has_supervisory_warning()
             || !self.backend_health.is_healthy()
@@ -827,6 +829,12 @@ pub(crate) fn agent_health_by_member(
                                 .map(|health| health.restart_count.max(restart_count))
                                 .unwrap_or(restart_count);
                         }
+                        if event.reason.as_deref() == Some("context_pressure") {
+                            health_by_member
+                                .entry(role.to_string())
+                                .or_default()
+                                .proactive_handoff_count += 1;
+                        }
                     }
                     "context_exhausted" => {
                         health_by_member
@@ -1154,6 +1162,9 @@ pub(crate) fn format_agent_health_summary_for_role(
     }
     if health.context_exhaustion_count > 0 {
         parts.push(format!("c{}", health.context_exhaustion_count));
+    }
+    if health.proactive_handoff_count > 0 {
+        parts.push(format!("ph{}", health.proactive_handoff_count));
     }
     if health.delivery_failure_count > 0 {
         parts.push(format!("d{}", health.delivery_failure_count));
@@ -3495,6 +3506,7 @@ mod tests {
                 health: AgentHealthSummary {
                     restart_count: 1,
                     context_exhaustion_count: 0,
+                    proactive_handoff_count: 0,
                     delivery_failure_count: 0,
                     supervisory_digest_count: 0,
                     dispatch_fallback_count: 0,
@@ -3524,6 +3536,7 @@ mod tests {
                 health: AgentHealthSummary {
                     restart_count: 0,
                     context_exhaustion_count: 1,
+                    proactive_handoff_count: 0,
                     delivery_failure_count: 1,
                     supervisory_digest_count: 0,
                     dispatch_fallback_count: 0,
@@ -4413,6 +4426,7 @@ mod tests {
                     health: AgentHealthSummary {
                         restart_count: 1,
                         context_exhaustion_count: 0,
+                        proactive_handoff_count: 0,
                         delivery_failure_count: 0,
                         supervisory_digest_count: 0,
                         dispatch_fallback_count: 0,
@@ -4662,6 +4676,7 @@ mod tests {
         let summary = format_agent_health_summary(&AgentHealthSummary {
             restart_count: 2,
             context_exhaustion_count: 1,
+            proactive_handoff_count: 1,
             delivery_failure_count: 3,
             supervisory_digest_count: 1,
             dispatch_fallback_count: 0,
@@ -4672,7 +4687,7 @@ mod tests {
             backend_health: crate::agent::BackendHealth::default(),
         });
 
-        assert_eq!(summary, "r2 c1 d3 sd1 t12m");
+        assert_eq!(summary, "r2 c1 ph1 d3 sd1 t12m");
         assert_eq!(
             format_agent_health_summary(&AgentHealthSummary::default()),
             "-"
@@ -4739,6 +4754,10 @@ mod tests {
         exhausted.ts = now_unix().saturating_sub(580);
         sink.emit(exhausted).unwrap();
 
+        let mut proactive = TeamEvent::agent_restarted("eng-1", "42", "context_pressure", 1);
+        proactive.ts = now_unix().saturating_sub(575);
+        sink.emit(proactive).unwrap();
+
         let mut delivery_failed =
             TeamEvent::delivery_failed("eng-1", "manager", "message delivery failed after retries");
         delivery_failed.ts = now_unix().saturating_sub(570);
@@ -4775,6 +4794,7 @@ mod tests {
         let eng_1 = health.get("eng-1").unwrap();
         assert_eq!(eng_1.restart_count, 2);
         assert_eq!(eng_1.context_exhaustion_count, 1);
+        assert_eq!(eng_1.proactive_handoff_count, 1);
         assert_eq!(eng_1.delivery_failure_count, 1);
         assert_eq!(eng_1.supervisory_digest_count, 1);
         assert_eq!(
