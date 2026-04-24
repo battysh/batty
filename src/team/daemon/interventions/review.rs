@@ -9,7 +9,10 @@ use tracing::{info, warn};
 use super::super::*;
 use super::OwnedTaskInterventionState;
 use crate::team::config::PlanningDirectiveFile;
-use crate::team::review::{ReviewNormalizationStep, ReviewQueueState};
+use crate::team::review::{
+    ReviewMergeRemediationKind, ReviewNormalizationStep, ReviewQueueState,
+    assess_review_merge_remediation,
+};
 
 impl TeamDaemon {
     pub(in super::super) fn maybe_intervene_review_backlog(&mut self) -> Result<()> {
@@ -230,6 +233,8 @@ impl TeamDaemon {
         );
 
         let mut merge_cmds = Vec::new();
+        let mut normalize_cmds = Vec::new();
+        let mut suppressed_cmds = Vec::new();
         for task in current_review_tasks {
             let engineer = task.claimed_by.as_deref().unwrap_or("engineer");
             let is_eng = self
@@ -238,65 +243,115 @@ impl TeamDaemon {
                 .iter()
                 .find(|m| m.name == engineer)
                 .is_some_and(|m| m.role_type == RoleType::Engineer);
+            let remediation = assess_review_merge_remediation(&self.config.project_root, task);
+            let detail = remediation_branch_detail(task.id, &remediation);
             if is_eng {
-                merge_cmds.push(format!(
-                    "   `batty merge {engineer}` && `kanban-md move --dir {board_dir_str} {} done`",
-                    task.id,
-                ));
+                match remediation.kind {
+                    ReviewMergeRemediationKind::Merge => {
+                        merge_cmds.push(format!(
+                            "   #{} by {} -> merge\n   {}\n   `batty merge {engineer}` && `kanban-md move --dir {board_dir_str} {} done`",
+                            task.id, engineer, detail, task.id
+                        ));
+                    }
+                    ReviewMergeRemediationKind::Normalize => {
+                        info!(
+                            task_id = task.id,
+                            engineer,
+                            expected_branch = ?remediation.expected_branch,
+                            actual_branch = ?remediation.actual_branch,
+                            commits_ahead = remediation.commits_ahead,
+                            "review merge remediation switched to normalization"
+                        );
+                        normalize_cmds.push(format!(
+                            "   #{} by {} -> normalize review\n   {}\n   Reason: {}.\n   {}",
+                            task.id,
+                            engineer,
+                            detail,
+                            remediation.reason,
+                            normalize_review_command(&board_dir, task.id)
+                        ));
+                    }
+                    ReviewMergeRemediationKind::Suppress => {
+                        warn!(
+                            task_id = task.id,
+                            engineer,
+                            expected_branch = ?remediation.expected_branch,
+                            actual_branch = ?remediation.actual_branch,
+                            commits_ahead = remediation.commits_ahead,
+                            "review merge remediation suppressed"
+                        );
+                        suppressed_cmds.push(format!(
+                            "   #{} by {} -> merge suppressed\n   {}\n   Reason: {}.\n   Inspect `git log --oneline main..{}` before taking action.",
+                            task.id,
+                            engineer,
+                            detail,
+                            remediation.reason,
+                            remediation
+                                .expected_branch
+                                .as_deref()
+                                .unwrap_or("HEAD")
+                        ));
+                    }
+                }
             } else {
-                merge_cmds.push(format!(
-                    "   `kanban-md move --dir {board_dir_str} {} done`",
-                    task.id,
+                normalize_cmds.push(format!(
+                    "   #{} by {} -> normalize board state\n   `kanban-md move --dir {board_dir_str} {} done`",
+                    task.id, engineer, task.id
                 ));
             }
         }
+        let mut step = 4;
         if !merge_cmds.is_empty() {
             message.push_str(&format!(
-                "\n4. ACTION REQUIRED — current live review lanes:\n{}",
+                "\n{step}. ACTION REQUIRED — verified live review lanes:\n{}",
                 merge_cmds.join("\n"),
             ));
+            step += 1;
+        }
+
+        if !normalize_cmds.is_empty() {
+            message.push_str(&format!(
+                "\n{step}. REVIEW NORMALIZATION — already merged or zero-ahead review lanes:\n{}",
+                normalize_cmds.join("\n"),
+            ));
+            step += 1;
+        }
+
+        if !suppressed_cmds.is_empty() {
+            message.push_str(&format!(
+                "\n{step}. MERGE SUPPRESSED — branch verification failed for these lanes:\n{}",
+                suppressed_cmds.join("\n"),
+            ));
+            step += 1;
         }
 
         if !stale_review_tasks.is_empty() {
             let stale_cmds = stale_review_tasks
                 .iter()
                 .map(|(task, stale)| {
-                    let claimed_by = task.claimed_by.as_deref().unwrap_or("engineer");
-                    let command = stale_review_command(
+                    stale_review_command(
+                        &self.config.project_root,
                         stale.next_step,
                         &board_dir,
                         task.id,
-                        claimed_by,
-                        current_review_recipient(claimed_by, task.id, &self.config.members),
-                    );
-                    format!(
-                        "   #{} by {} -> {} ({})\n   {}",
-                        task.id,
-                        claimed_by,
-                        stale.next_step.as_str(),
-                        stale.reason,
-                        command
+                        task,
+                        &self.config.members,
+                        &stale.reason,
                     )
                 })
                 .collect::<Vec<_>>();
             message.push_str(&format!(
-                "\n{}. STALE REVIEW NORMALIZATION — these lanes already diverged from live engineer state:\n{}",
-                if merge_cmds.is_empty() { 4 } else { 5 },
+                "\n{step}. STALE REVIEW NORMALIZATION — these lanes already diverged from live engineer state:\n{}",
                 stale_cmds.join("\n"),
             ));
+            step += 1;
         }
 
         message.push_str(&format!(
-            "\n{}. To discard it, run `kanban-md move --dir {board_dir_str} {task_id} archived` and `batty send {first_report} \"Task #{task_id} discarded: <reason>\"`.",
-            if merge_cmds.is_empty() && stale_review_tasks.is_empty() {
-                4
-            } else if stale_review_tasks.is_empty() || merge_cmds.is_empty() {
-                5
-            } else {
-                6
-            },
+            "\n{step}. To discard it, run `kanban-md move --dir {board_dir_str} {task_id} archived` and `batty send {first_report} \"Task #{task_id} discarded: <reason>\"`.",
             task_id = first_task.id,
         ));
+        step += 1;
         let rework_command = if first_report_is_engineer {
             format!(
                 "`batty assign {first_report} \"Task #{task_id}: <required changes>\"`",
@@ -309,27 +364,14 @@ impl TeamDaemon {
             )
         };
         message.push_str(&format!(
-            "\n{}. To request rework, run `kanban-md move --dir {board_dir_str} {task_id} in-progress` and {rework_command}.",
-            if merge_cmds.is_empty() && stale_review_tasks.is_empty() {
-                5
-            } else if stale_review_tasks.is_empty() || merge_cmds.is_empty() {
-                6
-            } else {
-                7
-            },
+            "\n{step}. To request rework, run `kanban-md move --dir {board_dir_str} {task_id} in-progress` and {rework_command}.",
             task_id = first_task.id,
         ));
+        step += 1;
 
         if let Some(parent) = &member.reports_to {
             message.push_str(&format!(
-                "\n{}. After each review decision, report upward with `batty send {parent} \"Reviewed Task #{task_id}: merged / archived / rework sent to {first_report}\"`.",
-                if merge_cmds.is_empty() && stale_review_tasks.is_empty() {
-                    6
-                } else if stale_review_tasks.is_empty() || merge_cmds.is_empty() {
-                    7
-                } else {
-                    8
-                },
+                "\n{step}. After each review decision, report upward with `batty send {parent} \"Reviewed Task #{task_id}: merged / archived / rework sent to {first_report}\"`.",
                 task_id = first_task.id,
             ));
         }
@@ -395,24 +437,82 @@ fn current_review_recipient(claimed_by: &str, task_id: u32, members: &[MemberIns
 }
 
 fn stale_review_command(
+    project_root: &std::path::Path,
     next_step: ReviewNormalizationStep,
     board_dir: &std::path::Path,
     task_id: u32,
-    claimed_by: &str,
-    rework_command: String,
+    task: &crate::task::Task,
+    members: &[MemberInstance],
+    stale_reason: &str,
 ) -> String {
+    let claimed_by = task.claimed_by.as_deref().unwrap_or("engineer");
+    let rework_command = current_review_recipient(claimed_by, task_id, members);
     let board_dir_str = board_dir.display();
     match next_step {
-        ReviewNormalizationStep::Merge => format!(
-            "`batty merge {claimed_by}` && `kanban-md move --dir {board_dir_str} {task_id} done`"
-        ),
+        ReviewNormalizationStep::Merge => {
+            let remediation = assess_review_merge_remediation(project_root, task);
+            let detail = remediation_branch_detail(task_id, &remediation);
+            match remediation.kind {
+                ReviewMergeRemediationKind::Merge => format!(
+                    "   #{} by {} -> merge ({})\n   {}\n   `batty merge {claimed_by}` && `kanban-md move --dir {board_dir_str} {task_id} done`",
+                    task_id, claimed_by, stale_reason, detail
+                ),
+                ReviewMergeRemediationKind::Normalize => format!(
+                    "   #{} by {} -> normalize review ({})\n   {}\n   Reason: {}.\n   {}",
+                    task_id,
+                    claimed_by,
+                    stale_reason,
+                    detail,
+                    remediation.reason,
+                    normalize_review_command(board_dir, task_id)
+                ),
+                ReviewMergeRemediationKind::Suppress => format!(
+                    "   #{} by {} -> merge suppressed ({})\n   {}\n   Reason: {}.\n   Inspect `git log --oneline main..{}` before taking action.",
+                    task_id,
+                    claimed_by,
+                    stale_reason,
+                    detail,
+                    remediation.reason,
+                    remediation.expected_branch.as_deref().unwrap_or("HEAD")
+                ),
+            }
+        }
         ReviewNormalizationStep::Archive => {
-            format!("`kanban-md move --dir {board_dir_str} {task_id} archived`")
+            format!(
+                "   #{} by {} -> archive ({})\n   `kanban-md move --dir {board_dir_str} {task_id} archived`",
+                task_id, claimed_by, stale_reason
+            )
         }
         ReviewNormalizationStep::Rework => format!(
-            "`kanban-md move --dir {board_dir_str} {task_id} in-progress` and {rework_command}"
+            "   #{} by {} -> rework ({})\n   `kanban-md move --dir {board_dir_str} {task_id} in-progress` and {rework_command}",
+            task_id, claimed_by, stale_reason
         ),
     }
+}
+
+fn normalize_review_command(board_dir: &std::path::Path, task_id: u32) -> String {
+    let board_dir_str = board_dir.display();
+    format!(
+        "`batty review {task_id} approve \"Already merged upstream; normalize review backlog\"` && `kanban-md move --dir {board_dir_str} {task_id} done`"
+    )
+}
+
+fn remediation_branch_detail(
+    task_id: u32,
+    remediation: &crate::team::review::ReviewMergeRemediation,
+) -> String {
+    let expected_branch = remediation.expected_branch.as_deref().unwrap_or("missing");
+    let actual_branch = remediation
+        .actual_branch
+        .as_deref()
+        .unwrap_or("unavailable");
+    let commits_ahead = remediation
+        .commits_ahead
+        .map(|count| count.to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    format!(
+        "Task #{task_id}: expected branch `{expected_branch}`, actual branch `{actual_branch}`, commits ahead of main: {commits_ahead}"
+    )
 }
 
 #[cfg(test)]
