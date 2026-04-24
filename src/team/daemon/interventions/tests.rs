@@ -3268,6 +3268,86 @@ fn fire_utilization_when_engineer_free_with_runnable_work() {
 }
 
 #[test]
+fn phase_gate_suppresses_utilization_when_no_dispatchable_tasks() {
+    let harness = intervention_team_harness()
+        .with_member_state("architect", MemberState::Idle)
+        .with_member_state("lead", MemberState::Idle)
+        .with_member_state("eng-1", MemberState::Idle)
+        .with_member_state("eng-2", MemberState::Idle)
+        .with_pane("architect", "%999996")
+        .with_board_task(191, "task-for-eng-1", "in-progress", Some("eng-1"));
+
+    crate::team::test_support::write_board_task_file(
+        harness.project_root(),
+        198,
+        "phase-b-task",
+        "todo",
+        None,
+        &[],
+        Some("phase gate waiting for Phase A acceptance"),
+    );
+
+    let mut daemon = harness.build_daemon().unwrap();
+    enable_orchestrator_logging(&mut daemon);
+    enter_idle_epoch(&mut daemon, "architect");
+    daemon.maybe_intervene_architect_utilization().unwrap();
+
+    assert!(
+        harness
+            .pending_inbox_messages("architect")
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        !daemon
+            .owned_task_interventions
+            .contains_key("utilization::architect")
+    );
+    let orchestrator_log =
+        std::fs::read_to_string(crate::team::orchestrator_log_path(harness.project_root()))
+            .unwrap();
+    assert!(orchestrator_log.contains("utilization suppressed by phase gate"));
+    assert!(orchestrator_log.contains("#198"));
+}
+
+#[test]
+fn phase_gate_does_not_suppress_utilization_when_runnable_task_exists() {
+    let harness = intervention_team_harness()
+        .with_member_state("architect", MemberState::Idle)
+        .with_member_state("lead", MemberState::Idle)
+        .with_member_state("eng-1", MemberState::Idle)
+        .with_member_state("eng-2", MemberState::Idle)
+        .with_pane("architect", "%999996")
+        .with_board_task(191, "task-for-eng-1", "in-progress", Some("eng-1"))
+        .with_board_task(199, "ungated-task", "todo", None);
+
+    crate::team::test_support::write_board_task_file(
+        harness.project_root(),
+        198,
+        "phase-b-task",
+        "todo",
+        None,
+        &[],
+        Some("phase-gate waiting for Phase A acceptance"),
+    );
+
+    let mut daemon = harness.build_daemon().unwrap();
+    enable_orchestrator_logging(&mut daemon);
+    enter_idle_epoch(&mut daemon, "architect");
+    daemon.maybe_intervene_architect_utilization().unwrap();
+
+    let pending = harness.pending_inbox_messages("architect").unwrap();
+    assert_eq!(pending.len(), 1);
+    assert!(pending[0].body.contains("Utilization recovery needed"));
+    assert!(pending[0].body.contains("#199 (todo) ungated-task"));
+    let orchestrator_log =
+        std::fs::read_to_string(crate::team::orchestrator_log_path(harness.project_root()))
+            .unwrap();
+    assert!(orchestrator_log.contains("utilization intervention"));
+    assert!(!orchestrator_log.contains("utilization suppressed by phase gate"));
+}
+
+#[test]
 fn utilization_ignores_blocked_manual_todo_as_open_work() {
     let harness = intervention_team_harness()
         .with_member_state("architect", MemberState::Idle)
