@@ -2911,6 +2911,104 @@ impl TeamDaemon {
         info!(path = %report_path.display(), "retrospective generated");
         Ok(())
     }
+
+    pub(super) fn maybe_refresh_stale_daemon_binary(&mut self) -> Result<()> {
+        let Some(state) = crate::team::daemon::health::binary_freshness::load_binary_refresh_state(
+            &self.config.project_root,
+        )?
+        else {
+            return Ok(());
+        };
+        if state.phase
+            == crate::team::daemon::health::binary_freshness::DaemonBinaryRefreshPhase::Scheduled
+        {
+            return Ok(());
+        }
+
+        let decision =
+            crate::team::daemon_mgmt::safe_daemon_restart_decision(&self.config.project_root)?;
+        let Some(freshness) = decision.freshness.as_ref() else {
+            return Ok(());
+        };
+
+        match decision.status {
+            crate::team::daemon_mgmt::StaleDaemonRestartStatus::DryRunReady => {
+                let scheduled =
+                    crate::team::daemon::health::binary_freshness::DaemonBinaryRefreshState::scheduled(
+                        freshness,
+                        crate::team::now_unix(),
+                    );
+                crate::team::daemon::health::binary_freshness::save_binary_refresh_state(
+                    &self.config.project_root,
+                    &scheduled,
+                )?;
+                self.record_orchestrator_action(format!(
+                    "runtime: daemon binary restart scheduled ({} commit(s) behind main)",
+                    freshness.commits_behind
+                ));
+                if let Err(error) = crate::team::daemon_mgmt::rebuild_reinstall_and_resign_batty(
+                    &self.config.project_root,
+                ) {
+                    let blocked =
+                        crate::team::daemon::health::binary_freshness::DaemonBinaryRefreshState::blocked(
+                            freshness,
+                            crate::team::now_unix(),
+                            format!("restart command failed: {error}"),
+                        );
+                    crate::team::daemon::health::binary_freshness::save_binary_refresh_state(
+                        &self.config.project_root,
+                        &blocked,
+                    )?;
+                    return Err(error);
+                }
+            }
+            crate::team::daemon_mgmt::StaleDaemonRestartStatus::FreshNoop => {
+                crate::team::daemon::health::binary_freshness::clear_binary_refresh_state(
+                    &self.config.project_root,
+                )?;
+            }
+            crate::team::daemon_mgmt::StaleDaemonRestartStatus::RefusedDirty
+            | crate::team::daemon_mgmt::StaleDaemonRestartStatus::RefusedActiveMerge
+            | crate::team::daemon_mgmt::StaleDaemonRestartStatus::RefusedMissingReleaseBinary => {
+                let blocked =
+                    crate::team::daemon::health::binary_freshness::DaemonBinaryRefreshState::blocked(
+                        freshness,
+                        crate::team::now_unix(),
+                        binary_refresh_blocker(&decision),
+                    );
+                crate::team::daemon::health::binary_freshness::save_binary_refresh_state(
+                    &self.config.project_root,
+                    &blocked,
+                )?;
+                self.record_orchestrator_action(format!(
+                    "runtime: daemon binary restart blocked: {}",
+                    binary_refresh_blocker(&decision)
+                ));
+            }
+            crate::team::daemon_mgmt::StaleDaemonRestartStatus::Restarted => {}
+        }
+
+        Ok(())
+    }
+}
+
+fn binary_refresh_blocker(decision: &crate::team::daemon_mgmt::StaleDaemonRestartReport) -> String {
+    match decision.status {
+        crate::team::daemon_mgmt::StaleDaemonRestartStatus::RefusedDirty => {
+            if decision.dirty_paths.is_empty() {
+                "dirty main".to_string()
+            } else {
+                format!("dirty main ({})", decision.dirty_paths.join(", "))
+            }
+        }
+        crate::team::daemon_mgmt::StaleDaemonRestartStatus::RefusedActiveMerge => {
+            "active merge".to_string()
+        }
+        crate::team::daemon_mgmt::StaleDaemonRestartStatus::RefusedMissingReleaseBinary => {
+            "missing release binary".to_string()
+        }
+        _ => "not blocked".to_string(),
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

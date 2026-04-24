@@ -307,6 +307,9 @@ impl TeamDaemon {
             daemon.maybe_auto_unblock_blocked_tasks()
         });
         self.run_recoverable_step("process_merge_queue", |daemon| daemon.process_merge_queue());
+        self.run_recoverable_step("maybe_refresh_stale_daemon_binary", |daemon| {
+            daemon.maybe_refresh_stale_daemon_binary()
+        });
 
         // -- Critical subsystems --
         self.run_loop_step("reconcile_active_tasks", |daemon| {

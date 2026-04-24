@@ -108,8 +108,31 @@ impl TeamDaemon {
         trigger: BinaryFreshnessTrigger,
     ) {
         if report.fresh {
+            if let Err(error) = super::health::binary_freshness::clear_binary_refresh_state(
+                &self.config.project_root,
+            ) {
+                debug!(error = %error, "failed to clear daemon binary refresh state");
+            }
             info!(trigger = trigger.as_str(), "{}", report.status_line());
             return;
+        }
+
+        if trigger == BinaryFreshnessTrigger::PostMerge {
+            let state = super::health::binary_freshness::DaemonBinaryRefreshState::pending(
+                &report,
+                crate::team::now_unix(),
+            );
+            if let Err(error) = super::health::binary_freshness::save_binary_refresh_state(
+                &self.config.project_root,
+                &state,
+            ) {
+                warn!(error = %error, "failed to persist daemon binary refresh-needed state");
+            } else {
+                self.record_orchestrator_action(format!(
+                    "runtime: daemon binary refresh pending after merge ({} commit(s) behind main)",
+                    report.commits_behind
+                ));
+            }
         }
 
         warn!(trigger = trigger.as_str(), "{}", report.status_line());
@@ -1189,6 +1212,16 @@ mod tests {
         assert!(
             details.contains(crate::team::daemon::health::binary_freshness::STALE_RECOVERY_COMMAND)
         );
+
+        let refresh_state =
+            crate::team::daemon::health::binary_freshness::load_binary_refresh_state(tmp.path())
+                .unwrap()
+                .expect("refresh state");
+        assert_eq!(
+            refresh_state.phase,
+            crate::team::daemon::health::binary_freshness::DaemonBinaryRefreshPhase::Pending
+        );
+        assert_eq!(refresh_state.commits_behind, 2);
     }
 
     #[test]
