@@ -81,9 +81,13 @@ impl std::fmt::Display for QueueTier {
 pub fn category_to_tier(category: MessageCategory) -> QueueTier {
     match category {
         MessageCategory::Escalation | MessageCategory::Blocker => QueueTier::Priority,
-        MessageCategory::ReviewRequest => QueueTier::Work,
+        MessageCategory::ReviewRequest
+        | MessageCategory::DispatchAction
+        | MessageCategory::CompletionAction => QueueTier::Work,
         MessageCategory::Status => QueueTier::Content,
-        MessageCategory::Nudge => QueueTier::Telemetry,
+        MessageCategory::Nudge | MessageCategory::Reminder | MessageCategory::Acknowledgement => {
+            QueueTier::Telemetry
+        }
     }
 }
 
