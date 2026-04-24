@@ -2,11 +2,12 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use tracing::{debug, info, warn};
+use uuid::Uuid;
 
 use super::{MessageDelivery, PendingMessage};
 use crate::team::append_shim_event_log;
 use crate::team::config::RoleType;
-use crate::team::daemon::TeamDaemon;
+use crate::team::daemon::{PendingAckInboxMessage, PendingShimAck, TeamDaemon};
 use crate::team::errors::DeliveryError;
 use crate::team::inbox;
 use crate::team::message;
@@ -539,6 +540,70 @@ impl TeamDaemon {
         }
     }
 
+    fn pending_ack_contains_inbox_id(&self, inbox_id: &str) -> bool {
+        self.pending_shim_acks.values().any(|pending| {
+            pending
+                .inbox_messages
+                .iter()
+                .any(|message| message.id == inbox_id)
+        })
+    }
+
+    fn enqueue_pending_shim_ack(
+        &mut self,
+        message_id: String,
+        recipient: &str,
+        from: &str,
+        body: &str,
+        inbox_messages: Vec<PendingAckInboxMessage>,
+    ) {
+        self.pending_shim_acks.insert(
+            message_id,
+            PendingShimAck {
+                recipient: recipient.to_string(),
+                from: from.to_string(),
+                body: body.to_string(),
+                inbox_messages,
+            },
+        );
+    }
+
+    fn send_live_shim_message(
+        &mut self,
+        recipient: &str,
+        from: &str,
+        body: &str,
+        message_id: String,
+        inbox_messages: Vec<PendingAckInboxMessage>,
+    ) -> Result<MessageDelivery> {
+        let result = {
+            let Some(handle) = self.shim_handles.get_mut(recipient) else {
+                return Ok(MessageDelivery::InboxQueued);
+            };
+            handle.send_message_with_id(from, body, Some(message_id.clone()))
+        };
+
+        match result {
+            Ok(()) => {
+                let ack_tracks_inbox = !inbox_messages.is_empty();
+                self.enqueue_pending_shim_ack(message_id, recipient, from, body, inbox_messages);
+                let _ = append_shim_event_log(
+                    &self.config.project_root,
+                    recipient,
+                    &format!("-> {from}: {}", shim_log_preview(body)),
+                );
+                info!(from, to = recipient, "delivered message via shim channel");
+                if !ack_tracks_inbox {
+                    self.record_message_routed(from, recipient);
+                    self.record_notification_delivery_sample(from, recipient, 0, "live");
+                }
+                self.mark_member_working(recipient);
+                Ok(MessageDelivery::LivePane)
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
+
     /// Drain pending messages for an agent that just became ready.
     /// Called from `poll_watchers()` when `ready_confirmed` transitions to true.
     pub(in crate::team) fn drain_pending_queue(&mut self, recipient: &str) -> Result<()> {
@@ -555,7 +620,7 @@ impl TeamDaemon {
             "draining pending delivery queue after agent became ready"
         );
         for msg in messages {
-            self.deliver_message(&msg.from, recipient, &msg.body)?;
+            self.deliver_message_with_id(&msg.from, recipient, &msg.body, msg.message_id)?;
         }
         Ok(())
     }
@@ -709,6 +774,16 @@ impl TeamDaemon {
         recipient: &str,
         body: &str,
     ) -> Result<MessageDelivery> {
+        self.deliver_message_with_id(from, recipient, body, None)
+    }
+
+    fn deliver_message_with_id(
+        &mut self,
+        from: &str,
+        recipient: &str,
+        body: &str,
+        message_id: Option<String>,
+    ) -> Result<MessageDelivery> {
         if let Some(channel) = self.channels.get(recipient) {
             let _ = channel;
             return self.deliver_channel_message(from, recipient, body);
@@ -726,39 +801,24 @@ impl TeamDaemon {
         }
 
         // Shim delivery path: deliver via the structured shim channel.
-        if let Some(handle) = self.shim_handles.get_mut(recipient) {
-            if handle.is_ready() {
-                match handle.send_message(from, body) {
-                    Ok(()) => {
-                        // Do NOT force handle state to Working here — the shim
-                        // classifier is the single source of truth. Forcing Working
-                        // on delivery causes the handle to appear busy even if the
-                        // agent processes the message instantly.
-                        let _ = append_shim_event_log(
-                            &self.config.project_root,
-                            recipient,
-                            &format!("-> {from}: {}", shim_log_preview(body)),
-                        );
-                        info!(from, to = recipient, "delivered message via shim channel");
-                        self.record_message_routed(from, recipient);
-                        self.record_notification_delivery_sample(from, recipient, 0, "live");
-                        self.mark_member_working(recipient);
-                        return Ok(MessageDelivery::LivePane);
-                    }
+        if let Some((is_ready, is_terminal, state)) = self
+            .shim_handles
+            .get(recipient)
+            .map(|handle| (handle.is_ready(), handle.is_terminal(), handle.state))
+        {
+            let message_id = message_id.unwrap_or_else(|| Uuid::new_v4().to_string());
+            if is_ready {
+                match self.send_live_shim_message(recipient, from, body, message_id, Vec::new()) {
+                    Ok(delivery) => return Ok(delivery),
                     Err(error) => {
-                        warn!(
-                            from,
-                            to = recipient,
-                            error = %error,
-                            "shim channel delivery failed; falling through to inbox"
-                        );
+                        warn!(from, to = recipient, error = %error, "shim channel delivery failed; falling through to inbox");
                     }
                 }
-            } else if !handle.is_terminal() {
+            } else if !is_terminal {
                 info!(
                     from,
                     to = recipient,
-                    state = %handle.state,
+                    state = %state,
                     "shim agent not ready; deferring to pending queue"
                 );
                 self.pending_delivery_queue
@@ -767,6 +827,7 @@ impl TeamDaemon {
                     .push(PendingMessage {
                         from: from.to_string(),
                         body: body.to_string(),
+                        message_id: Some(message_id),
                         queued_at: Instant::now(),
                     });
                 let _ = append_shim_event_log(
@@ -960,6 +1021,7 @@ impl TeamDaemon {
                 if digested_ids.contains(&msg.id)
                     || suppressed_ids.contains(&msg.id)
                     || pending_manager_digest_ids.contains(&msg.id)
+                    || self.pending_ack_contains_inbox_id(&msg.id)
                 {
                     continue;
                 }
@@ -991,23 +1053,27 @@ impl TeamDaemon {
                             Ok(MessageDelivery::OrchestratorLogged)
                         } else {
                             info!(from = %msg.from, to = %name, id = %msg.id, "delivering inbox message via shim");
-                            if let Some(handle) = self.shim_handles.get_mut(name) {
-                                let result = handle.send_message(&msg.from, &msg.body);
-                                if result.is_ok() {
+                            if self.shim_handles.contains_key(name) {
+                                let result = self.send_live_shim_message(
+                                    name,
+                                    &msg.from,
+                                    &msg.body,
+                                    msg.id.clone(),
+                                    vec![PendingAckInboxMessage {
+                                        id: msg.id.clone(),
+                                        from: msg.from.clone(),
+                                        age_secs: msg.age().as_secs(),
+                                        sample_kind: "inbox",
+                                    }],
+                                );
+                                if result.is_ok()
+                                    && let Some(handle) = self.shim_handles.get_mut(name)
+                                {
                                     handle.apply_state_change(
                                         crate::shim::protocol::ShimState::Working,
                                     );
-                                    let _ = append_shim_event_log(
-                                        &self.config.project_root,
-                                        name,
-                                        &format!(
-                                            "-> {}: {}",
-                                            msg.from,
-                                            shim_log_preview(&msg.body)
-                                        ),
-                                    );
                                 }
-                                result.map(|()| MessageDelivery::LivePane)
+                                result
                             } else {
                                 // No shim handle — skip, leave in inbox
                                 continue;
@@ -1102,8 +1168,9 @@ impl TeamDaemon {
                         if matches!(delivery, MessageDelivery::LivePane) {
                             delivered_any = true;
                         }
-                        mark_delivered = true;
-                        if is_send && matches!(delivery, MessageDelivery::LivePane) {
+                        mark_delivered =
+                            !(is_send && matches!(delivery, MessageDelivery::LivePane));
+                        if is_send && mark_delivered {
                             // Shim delivery is authoritative once the command reaches the
                             // structured channel. Pane-marker verification is a legacy tmux
                             // heuristic and produces false negatives for Claude/Codex shims.
@@ -1170,25 +1237,41 @@ impl TeamDaemon {
 
     fn deliver_batched_management_messages(
         &mut self,
-        root: &std::path::Path,
+        _root: &std::path::Path,
         member_name: &str,
         messages: &[inbox::InboxMessage],
     ) -> Result<bool> {
-        let Some(handle) = self.shim_handles.get_mut(member_name) else {
+        if !self.shim_handles.contains_key(member_name) {
             return Ok(false);
-        };
+        }
 
         let first_sender = messages
             .first()
             .map(|message| message.from.as_str())
             .unwrap_or("daemon");
         let batched_body = format_batched_message(messages);
+        let ack_messages = messages
+            .iter()
+            .map(|message| PendingAckInboxMessage {
+                id: message.id.clone(),
+                from: message.from.clone(),
+                age_secs: message.age().as_secs(),
+                sample_kind: "batched",
+            })
+            .collect::<Vec<_>>();
+        let message_id = format!("batched-{}", Uuid::new_v4());
         info!(
             to = %member_name,
             count = messages.len(),
             "delivering batched inbox messages via shim"
         );
-        if let Err(error) = handle.send_message(first_sender, &batched_body) {
+        if let Err(error) = self.send_live_shim_message(
+            member_name,
+            first_sender,
+            &batched_body,
+            message_id,
+            ack_messages,
+        ) {
             warn!(
                 to = %member_name,
                 count = messages.len(),
@@ -1198,33 +1281,8 @@ impl TeamDaemon {
             return Ok(false);
         }
 
-        handle.apply_state_change(crate::shim::protocol::ShimState::Working);
-        let _ = append_shim_event_log(
-            &self.config.project_root,
-            member_name,
-            &format!(
-                "-> batched {} messages: {}",
-                messages.len(),
-                shim_log_preview(&batched_body)
-            ),
-        );
         for message in messages {
-            if let Err(error) = inbox::mark_delivered(root, member_name, &message.id) {
-                warn!(
-                    member = %member_name,
-                    id = %message.id,
-                    error = %error,
-                    "failed to mark batched message delivered"
-                );
-            } else {
-                self.record_message_routed(&message.from, member_name);
-                self.record_notification_delivery_sample(
-                    &message.from,
-                    member_name,
-                    message.age().as_secs(),
-                    "batched",
-                );
-            }
+            debug!(member = %member_name, id = %message.id, "batched inbox message waiting for shim delivery ack");
         }
 
         Ok(true)
@@ -1232,17 +1290,27 @@ impl TeamDaemon {
 
     fn flush_manager_digest(
         &mut self,
-        root: &std::path::Path,
+        _root: &std::path::Path,
         member_name: &str,
         messages: &[inbox::InboxMessage],
     ) -> Result<Vec<String>> {
         let sender = self.automation_sender_for(member_name);
-        let Some(handle) = self.shim_handles.get_mut(member_name) else {
+        if !self.shim_handles.contains_key(member_name) {
             return Ok(Vec::new());
-        };
+        }
 
         let digest = build_supervisory_digest(messages);
         let digest_body = format_supervisory_digest(&digest);
+        let ack_messages = messages
+            .iter()
+            .map(|message| PendingAckInboxMessage {
+                id: message.id.clone(),
+                from: message.from.clone(),
+                age_secs: message.age().as_secs(),
+                sample_kind: "digest",
+            })
+            .collect::<Vec<_>>();
+        let message_id = format!("digest-{}", Uuid::new_v4());
         info!(
             to = %member_name,
             count = digest.total_messages,
@@ -1250,7 +1318,13 @@ impl TeamDaemon {
             duplicates_suppressed = digest.duplicates_suppressed,
             "delivering manager supervisory digest via shim"
         );
-        if let Err(error) = handle.send_message(&sender, &digest_body) {
+        if let Err(error) = self.send_live_shim_message(
+            member_name,
+            &sender,
+            &digest_body,
+            message_id,
+            ack_messages,
+        ) {
             warn!(
                 to = %member_name,
                 count = digest.total_messages,
@@ -1259,17 +1333,6 @@ impl TeamDaemon {
             );
             return Ok(Vec::new());
         }
-
-        let _ = append_shim_event_log(
-            &self.config.project_root,
-            member_name,
-            &format!(
-                "-> manager digest {} messages: {}",
-                digest.total_messages,
-                shim_log_preview(&digest_body)
-            ),
-        );
-
         let mut class_counts: std::collections::HashMap<&'static str, usize> =
             std::collections::HashMap::new();
         for entry in &digest.entries {
@@ -1294,28 +1357,7 @@ impl TeamDaemon {
             u32::try_from(digest.duplicates_suppressed).unwrap_or(u32::MAX),
         );
 
-        let mut flushed_ids = Vec::with_capacity(messages.len());
-        for message in messages {
-            if let Err(error) = inbox::mark_delivered(root, member_name, &message.id) {
-                warn!(
-                    member = %member_name,
-                    id = %message.id,
-                    error = %error,
-                    "failed to mark digested manager notice delivered"
-                );
-            } else {
-                self.record_message_routed(&message.from, member_name);
-                self.record_notification_delivery_sample(
-                    &message.from,
-                    member_name,
-                    message.age().as_secs(),
-                    "digest",
-                );
-                flushed_ids.push(message.id.clone());
-            }
-        }
-
-        Ok(flushed_ids)
+        Ok(messages.iter().map(|message| message.id.clone()).collect())
     }
 
     fn resolve_role_name(&self, member_name: &str) -> String {
@@ -1904,6 +1946,13 @@ mod tests {
         );
         handle.apply_state_change(crate::shim::protocol::ShimState::Idle);
         daemon.shim_handles.insert("eng-1".to_string(), handle);
+        daemon
+            .shim_handles
+            .get_mut("eng-1")
+            .unwrap()
+            .channel
+            .set_read_timeout(Some(Duration::from_millis(5)))
+            .unwrap();
 
         let root = inbox::inboxes_root(tmp.path());
         let assign = inbox::InboxMessage::new_assign("manager", "eng-1", "Task #13: fix it");
@@ -2017,6 +2066,13 @@ mod tests {
             "manager".to_string(),
             crate::team::standup::MemberState::Idle,
         );
+        daemon
+            .shim_handles
+            .get_mut("manager")
+            .unwrap()
+            .channel
+            .set_read_timeout(Some(Duration::from_millis(5)))
+            .unwrap();
 
         daemon.deliver_inbox_messages().unwrap();
 
@@ -2024,8 +2080,10 @@ mod tests {
             .set_read_timeout(Some(Duration::from_secs(5)))
             .unwrap();
         let first_cmd: crate::shim::protocol::Command = child_channel.recv().unwrap().unwrap();
-        match first_cmd {
-            crate::shim::protocol::Command::SendMessage { body, .. } => {
+        let digest_message_id = match first_cmd {
+            crate::shim::protocol::Command::SendMessage {
+                body, message_id, ..
+            } => {
                 assert!(body.contains("[manager-digest]"));
                 assert!(body.contains("review [architect]"));
                 // "Dispatch recovery needed: idle reports still have active work" is
@@ -2034,9 +2092,10 @@ mod tests {
                 assert!(body.contains("utilization [architect]"));
                 assert!(body.contains("Review backlog detected"));
                 assert!(body.contains("Dispatch recovery needed"));
+                message_id.expect("digest delivery should carry a shim message id")
             }
             other => panic!("expected SendMessage, got {other:?}"),
-        }
+        };
 
         let delivery = daemon.deliver_message(
             "architect",
@@ -2056,6 +2115,13 @@ mod tests {
             }
             other => panic!("expected SendMessage, got {other:?}"),
         }
+
+        child_channel
+            .send(&crate::shim::protocol::Event::MessageDelivered {
+                id: digest_message_id,
+            })
+            .unwrap();
+        daemon.poll_shim_handles().unwrap();
 
         assert!(
             inbox::pending_messages(&root, "manager")
@@ -2600,7 +2666,7 @@ mod tests {
 
         let (parent_sock, child_sock) = crate::shim::protocol::socketpair().unwrap();
         let parent_channel = crate::shim::protocol::Channel::new(parent_sock);
-        let _child_channel = crate::shim::protocol::Channel::new(child_sock);
+        let mut child_channel = crate::shim::protocol::Channel::new(child_sock);
         let mut handle = crate::team::daemon::agent_handle::AgentHandle::new(
             "eng-1".to_string(),
             parent_channel,
@@ -2611,11 +2677,51 @@ mod tests {
         );
         handle.apply_state_change(crate::shim::protocol::ShimState::Idle);
         daemon.shim_handles.insert("eng-1".to_string(), handle);
+        daemon
+            .shim_handles
+            .get_mut("eng-1")
+            .unwrap()
+            .channel
+            .set_read_timeout(Some(Duration::from_millis(5)))
+            .unwrap();
 
         daemon.deliver_inbox_messages().unwrap();
 
         let pending = inbox::pending_messages(&root, "eng-1").unwrap();
-        assert!(pending.is_empty(), "message should be marked delivered");
+        assert_eq!(
+            pending.len(),
+            1,
+            "message should stay pending until shim ack"
+        );
+        assert_eq!(pending[0].id, id);
+
+        child_channel
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let cmd: crate::shim::protocol::Command = child_channel.recv().unwrap().unwrap();
+        match cmd {
+            crate::shim::protocol::Command::SendMessage {
+                from,
+                body,
+                message_id,
+            } => {
+                assert_eq!(from, "manager");
+                assert_eq!(body, "test assignment");
+                assert_eq!(message_id.as_deref(), Some(id.as_str()));
+            }
+            other => panic!("expected SendMessage, got {other:?}"),
+        }
+
+        child_channel
+            .send(&crate::shim::protocol::Event::MessageDelivered { id: id.clone() })
+            .unwrap();
+        daemon.poll_shim_handles().unwrap();
+
+        let pending = inbox::pending_messages(&root, "eng-1").unwrap();
+        assert!(
+            pending.is_empty(),
+            "message should be marked delivered after shim ack"
+        );
 
         let all = inbox::all_messages(&root, "eng-1").unwrap();
         assert!(
@@ -2652,37 +2758,56 @@ mod tests {
         daemon
             .states
             .insert("eng-1".to_string(), crate::team::standup::MemberState::Idle);
+        daemon
+            .shim_handles
+            .get_mut("eng-1")
+            .unwrap()
+            .channel
+            .set_read_timeout(Some(Duration::from_millis(5)))
+            .unwrap();
 
         daemon.deliver_inbox_messages().unwrap();
 
-        // Verify the message was marked delivered via inbox
         let pending = inbox::pending_messages(&root, "eng-1").unwrap();
-        assert!(pending.is_empty(), "message should be marked delivered");
+        assert_eq!(
+            pending.len(),
+            1,
+            "message should stay pending until shim ack"
+        );
+        assert_eq!(pending[0].id, id);
 
-        let all = inbox::all_messages(&root, "eng-1").unwrap();
-        assert!(all.iter().any(|(m, delivered)| m.id == id && *delivered));
-
-        // Verify the command arrived on the child side of the socketpair.
-        // Use a short read timeout to avoid hanging if delivery took a
-        // different path (inbox fallback).
         let mut child_channel = child_channel;
         child_channel
             .set_read_timeout(Some(Duration::from_secs(2)))
             .unwrap();
         let cmd: Result<Option<crate::shim::protocol::Command>, _> = child_channel.recv();
         match cmd {
-            Ok(Some(crate::shim::protocol::Command::SendMessage { from, body, .. })) => {
+            Ok(Some(crate::shim::protocol::Command::SendMessage {
+                from,
+                body,
+                message_id,
+            })) => {
                 assert_eq!(from, "manager");
                 assert_eq!(body, "test assignment");
+                assert_eq!(message_id.as_deref(), Some(id.as_str()));
             }
             Ok(Some(other)) => panic!("expected SendMessage, got {other:?}"),
             Ok(None) => panic!("channel closed unexpectedly"),
-            Err(_) => {
-                // Read timed out — the message went through inbox fallback
-                // instead of the shim channel. This is acceptable since the
-                // test verified inbox delivery succeeded above.
-            }
+            Err(error) => panic!("expected shim delivery, got {error}"),
         }
+
+        child_channel
+            .send(&crate::shim::protocol::Event::MessageDelivered { id: id.clone() })
+            .unwrap();
+        daemon.poll_shim_handles().unwrap();
+
+        let pending = inbox::pending_messages(&root, "eng-1").unwrap();
+        assert!(
+            pending.is_empty(),
+            "message should be marked delivered after shim ack"
+        );
+        let all = inbox::all_messages(&root, "eng-1").unwrap();
+        assert!(all.iter().any(|(m, delivered)| m.id == id && *delivered));
     }
 
     // --- Delivery to unknown recipient ---
@@ -2802,6 +2927,10 @@ mod tests {
         assert_eq!(queue.len(), 1);
         assert_eq!(queue[0].from, "manager");
         assert_eq!(queue[0].body, "task assignment");
+        assert!(
+            queue[0].message_id.is_some(),
+            "deferred shim delivery should preserve a message id"
+        );
     }
 
     #[test]
@@ -2816,6 +2945,7 @@ mod tests {
             .push(PendingMessage {
                 from: "manager".to_string(),
                 body: "queued assignment".to_string(),
+                message_id: None,
                 queued_at: Instant::now(),
             });
 
@@ -3017,9 +3147,17 @@ mod tests {
             .unwrap()
             .unwrap();
         match cmd {
-            crate::shim::protocol::Command::SendMessage { from, body, .. } => {
+            crate::shim::protocol::Command::SendMessage {
+                from,
+                body,
+                message_id,
+            } => {
                 assert_eq!(from, "manager");
                 assert_eq!(body, "do the thing");
+                assert!(
+                    message_id.is_some(),
+                    "live shim delivery should carry a message id"
+                );
             }
             _ => panic!("expected SendMessage"),
         }
@@ -3485,6 +3623,7 @@ mod tests {
             .push(PendingMessage {
                 from: "architect".into(),
                 body: "hello".into(),
+                message_id: None,
                 queued_at: Instant::now() - Duration::from_secs(9999),
             });
 
@@ -3508,6 +3647,7 @@ mod tests {
             .push(PendingMessage {
                 from: "architect".into(),
                 body: "recent message".into(),
+                message_id: None,
                 queued_at: Instant::now(),
             });
 
@@ -3536,6 +3676,7 @@ mod tests {
             .push(PendingMessage {
                 from: "architect".into(),
                 body: "stale message".into(),
+                message_id: None,
                 queued_at: Instant::now() - Duration::from_secs(120),
             });
 
@@ -3571,11 +3712,13 @@ mod tests {
         queue.push(PendingMessage {
             from: "architect".into(),
             body: "old message".into(),
+            message_id: None,
             queued_at: Instant::now() - Duration::from_secs(120),
         });
         queue.push(PendingMessage {
             from: "manager".into(),
             body: "new message".into(),
+            message_id: None,
             queued_at: Instant::now(),
         });
 
@@ -3612,6 +3755,7 @@ mod tests {
             queue.push(PendingMessage {
                 from: "architect".into(),
                 body: format!("escalation message {i}"),
+                message_id: None,
                 queued_at: Instant::now() - Duration::from_secs(120),
             });
         }
@@ -3620,6 +3764,7 @@ mod tests {
             queue.push(PendingMessage {
                 from: "daemon".into(),
                 body: format!("daemon alert {i}"),
+                message_id: None,
                 queued_at: Instant::now() - Duration::from_secs(120),
             });
         }

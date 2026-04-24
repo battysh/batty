@@ -27,6 +27,7 @@ pub(super) fn is_agent_ready(pane_id: &str) -> bool {
 pub(super) struct PendingMessage {
     pub(super) from: String,
     pub(super) body: String,
+    pub(super) message_id: Option<String>,
     #[allow(dead_code)] // Useful for future queue-age diagnostics.
     pub(super) queued_at: Instant,
 }
@@ -36,16 +37,18 @@ pub(super) struct FailedDelivery {
     pub(super) recipient: String,
     pub(super) from: String,
     pub(super) body: String,
+    pub(super) message_id: String,
     pub(super) attempts: u32,
     pub(super) last_attempt: Instant,
 }
 
 impl FailedDelivery {
-    pub(super) fn new(recipient: &str, from: &str, body: &str) -> Self {
+    pub(super) fn new(recipient: &str, from: &str, body: &str, message_id: String) -> Self {
         Self {
             recipient: recipient.to_string(),
             from: from.to_string(),
             body: body.to_string(),
+            message_id,
             attempts: 1,
             last_attempt: Instant::now(),
         }
@@ -104,7 +107,8 @@ mod tests {
 
     #[test]
     fn failed_delivery_new_sets_expected_fields() {
-        let delivery = FailedDelivery::new("eng-1", "manager", "Please retry this.");
+        let delivery =
+            FailedDelivery::new("eng-1", "manager", "Please retry this.", "msg-1".into());
         assert_eq!(delivery.recipient, "eng-1");
         assert_eq!(delivery.from, "manager");
         assert_eq!(delivery.body, "Please retry this.");
@@ -154,14 +158,14 @@ mod tests {
 
     #[test]
     fn failed_delivery_is_not_ready_for_retry_when_recent() {
-        let delivery = FailedDelivery::new("eng-1", "manager", "test");
+        let delivery = FailedDelivery::new("eng-1", "manager", "test", "msg-1".into());
         // Just created — last_attempt is now, so not ready for retry
         assert!(!delivery.is_ready_for_retry(Instant::now()));
     }
 
     #[test]
     fn failed_delivery_is_ready_for_retry_after_delay() {
-        let mut delivery = FailedDelivery::new("eng-1", "manager", "test");
+        let mut delivery = FailedDelivery::new("eng-1", "manager", "test", "msg-1".into());
         delivery.last_attempt =
             Instant::now() - FAILED_DELIVERY_RETRY_DELAY - Duration::from_secs(1);
         assert!(delivery.is_ready_for_retry(Instant::now()));
@@ -169,7 +173,7 @@ mod tests {
 
     #[test]
     fn failed_delivery_has_attempts_remaining_at_boundary() {
-        let mut delivery = FailedDelivery::new("eng-1", "manager", "test");
+        let mut delivery = FailedDelivery::new("eng-1", "manager", "test", "msg-1".into());
         delivery.attempts = FAILED_DELIVERY_MAX_ATTEMPTS - 1;
         assert!(delivery.has_attempts_remaining());
         delivery.attempts = FAILED_DELIVERY_MAX_ATTEMPTS;
@@ -178,7 +182,7 @@ mod tests {
 
     #[test]
     fn failed_delivery_message_marker_uses_from_field() {
-        let delivery = FailedDelivery::new("eng-1", "architect", "body");
+        let delivery = FailedDelivery::new("eng-1", "architect", "body", "msg-1".into());
         assert_eq!(delivery.message_marker(), "--- Message from architect ---");
     }
 
@@ -212,14 +216,14 @@ mod tests {
 
     #[test]
     fn failed_delivery_not_ready_for_immediate_retry() {
-        let fd = FailedDelivery::new("eng-1", "manager", "test message");
+        let fd = FailedDelivery::new("eng-1", "manager", "test message", "msg-1".into());
         // Just created — not enough time has passed for retry
         assert!(!fd.is_ready_for_retry(Instant::now()));
     }
 
     #[test]
     fn failed_delivery_ready_after_delay() {
-        let mut fd = FailedDelivery::new("eng-1", "manager", "test message");
+        let mut fd = FailedDelivery::new("eng-1", "manager", "test message", "msg-1".into());
         // Simulate past creation
         fd.last_attempt = Instant::now() - FAILED_DELIVERY_RETRY_DELAY - Duration::from_secs(1);
         assert!(fd.is_ready_for_retry(Instant::now()));
@@ -227,7 +231,7 @@ mod tests {
 
     #[test]
     fn failed_delivery_has_attempts_remaining_exhausted() {
-        let mut fd = FailedDelivery::new("eng-1", "manager", "test message");
+        let mut fd = FailedDelivery::new("eng-1", "manager", "test message", "msg-1".into());
         assert!(fd.has_attempts_remaining()); // attempts=1, max=3
         fd.attempts = FAILED_DELIVERY_MAX_ATTEMPTS;
         assert!(!fd.has_attempts_remaining());
@@ -235,14 +239,14 @@ mod tests {
 
     #[test]
     fn failed_delivery_message_marker_format() {
-        let fd = FailedDelivery::new("eng-1", "manager", "test message");
+        let fd = FailedDelivery::new("eng-1", "manager", "test message", "msg-1".into());
         let marker = fd.message_marker();
         assert!(marker.contains("manager"));
     }
 
     #[test]
     fn failed_delivery_fields_preserved() {
-        let fd = FailedDelivery::new("eng-1", "manager", "hello world");
+        let fd = FailedDelivery::new("eng-1", "manager", "hello world", "msg-1".into());
         assert_eq!(fd.recipient, "eng-1");
         assert_eq!(fd.from, "manager");
         assert_eq!(fd.body, "hello world");
