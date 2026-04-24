@@ -1046,6 +1046,8 @@ mod tests {
                 branch_mismatch: None,
                 next_action: None,
                 test_summary: None,
+                latest_artifact: None,
+                failed_test_state: None,
             }],
             review_queue: vec![status::StatusTaskEntry {
                 id: 13,
@@ -1061,6 +1063,8 @@ mod tests {
                 branch_mismatch: None,
                 next_action: None,
                 test_summary: None,
+                latest_artifact: None,
+                failed_test_state: None,
             }],
             optional_subsystems: None,
             engineer_profiles: None,

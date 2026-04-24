@@ -530,11 +530,7 @@ pub fn team_status(project_root: &Path, json: bool, detail: bool, health: bool) 
         let failed_test_tasks = active_tasks
             .iter()
             .chain(review_queue.iter())
-            .filter_map(|task| {
-                task.test_summary
-                    .as_ref()
-                    .map(|summary| format!("#{} {}: {}", task.id, task.title, summary))
-            })
+            .filter_map(status::format_failed_test_task)
             .collect::<Vec<_>>();
         if !failed_test_tasks.is_empty() {
             println!();

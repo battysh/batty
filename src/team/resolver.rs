@@ -41,6 +41,12 @@ struct WorkflowMetadata {
     blocked_on: Option<String>,
     #[serde(default)]
     review_owner: Option<String>,
+    #[serde(default)]
+    tests_passed: Option<bool>,
+    #[serde(default)]
+    outcome: Option<String>,
+    #[serde(default)]
+    artifacts: Vec<String>,
 }
 
 pub fn resolve_board(board_dir: &Path, members: &[MemberInstance]) -> Result<Vec<TaskResolution>> {
@@ -109,25 +115,29 @@ pub fn dispatchable_tasks(board_dir: &Path) -> Result<Vec<Task>> {
 }
 
 pub fn is_dispatchable_task(task: &Task, done: &HashSet<u32>) -> bool {
-    if !matches!(task.status.as_str(), "todo" | "backlog" | "runnable") {
-        return false;
-    }
-    if task.claimed_by.is_some() {
-        return false;
-    }
     let metadata = load_workflow_metadata(task).unwrap_or_default();
+    let retry_required = verification_retry_required(&metadata);
+    if !matches!(task.status.as_str(), "todo" | "backlog" | "runnable") && !retry_required {
+        return false;
+    }
+    if task.claimed_by.is_some() && !retry_required {
+        return false;
+    }
     blocking_reason(task, &metadata, done).is_none()
 }
 
 pub fn dispatch_blocking_reason(task: &Task, tasks: &[Task]) -> Option<String> {
-    if !matches!(task.status.as_str(), "todo" | "backlog" | "runnable") {
+    let metadata = load_workflow_metadata(task).unwrap_or_default();
+    let retry_required = verification_retry_required(&metadata);
+    if !matches!(task.status.as_str(), "todo" | "backlog" | "runnable") && !retry_required {
         return Some(format!("status {} is not dispatchable", task.status));
     }
-    if let Some(owner) = task.claimed_by.as_deref() {
+    if let Some(owner) = task.claimed_by.as_deref()
+        && !retry_required
+    {
         return Some(format!("claimed by {owner}"));
     }
 
-    let metadata = load_workflow_metadata(task).unwrap_or_default();
     if let Some(reason) = task.blocked.as_ref() {
         return Some(reason.clone());
     }
@@ -168,6 +178,12 @@ pub fn dispatch_blocking_reason(task: &Task, tasks: &[Task]) -> Option<String> {
             Some(format!("unmet dependency #{dep_id} ({status})"))
         }
     })
+}
+
+fn verification_retry_required(metadata: &WorkflowMetadata) -> bool {
+    metadata.tests_passed == Some(false)
+        && metadata.outcome.as_deref() == Some("verification_retry_required")
+        && !metadata.artifacts.is_empty()
 }
 
 /// Subset of `dispatchable_tasks` that excludes tasks already committed to a
