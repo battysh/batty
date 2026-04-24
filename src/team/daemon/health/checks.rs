@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde_json::Value;
 use tracing::{info, warn};
 
@@ -76,6 +76,57 @@ fn claude_oauth_healthy(credentials_path: &Path) -> bool {
         .unwrap_or(Duration::ZERO)
         .as_millis() as i64;
     expires_at_ms.saturating_sub(now_ms) > 300_000
+}
+
+#[derive(Debug, Clone)]
+struct WorktreeRepoTarget {
+    label: Option<String>,
+    path: PathBuf,
+}
+
+fn worktree_repo_targets(
+    worktree_path: &Path,
+    is_multi_repo: bool,
+    sub_repo_names: &[String],
+) -> Vec<WorktreeRepoTarget> {
+    if !is_multi_repo {
+        return vec![WorktreeRepoTarget {
+            label: None,
+            path: worktree_path.to_path_buf(),
+        }];
+    }
+
+    sub_repo_names
+        .iter()
+        .filter_map(|name| {
+            let path = worktree_path.join(name);
+            path.is_dir().then(|| WorktreeRepoTarget {
+                label: Some(name.clone()),
+                path,
+            })
+        })
+        .collect()
+}
+
+fn workspace_uncommitted_diff_lines(
+    worktree_path: &Path,
+    is_multi_repo: bool,
+    sub_repo_names: &[String],
+) -> Result<usize> {
+    let mut total = 0usize;
+    for repo in worktree_repo_targets(worktree_path, is_multi_repo, sub_repo_names) {
+        total += super::uncommitted_diff_lines(&repo.path).with_context(|| match &repo.label {
+            Some(label) => format!(
+                "failed to measure uncommitted diff in sub-repo '{label}' under {}",
+                worktree_path.display()
+            ),
+            None => format!(
+                "failed to measure uncommitted diff in {}",
+                worktree_path.display()
+            ),
+        })?;
+    }
+    Ok(total)
 }
 
 impl TeamDaemon {
@@ -178,187 +229,205 @@ impl TeamDaemon {
             if !worktree_path.is_dir() {
                 continue;
             }
-
-            // Check for merge conflicts first — these block all git operations
-            if git_has_unresolved_conflicts(&worktree_path).unwrap_or(false) {
-                let base = format!("eng-main/{}", name);
-                warn!(
-                    member = %name,
-                    "worktree has unresolved merge conflicts; auto-recovering via merge --abort and reset"
-                );
-                match crate::worktree::reset_worktree_to_base_if_clean(
-                    &worktree_path,
-                    &base,
-                    "merge-conflict recovery",
-                ) {
-                    Err(error) => {
-                        warn!(
-                            member = %name,
-                            error = %error,
-                            "failed to reset worktree after merge conflict recovery"
-                        );
-                        self.report_preserve_failure(
-                            name,
-                            self.active_task_id(name),
-                            "merge-conflict recovery",
-                            &error.to_string(),
-                        );
-                    }
-                    Ok(reason) if reason.reset_performed() => {
-                        info!(
-                            member = %name,
-                            reset_reason = reason.as_str(),
-                            "worktree merge conflict auto-recovered; reset to base branch"
-                        );
-                        self.record_orchestrator_action(format!(
-                            "health: auto-recovered {}'s worktree from merge conflict state — reset to {} ({})",
-                            name,
-                            base,
-                            reason.as_str()
-                        ));
-                        // Clear active task since worktree was reset
-                        if self.active_tasks.contains_key(name.as_str()) {
-                            let task_id = self.active_tasks[name.as_str()];
-                            warn!(
-                                member = %name,
-                                task_id,
-                                "clearing active task after merge conflict recovery"
-                            );
-                            self.clear_active_task(name);
-                        }
-                    }
-                    Ok(reason) => {
-                        self.report_preserve_failure(
-                            name,
-                            self.active_task_id(name),
-                            "merge-conflict recovery",
-                            reason.as_str(),
-                        );
-                        self.record_orchestrator_action(format!(
-                            "health: blocked {} merge-conflict recovery because dirty worktree could not be preserved ({})",
-                            name,
-                            reason.as_str()
-                        ));
-                    }
-                }
-                continue;
-            }
-
-            let current_branch = match crate::worktree::git_current_branch(&worktree_path) {
-                Ok(b) => b,
-                Err(error) => {
-                    warn!(
-                        member = %name,
-                        error = %error,
-                        "failed to read worktree branch; skipping staleness check"
-                    );
-                    continue;
-                }
-            };
-
             let base = format!("eng-main/{}", name);
 
-            // Skip if already on base branch or main.
-            if current_branch == base || current_branch == "main" {
-                continue;
-            }
+            for repo in
+                worktree_repo_targets(&worktree_path, self.is_multi_repo, &self.sub_repo_names)
+            {
+                let repo_name = repo.label.as_deref().unwrap_or("root");
+                let repo_path = &repo.path;
 
-            // Skip if engineer has an active task — don't reset mid-work.
-            if self.active_tasks.contains_key(name.as_str()) {
-                continue;
-            }
-
-            // SAFETY: never reset a worktree that has commits ahead of main.
-            // This protects against the race where active_tasks is empty during
-            // stop/start cycles but the engineer has uncommitted or unmerged work.
-            match crate::worktree::commits_ahead(&worktree_path, "main") {
-                Ok(ahead) if ahead > 0 => {
-                    debug!(
+                // Check for merge conflicts first — these block all git operations.
+                if git_has_unresolved_conflicts(repo_path).unwrap_or(false) {
+                    warn!(
                         member = %name,
-                        branch = %current_branch,
-                        ahead,
-                        "worktree has {} commits ahead of main; skipping reset",
-                        ahead
-                    );
-                    continue;
-                }
-                Err(error) => {
-                    debug!(
-                        member = %name,
-                        error = %error,
-                        "failed to count commits ahead; skipping reset to be safe"
-                    );
-                    continue;
-                }
-                _ => {}
-            }
-
-            match crate::worktree::branch_fully_merged(
-                &self.config.project_root,
-                &current_branch,
-                "main",
-            ) {
-                Ok(true) => {
-                    info!(
-                        member = %name,
-                        branch = %current_branch,
-                        "stale branch detected; resetting worktree"
+                        repo = repo_name,
+                        worktree = %repo_path.display(),
+                        "worktree has unresolved merge conflicts; auto-recovering via merge --abort and reset"
                     );
                     match crate::worktree::reset_worktree_to_base_if_clean(
-                        &worktree_path,
+                        repo_path,
                         &base,
-                        "stale-branch recovery",
+                        "merge-conflict recovery",
                     ) {
-                        Ok(reason) if reason.reset_performed() => {
-                            self.record_orchestrator_action(format!(
-                                "runtime: auto-reset {}'s worktree — branch {} already on main ({})",
+                        Err(error) => {
+                            warn!(
+                                member = %name,
+                                repo = repo_name,
+                                error = %error,
+                                "failed to reset worktree after merge conflict recovery"
+                            );
+                            self.report_preserve_failure(
                                 name,
-                                current_branch,
+                                self.active_task_id(name),
+                                "merge-conflict recovery",
+                                &error.to_string(),
+                            );
+                        }
+                        Ok(reason) if reason.reset_performed() => {
+                            info!(
+                                member = %name,
+                                repo = repo_name,
+                                reset_reason = reason.as_str(),
+                                "worktree merge conflict auto-recovered; reset to base branch"
+                            );
+                            self.record_orchestrator_action(format!(
+                                "health: auto-recovered {}'s {} worktree from merge conflict state — reset to {} ({})",
+                                name,
+                                repo_name,
+                                base,
                                 reason.as_str()
                             ));
+                            if self.active_tasks.contains_key(name.as_str()) {
+                                let task_id = self.active_tasks[name.as_str()];
+                                warn!(
+                                    member = %name,
+                                    repo = repo_name,
+                                    task_id,
+                                    "clearing active task after merge conflict recovery"
+                                );
+                                self.clear_active_task(name);
+                            }
                         }
                         Ok(reason) => {
                             self.report_preserve_failure(
                                 name,
                                 self.active_task_id(name),
-                                "stale-branch recovery",
+                                "merge-conflict recovery",
                                 reason.as_str(),
                             );
                             self.record_orchestrator_action(format!(
-                                "blocked recovery: stale-branch recovery for {} blocked ({})",
+                                "health: blocked {} {} merge-conflict recovery because dirty worktree could not be preserved ({})",
                                 name,
+                                repo_name,
                                 reason.as_str()
                             ));
-                            continue;
-                        }
-                        Err(error) => {
-                            warn!(
-                                member = %name,
-                                error = %error,
-                                "failed to auto-reset stale worktree; continuing"
-                            );
-                            self.report_preserve_failure(
-                                name,
-                                self.active_task_id(name),
-                                "stale-branch recovery",
-                                &error.to_string(),
-                            );
-                            self.record_orchestrator_action(format!(
-                                "blocked recovery: stale-branch recovery for {} failed ({})",
-                                name, error
-                            ));
-                            continue;
                         }
                     }
+                    continue;
                 }
-                Ok(false) => { /* branch has unique commits; not stale */ }
-                Err(error) => {
-                    warn!(
-                        member = %name,
-                        branch = %current_branch,
-                        error = %error,
-                        "failed to check worktree staleness; continuing"
-                    );
+
+                let current_branch = match crate::worktree::git_current_branch(repo_path) {
+                    Ok(b) => b,
+                    Err(error) => {
+                        warn!(
+                            member = %name,
+                            repo = repo_name,
+                            worktree = %repo_path.display(),
+                            error = %error,
+                            "failed to read worktree branch; skipping staleness check"
+                        );
+                        continue;
+                    }
+                };
+
+                // Skip if already on base branch or main.
+                if current_branch == base || current_branch == "main" {
+                    continue;
+                }
+
+                // Skip if engineer has an active task — don't reset mid-work.
+                if self.active_tasks.contains_key(name.as_str()) {
+                    continue;
+                }
+
+                // SAFETY: never reset a worktree that has commits ahead of main.
+                // This protects against the race where active_tasks is empty during
+                // stop/start cycles but the engineer has uncommitted or unmerged work.
+                match crate::worktree::commits_ahead(repo_path, "main") {
+                    Ok(ahead) if ahead > 0 => {
+                        debug!(
+                            member = %name,
+                            repo = repo_name,
+                            branch = %current_branch,
+                            ahead,
+                            "worktree has {} commits ahead of main; skipping reset",
+                            ahead
+                        );
+                        continue;
+                    }
+                    Err(error) => {
+                        debug!(
+                            member = %name,
+                            repo = repo_name,
+                            worktree = %repo_path.display(),
+                            error = %error,
+                            "failed to count commits ahead; skipping reset to be safe"
+                        );
+                        continue;
+                    }
+                    _ => {}
+                }
+
+                match crate::worktree::branch_fully_merged(repo_path, &current_branch, "main") {
+                    Ok(true) => {
+                        info!(
+                            member = %name,
+                            repo = repo_name,
+                            branch = %current_branch,
+                            "stale branch detected; resetting worktree"
+                        );
+                        match crate::worktree::reset_worktree_to_base_if_clean(
+                            repo_path,
+                            &base,
+                            "stale-branch recovery",
+                        ) {
+                            Ok(reason) if reason.reset_performed() => {
+                                self.record_orchestrator_action(format!(
+                                    "runtime: auto-reset {}'s {} worktree — branch {} already on main ({})",
+                                    name,
+                                    repo_name,
+                                    current_branch,
+                                    reason.as_str()
+                                ));
+                            }
+                            Ok(reason) => {
+                                self.report_preserve_failure(
+                                    name,
+                                    self.active_task_id(name),
+                                    "stale-branch recovery",
+                                    reason.as_str(),
+                                );
+                                self.record_orchestrator_action(format!(
+                                    "blocked recovery: stale-branch recovery for {} {} blocked ({})",
+                                    name,
+                                    repo_name,
+                                    reason.as_str()
+                                ));
+                                continue;
+                            }
+                            Err(error) => {
+                                warn!(
+                                    member = %name,
+                                    repo = repo_name,
+                                    worktree = %repo_path.display(),
+                                    error = %error,
+                                    "failed to auto-reset stale worktree; continuing"
+                                );
+                                self.report_preserve_failure(
+                                    name,
+                                    self.active_task_id(name),
+                                    "stale-branch recovery",
+                                    &error.to_string(),
+                                );
+                                self.record_orchestrator_action(format!(
+                                    "blocked recovery: stale-branch recovery for {} {} failed ({})",
+                                    name, repo_name, error
+                                ));
+                                continue;
+                            }
+                        }
+                    }
+                    Ok(false) => { /* branch has unique commits; not stale */ }
+                    Err(error) => {
+                        warn!(
+                            member = %name,
+                            repo = repo_name,
+                            branch = %current_branch,
+                            error = %error,
+                            "failed to check worktree staleness; continuing"
+                        );
+                    }
                 }
             }
         }
@@ -490,7 +559,11 @@ impl TeamDaemon {
                 continue;
             }
 
-            let lines = match super::uncommitted_diff_lines(&worktree_path) {
+            let lines = match workspace_uncommitted_diff_lines(
+                &worktree_path,
+                self.is_multi_repo,
+                &self.sub_repo_names,
+            ) {
                 Ok(n) => n,
                 Err(error) => {
                     warn!(engineer = %name, error = %error, "failed to check uncommitted diff");
@@ -1693,6 +1766,54 @@ mod tests {
     }
 
     #[test]
+    fn maybe_warn_uncommitted_work_reads_multi_repo_subrepos() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "multi-uncommitted");
+        let team_config_dir = tmp.path().join(".batty").join("team_config");
+        std::fs::create_dir_all(&team_config_dir).unwrap();
+
+        let engineer = "eng-multi";
+        let base_branch = engineer_base_branch_name(engineer);
+        let worktree_dir = tmp
+            .path()
+            .join(".batty")
+            .join("worktrees")
+            .join(engineer)
+            .join("repo");
+        setup_engineer_worktree(&repo, &worktree_dir, &base_branch, &team_config_dir).unwrap();
+
+        std::fs::write(
+            worktree_dir.join("src").join("lib.rs"),
+            "pub fn smoke() -> bool {\n    false\n}\n",
+        )
+        .unwrap();
+
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![
+                manager_member("manager", None),
+                engineer_member(engineer, Some("manager"), true),
+            ])
+            .build();
+        daemon.is_git_repo = false;
+        daemon.is_multi_repo = true;
+        daemon.sub_repo_names = vec!["repo".to_string()];
+        daemon
+            .config
+            .team_config
+            .workflow_policy
+            .uncommitted_warn_threshold = 1;
+
+        let inbox_root = inbox::inboxes_root(tmp.path());
+        inbox::init_inbox(&inbox_root, engineer).unwrap();
+
+        daemon.maybe_warn_uncommitted_work().unwrap();
+
+        let msgs = inbox::pending_messages(&inbox_root, engineer).unwrap();
+        assert_eq!(msgs.len(), 1);
+        assert!(msgs[0].body.contains("COMMIT REMINDER"));
+    }
+
+    #[test]
     fn uncommitted_warn_threshold_config_default() {
         let policy = WorkflowPolicy::default();
         assert_eq!(policy.uncommitted_warn_threshold, 200);
@@ -1908,6 +2029,46 @@ mod tests {
             .current_dir(&repo)
             .args(["branch", "-D", &base])
             .output();
+    }
+
+    #[test]
+    fn check_worktree_staleness_uses_subrepos_for_multi_repo_workspaces() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "staleness-multi");
+        let engineer = "eng-stale-multi";
+        let base = engineer_base_branch_name(engineer);
+        let worktree_dir = tmp
+            .path()
+            .join(".batty")
+            .join("worktrees")
+            .join(engineer)
+            .join("repo");
+        let team_config_dir = tmp.path().join(".batty").join("team_config");
+        std::fs::create_dir_all(&team_config_dir).unwrap();
+
+        setup_engineer_worktree(&repo, &worktree_dir, &base, &team_config_dir).unwrap();
+
+        let task_branch = format!("{engineer}/task-42");
+        git_ok(&worktree_dir, &["checkout", "-b", &task_branch]);
+        std::fs::write(worktree_dir.join("feature.txt"), "work\n").unwrap();
+        git_ok(&worktree_dir, &["add", "feature.txt"]);
+        git_ok(&worktree_dir, &["commit", "-m", "task work"]);
+        git_ok(&repo, &["merge", &task_branch]);
+
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![engineer_member(engineer, Some("manager"), true)])
+            .build();
+        daemon.is_git_repo = false;
+        daemon.is_multi_repo = true;
+        daemon.sub_repo_names = vec!["repo".to_string()];
+
+        daemon.check_worktree_staleness().unwrap();
+
+        assert_eq!(
+            git_stdout(&worktree_dir, &["rev-parse", "--abbrev-ref", "HEAD"]),
+            base,
+            "multi-repo health check should reset the stale sub-repo branch, not inspect the workspace container root"
+        );
     }
 
     // ── load_prompt tests ──

@@ -1675,7 +1675,9 @@ mod tests {
     use crate::team::standup::MemberState;
     use crate::team::task_loop::setup_engineer_worktree;
     use crate::team::test_helpers::make_test_daemon;
-    use crate::team::test_support::{engineer_member, git_ok, init_git_repo, manager_member};
+    use crate::team::test_support::{
+        engineer_member, git_ok, git_stdout, init_git_repo, manager_member,
+    };
     use std::path::{Path, PathBuf};
 
     fn verification_snapshot_path(
@@ -1721,6 +1723,53 @@ mod tests {
             ),
         )
         .unwrap();
+    }
+
+    #[test]
+    fn multi_repo_completion_diff_finds_changed_files_inside_subrepos() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "multi-completion");
+        let team_config_dir = tmp.path().join(".batty").join("team_config");
+        std::fs::create_dir_all(&team_config_dir).unwrap();
+
+        let engineer = "eng-1";
+        let base_branch = engineer_base_branch_name(engineer);
+        let worktree_root = tmp.path().join(".batty").join("worktrees").join(engineer);
+        let sub_worktree = worktree_root.join("repo");
+        setup_engineer_worktree(&repo, &sub_worktree, &base_branch, &team_config_dir).unwrap();
+
+        git_ok(&sub_worktree, &["checkout", "-b", "eng-1/42"]);
+        std::fs::write(
+            sub_worktree.join("src").join("lib.rs"),
+            "pub fn smoke() -> bool {\n    false\n}\n",
+        )
+        .unwrap();
+        git_ok(&sub_worktree, &["add", "src/lib.rs"]);
+        git_ok(&sub_worktree, &["commit", "-m", "change subrepo file"]);
+
+        let changed =
+            multi_repo_files_changed_from_main(&worktree_root, &["repo".to_string()]).unwrap();
+        let code_changed =
+            multi_repo_code_files_changed_from_main(&worktree_root, &["repo".to_string()]).unwrap();
+        let diff_stat =
+            multi_repo_diff_stat_from_main(&worktree_root, &["repo".to_string()]).unwrap();
+
+        assert!(
+            changed > 0,
+            "expected changed files to be counted from the sub-repo"
+        );
+        assert!(
+            code_changed > 0,
+            "expected code-file counting to include changed files from the sub-repo"
+        );
+        assert!(
+            diff_stat.contains("[repo]"),
+            "diff stat should be labeled by sub-repo, got: {diff_stat}"
+        );
+        assert_eq!(
+            git_stdout(&sub_worktree, &["rev-parse", "--abbrev-ref", "HEAD"]),
+            "eng-1/42"
+        );
     }
 
     fn engineer_worktree_paths(repo: &Path, engineer: &str) -> (PathBuf, PathBuf) {
