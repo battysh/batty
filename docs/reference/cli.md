@@ -1526,6 +1526,9 @@ Options:
       --tag <TAG>
           Override the git tag to create (default: v<Cargo.toml version>)
 
+      --readiness
+          Generate a release readiness artifact without creating a git tag
+
   -v, --verbose...
           Verbosity level (-v, -vv, -vvv)
 

@@ -275,6 +275,9 @@ pub enum Command {
         /// Override the git tag to create (default: v<Cargo.toml version>)
         #[arg(long)]
         tag: Option<String>,
+        /// Generate a release readiness artifact without creating a git tag
+        #[arg(long, default_value_t = false)]
+        readiness: bool,
     },
 
     /// Show pending dispatch queue entries
@@ -2257,7 +2260,10 @@ mod tests {
     fn release_subcommand_parses_defaults() {
         let cli = Cli::parse_from(["batty", "release"]);
         match cli.command {
-            Command::Release { tag } => assert!(tag.is_none()),
+            Command::Release { tag, readiness } => {
+                assert!(tag.is_none());
+                assert!(!readiness);
+            }
             other => panic!("expected release command, got {other:?}"),
         }
     }
@@ -2266,8 +2272,21 @@ mod tests {
     fn release_subcommand_parses_tag_override() {
         let cli = Cli::parse_from(["batty", "release", "--tag", "batty-2026-04-10"]);
         match cli.command {
-            Command::Release { tag } => {
-                assert_eq!(tag.as_deref(), Some("batty-2026-04-10"))
+            Command::Release { tag, readiness } => {
+                assert_eq!(tag.as_deref(), Some("batty-2026-04-10"));
+                assert!(!readiness);
+            }
+            other => panic!("expected release command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn release_subcommand_parses_readiness_flag() {
+        let cli = Cli::parse_from(["batty", "release", "--readiness"]);
+        match cli.command {
+            Command::Release { tag, readiness } => {
+                assert!(tag.is_none());
+                assert!(readiness);
             }
             other => panic!("expected release command, got {other:?}"),
         }

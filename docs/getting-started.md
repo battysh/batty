@@ -239,6 +239,17 @@ target tag already exists. On success it writes release notes into
 `.batty/releases/latest.{json,md}` plus the normal Batty event/telemetry
 surfaces.
 
+To produce a release-readiness artifact without tagging, run:
+
+```sh
+batty release --readiness
+```
+
+The readiness report is written to `.batty/releases/readiness.{json,md}` and
+includes the current commit, proposed tag, recently merged task ids,
+verification evidence, and explicit blockers such as a dirty worktree, missing
+verification summary, or stale daemon binary.
+
 ## 10. Optional: Discord Control Surface (Recommended)
 
 Discord gives you three dedicated channels for monitoring your team from your phone.
