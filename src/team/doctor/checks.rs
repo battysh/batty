@@ -1287,8 +1287,7 @@ roles:
             use_worktrees: true,
         }];
 
-        let statuses =
-            build_worktree_statuses(project_root, WorkspaceType::Generic, &members);
+        let statuses = build_worktree_statuses(project_root, WorkspaceType::Generic, &members);
 
         // One row per sub-repo (not one row for the container with missing status).
         assert_eq!(
