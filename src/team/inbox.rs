@@ -457,7 +457,8 @@ pub fn classify_message(msg: &InboxMessage) -> MessageCategory {
             SupervisoryPressure::ReviewBacklog => return MessageCategory::ReviewRequest,
             SupervisoryPressure::TriageBacklog
             | SupervisoryPressure::IdleActiveRecovery
-            | SupervisoryPressure::DispatchGap => return MessageCategory::Blocker,
+            | SupervisoryPressure::DispatchGap
+            | SupervisoryPressure::PlanningBacklog => return MessageCategory::Blocker,
             SupervisoryPressure::RecoveryUpdate
             | SupervisoryPressure::ResolvedUpdate
             | SupervisoryPressure::StatusUpdate => return MessageCategory::Status,

@@ -1238,7 +1238,9 @@ fn merge_status_signal(
     if let Some(branch_mismatch) = branch_mismatch_signal {
         signals.push(branch_mismatch);
     }
-    if !actionable_backlog_present && let Some(stall) = stall_signal {
+    if let Some(stall) = stall_signal
+        && (!actionable_backlog_present || is_actionable_control_plane_stall(&stall))
+    {
         signals.push(stall);
     }
     if let Some(summary) = supervisory_pressure.status_summary() {
@@ -1252,6 +1254,13 @@ fn merge_status_signal(
     } else {
         Some(signals.join(", "))
     }
+}
+
+fn is_actionable_control_plane_stall(stall_signal: &str) -> bool {
+    stall_signal.contains("stale review backlog")
+        || stall_signal.contains("stale direct-report packets")
+        || stall_signal.contains("stale dispatch gap")
+        || stall_signal.contains("stale planning inbox")
 }
 
 fn supervisory_role_label(role_type: RoleType) -> Option<&'static str> {
@@ -1286,6 +1295,14 @@ fn supervisory_status_token(reason: &str, role_label: Option<&str>) -> String {
         "inbox"
     } else if reason.ends_with("review_waiting") {
         "review"
+    } else if reason.ends_with("review_backlog") {
+        "review"
+    } else if reason.ends_with("direct_report_packets") {
+        "triage"
+    } else if reason.ends_with("dispatch_gap") {
+        "dispatch"
+    } else if reason.ends_with("planning_inbox") {
+        "planning"
     } else if reason.ends_with("shim_activity_only") {
         "shim"
     } else if reason.ends_with("status_only_output") {
@@ -1303,6 +1320,14 @@ fn supervisory_reason_label(reason: &str) -> &'static str {
         "inbox batching"
     } else if reason.ends_with("review_waiting") {
         "review waiting"
+    } else if reason.ends_with("review_backlog") {
+        "stale review backlog"
+    } else if reason.ends_with("direct_report_packets") {
+        "stale direct-report packets"
+    } else if reason.ends_with("dispatch_gap") {
+        "stale dispatch gap"
+    } else if reason.ends_with("planning_inbox") {
+        "stale planning inbox"
     } else if reason.ends_with("shim_activity_only") {
         "shim activity only"
     } else if reason.ends_with("status_only_output") {
@@ -3091,6 +3116,60 @@ mod tests {
         assert_eq!(
             rows[1].signal.as_deref(),
             Some("nudge paused, manager (manager) stalled after 5m: shim activity only")
+        );
+    }
+
+    #[test]
+    fn build_team_status_rows_keeps_actionable_control_plane_stall_with_pressure() {
+        let members = vec![manager("manager")];
+        let runtime_statuses = HashMap::from([(
+            "manager".to_string(),
+            RuntimeMemberStatus {
+                state: "working".to_string(),
+                signal: Some("nudge paused".to_string()),
+                label: Some("working".to_string()),
+            },
+        )]);
+        let supervisory_pressure = HashMap::from([("manager".to_string(), {
+            let mut snapshot = SupervisoryPressureSnapshot::default();
+            snapshot.add_pressure(
+                crate::team::supervisory_notice::SupervisoryPressure::ReviewBacklog,
+                2,
+            );
+            snapshot
+        })]);
+        let agent_health = HashMap::from([(
+            "manager".to_string(),
+            AgentHealthSummary {
+                stall_reason: Some("supervisory_stalled_manager_review_backlog".to_string()),
+                stall_summary: Some(
+                    "manager (manager) stalled after 5m: stale review backlog; next: review and disposition queued work"
+                        .to_string(),
+                ),
+                ..AgentHealthSummary::default()
+            },
+        )]);
+
+        let rows = build_team_status_rows(
+            &members,
+            true,
+            &runtime_statuses,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &supervisory_pressure,
+            &HashMap::new(),
+            &HashMap::new(),
+            &agent_health,
+        );
+
+        assert_eq!(rows[0].state, "working");
+        assert_eq!(rows[0].health_summary, "stall:manager:review");
+        assert_eq!(
+            rows[0].signal.as_deref(),
+            Some(
+                "nudge paused, manager (manager) stalled after 5m: stale review backlog; next: review and disposition queued work, pressure 1: review backlog (2)"
+            )
         );
     }
 

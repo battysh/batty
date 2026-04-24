@@ -179,6 +179,7 @@ fn classify_manager_notice(body: &str) -> ManagerNoticeClass {
             SupervisoryPressure::TriageBacklog => ManagerNoticeClass::Triage,
             SupervisoryPressure::IdleActiveRecovery => ManagerNoticeClass::Utilization,
             SupervisoryPressure::DispatchGap => ManagerNoticeClass::Dispatch,
+            SupervisoryPressure::PlanningBacklog => ManagerNoticeClass::Dispatch,
             SupervisoryPressure::IdleNudge
             | SupervisoryPressure::RecoveryUpdate
             | SupervisoryPressure::ResolvedUpdate => ManagerNoticeClass::Recovery,

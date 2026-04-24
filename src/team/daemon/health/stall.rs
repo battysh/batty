@@ -10,8 +10,8 @@ use tracing::warn;
 use super::super::*;
 use super::{CONTEXT_RESTART_COOLDOWN, format_checkpoint_section};
 use crate::team::supervisory_notice::{
-    SupervisoryMemberActivity, SupervisoryPressure, supervisory_pending_pressure,
-    supervisory_pressure_snapshots,
+    SupervisoryMemberActivity, SupervisoryPressure, classify_supervisory_pressure,
+    supervisory_pending_pressure, supervisory_pressure_snapshots,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,7 +72,7 @@ impl Eq for SupervisoryProgress {}
 impl SupervisoryProgress {
     pub(in super::super) fn stall_reason(&self) -> &'static str {
         match self {
-            Self::Actionable(_) => "supervisory_actionable_progress",
+            Self::Actionable(pressure) => pressure.stall_reason_suffix(),
             Self::Expected("main_git_activity") => "supervisory_main_git_activity",
             Self::Expected("board_state_transition") => "supervisory_board_state_transition",
             Self::Expected("inbox_batching") => "supervisory_inbox_batching",
@@ -102,6 +102,10 @@ impl SupervisoryProgress {
 
     pub(in super::super) fn short_label(&self) -> &'static str {
         match self {
+            Self::Actionable(SupervisoryPressure::ReviewBacklog) => "stale review backlog",
+            Self::Actionable(SupervisoryPressure::TriageBacklog) => "stale direct-report packets",
+            Self::Actionable(SupervisoryPressure::DispatchGap) => "stale dispatch gap",
+            Self::Actionable(SupervisoryPressure::PlanningBacklog) => "stale planning inbox",
             Self::Actionable(pressure) => pressure.short_label(),
             Self::Expected("main_git_activity") => "main merge activity",
             Self::Expected("board_state_transition") => "board state transition",
@@ -125,7 +129,25 @@ impl SupervisoryProgress {
     }
 
     pub(in super::super) fn is_stall_signal(&self) -> bool {
-        matches!(self, Self::Incidental(_) | Self::None)
+        matches!(self, Self::Actionable(_) | Self::Incidental(_) | Self::None)
+    }
+
+    fn next_expected_action(&self) -> Option<&'static str> {
+        match self {
+            Self::Actionable(SupervisoryPressure::ReviewBacklog) => {
+                Some("review and disposition queued work")
+            }
+            Self::Actionable(SupervisoryPressure::TriageBacklog) => {
+                Some("read and route direct-report packets")
+            }
+            Self::Actionable(SupervisoryPressure::DispatchGap) => {
+                Some("assign runnable work or escalate the blocked dispatch")
+            }
+            Self::Actionable(SupervisoryPressure::PlanningBacklog) => {
+                Some("create concrete board tasks or send the dispatch directive")
+            }
+            _ => None,
+        }
     }
 }
 
@@ -155,8 +177,26 @@ impl TeamDaemon {
             .and_then(|member| SupervisoryLane::from_role(member.role_type))
     }
 
-    fn supervisory_expected_progress(&self, member_name: &str) -> Option<SupervisoryProgress> {
+    fn supervisory_expected_progress(
+        &self,
+        member_name: &str,
+        threshold_secs: u64,
+    ) -> Option<SupervisoryProgress> {
         let inbox_root = crate::team::inbox::inboxes_root(&self.config.project_root);
+        if let Some(signal) =
+            self.stale_pending_supervisory_pressure(&inbox_root, member_name, threshold_secs)
+        {
+            return Some(signal);
+        }
+        if let Some(signal) = self.stale_review_backlog_pressure(member_name, threshold_secs) {
+            return Some(signal);
+        }
+        if let Some(signal) =
+            self.stale_delivered_triage_pressure(&inbox_root, member_name, threshold_secs)
+        {
+            return Some(signal);
+        }
+
         let activity = self
             .config
             .members
@@ -188,12 +228,11 @@ impl TeamDaemon {
             .get(member_name)
             .and_then(|snapshot| snapshot.top_actionable())
         {
-            // ReviewBacklog and TriageBacklog are expected supervisory work — the
+            // Fresh ReviewBacklog and TriageBacklog are expected supervisory work — the
             // manager is actively waiting on reviews or processing direct-report
-            // packets. They should suppress stall detection without triggering the
-            // fallback-dispatch path.
+            // packets. Stale instances are returned above as Actionable pressure.
             //
-            // DispatchGap and IdleActiveRecovery are NOT returned here; they fall
+            // IdleActiveRecovery is NOT returned here; it falls
             // through to the shim/watcher activity check so that shim-chatter-only
             // managers are still detected as stalled and the dispatch-gap
             // intervention can fire.
@@ -202,6 +241,12 @@ impl TeamDaemon {
                     return Some(SupervisoryProgress::Expected("review_waiting"));
                 }
                 SupervisoryPressure::TriageBacklog => {
+                    return Some(SupervisoryProgress::Expected("inbox_batching"));
+                }
+                SupervisoryPressure::DispatchGap => {
+                    return Some(SupervisoryProgress::Actionable(pressure));
+                }
+                SupervisoryPressure::PlanningBacklog => {
                     return Some(SupervisoryProgress::Expected("inbox_batching"));
                 }
                 _ => {}
@@ -222,6 +267,90 @@ impl TeamDaemon {
         }
 
         None
+    }
+
+    fn stale_pending_supervisory_pressure(
+        &self,
+        inbox_root: &Path,
+        member_name: &str,
+        threshold_secs: u64,
+    ) -> Option<SupervisoryProgress> {
+        let lane = self.supervisory_lane(member_name)?;
+        let now = super::super::super::now_unix();
+        crate::team::inbox_tiered::pending_messages_union(inbox_root, member_name)
+            .ok()?
+            .into_iter()
+            .filter(|message| now.saturating_sub(message.timestamp) >= threshold_secs)
+            .filter_map(|message| {
+                supervisory_pending_message_pressure(
+                    lane,
+                    message.from.as_str(),
+                    message.body.as_str(),
+                )
+            })
+            .min_by_key(|pressure| pressure.priority())
+            .map(SupervisoryProgress::Actionable)
+    }
+
+    fn stale_delivered_triage_pressure(
+        &self,
+        inbox_root: &Path,
+        member_name: &str,
+        threshold_secs: u64,
+    ) -> Option<SupervisoryProgress> {
+        let direct_reports =
+            super::super::super::status::direct_reports_by_member(&self.config.members);
+        let reports = direct_reports.get(member_name)?;
+        if reports.is_empty() {
+            return None;
+        }
+
+        let now = super::super::super::now_unix();
+        let has_stale_triage = crate::team::inbox::all_messages(inbox_root, member_name)
+            .ok()?
+            .into_iter()
+            .any(|(message, delivered)| {
+                delivered
+                    && reports.iter().any(|report| report == &message.from)
+                    && now.saturating_sub(message.timestamp) >= threshold_secs
+            });
+        has_stale_triage.then_some(SupervisoryProgress::Actionable(
+            SupervisoryPressure::TriageBacklog,
+        ))
+    }
+
+    fn stale_review_backlog_pressure(
+        &self,
+        member_name: &str,
+        threshold_secs: u64,
+    ) -> Option<SupervisoryProgress> {
+        let tasks_dir = self
+            .config
+            .project_root
+            .join(".batty")
+            .join("team_config")
+            .join("board")
+            .join("tasks");
+        let tasks = crate::task::load_tasks_from_dir(&tasks_dir).ok()?;
+        let has_stale_review = tasks.iter().any(|task| {
+            supervisory_review_backlog_owner_for_task(task, &self.config.members).as_deref()
+                == Some(member_name)
+                && task.status == "review"
+                && task_frontmatter_age_secs(task).is_some_and(|age| {
+                    age >= threshold_secs
+                        && matches!(
+                            crate::team::review::classify_review_task(
+                                &self.config.project_root,
+                                task,
+                                &tasks,
+                            ),
+                            crate::team::review::ReviewQueueState::Current
+                        )
+                })
+        });
+        has_stale_review.then_some(SupervisoryProgress::Actionable(
+            SupervisoryPressure::ReviewBacklog,
+        ))
     }
 
     fn recent_supervisory_event_signal(
@@ -349,11 +478,15 @@ impl TeamDaemon {
             .supervisory_lane(member_name)
             .map(|lane| lane.label())
             .unwrap_or("supervisory");
-        format!(
+        let mut summary = format!(
             "{member_name} ({lane}) stalled after {}: {}",
             crate::team::status::format_health_duration(stall_secs),
             signal.short_label(),
-        )
+        );
+        if let Some(next_action) = signal.next_expected_action() {
+            summary.push_str(&format!("; next: {next_action}"));
+        }
+        summary
     }
 
     pub(in super::super) fn supervisory_progress_signal(
@@ -368,10 +501,6 @@ impl TeamDaemon {
             return SupervisoryProgress::None;
         }
 
-        if let Some(signal) = self.supervisory_expected_progress(member_name) {
-            return signal;
-        }
-
         if let Some(signal) = self.recent_supervisory_event_signal(member_name, threshold_secs) {
             return signal;
         }
@@ -379,6 +508,10 @@ impl TeamDaemon {
         if let Some(signal) =
             self.recent_supervisory_side_effect_signal(member_name, threshold_secs)
         {
+            return signal;
+        }
+
+        if let Some(signal) = self.supervisory_expected_progress(member_name, threshold_secs) {
             return signal;
         }
 
@@ -644,6 +777,74 @@ impl TeamDaemon {
             .count() as u32;
         Ok(count)
     }
+}
+
+fn supervisory_pending_message_pressure(
+    lane: SupervisoryLane,
+    _from: &str,
+    body: &str,
+) -> Option<SupervisoryPressure> {
+    if let Some(pressure) = classify_supervisory_pressure(body) {
+        return match pressure {
+            SupervisoryPressure::ReviewBacklog
+            | SupervisoryPressure::TriageBacklog
+            | SupervisoryPressure::IdleActiveRecovery
+            | SupervisoryPressure::DispatchGap
+            | SupervisoryPressure::PlanningBacklog => Some(pressure),
+            SupervisoryPressure::ReviewNudge
+            | SupervisoryPressure::IdleNudge
+            | SupervisoryPressure::RecoveryUpdate
+            | SupervisoryPressure::ResolvedUpdate
+            | SupervisoryPressure::StatusUpdate => None,
+        };
+    }
+
+    match lane {
+        SupervisoryLane::Architect => Some(SupervisoryPressure::PlanningBacklog),
+        SupervisoryLane::Manager => Some(SupervisoryPressure::TriageBacklog),
+    }
+}
+
+fn supervisory_review_backlog_owner_for_task(
+    task: &crate::task::Task,
+    members: &[crate::team::hierarchy::MemberInstance],
+) -> Option<String> {
+    if task.status != "review" {
+        return None;
+    }
+    let claimed_by = task.claimed_by.as_deref()?;
+    Some(
+        members
+            .iter()
+            .find(|member| member.name == claimed_by)
+            .and_then(|member| member.reports_to.clone())
+            .unwrap_or_else(|| claimed_by.to_string()),
+    )
+}
+
+fn task_frontmatter_age_secs(task: &crate::task::Task) -> Option<u64> {
+    let content = std::fs::read_to_string(&task.source_path).ok()?;
+    let frontmatter = split_task_frontmatter_for_stall(&content)?;
+    let mapping: serde_yaml::Mapping = serde_yaml::from_str(frontmatter).ok()?;
+    let timestamp = task_timestamp_field(&mapping, "updated")
+        .or_else(|| task_timestamp_field(&mapping, "started"))
+        .or_else(|| task_timestamp_field(&mapping, "created"))?;
+    let parsed = crate::task::parse_frontmatter_timestamp_compat(&timestamp)?;
+    let now = Utc::now();
+    Some(now.signed_duration_since(parsed).num_seconds().max(0) as u64)
+}
+
+fn task_timestamp_field(mapping: &serde_yaml::Mapping, key: &str) -> Option<String> {
+    mapping
+        .get(serde_yaml::Value::String(key.to_string()))
+        .and_then(serde_yaml::Value::as_str)
+        .map(str::to_string)
+}
+
+fn split_task_frontmatter_for_stall(content: &str) -> Option<&str> {
+    let rest = content.strip_prefix("---\n")?;
+    let end = rest.find("\n---")?;
+    Some(&rest[..end])
 }
 
 fn resolve_git_dir(project_root: &Path) -> Option<PathBuf> {

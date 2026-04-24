@@ -820,6 +820,159 @@ fn supervisory_manager_shim_chatter_still_trips_dispatch_gap() {
 }
 
 #[test]
+fn stalled_manager_dispatch_gap_records_actionable_control_plane_signal() {
+    let harness = intervention_team_harness()
+        .with_member_state("lead", MemberState::Working)
+        .with_member_state("eng-1", MemberState::Idle)
+        .with_member_state("eng-2", MemberState::Idle)
+        .with_pane("lead", "%999997")
+        .with_board_task(192, "open-task", "todo", None);
+    let mut daemon = harness.build_daemon().unwrap();
+    let threshold = daemon
+        .config
+        .team_config
+        .workflow_policy
+        .stall_threshold_secs;
+    insert_working_shim_handle(&mut daemon, "lead", threshold + 10, threshold + 10);
+
+    let signal = daemon.supervisory_progress_signal("lead", threshold);
+    assert_eq!(signal.short_label(), "stale dispatch gap");
+    assert!(daemon.is_supervisory_lane_stalled("lead", threshold));
+    daemon.record_supervisory_stall_reason("lead", threshold, signal);
+
+    let events =
+        crate::team::events::read_events(&crate::team::team_events_path(harness.project_root()))
+            .unwrap();
+    let event = events
+        .iter()
+        .find(|event| event.event == "stall_detected" && event.role.as_deref() == Some("lead"))
+        .expect("expected manager dispatch gap stall event");
+    assert_eq!(
+        event.reason.as_deref(),
+        Some("supervisory_stalled_manager_dispatch_gap")
+    );
+    assert!(event.details.as_deref().is_some_and(|details| {
+        details.contains("stale dispatch gap; next: assign runnable work")
+    }));
+}
+
+#[test]
+fn stalled_manager_review_backlog_records_actionable_control_plane_signal() {
+    let harness = intervention_team_harness()
+        .with_member_state("lead", MemberState::Working)
+        .with_member_state("eng-1", MemberState::Idle)
+        .with_pane("lead", "%999997");
+    let review_path = harness.board_tasks_dir().join("191-review-task.md");
+    fs::create_dir_all(harness.board_tasks_dir()).unwrap();
+    fs::write(
+        &review_path,
+        "---\nid: 191\ntitle: review-task\nstatus: review\npriority: high\nclaimed_by: eng-1\nupdated: 2000-01-01T00:00:00Z\nclass: standard\n---\n\nTask description.\n",
+    )
+    .unwrap();
+    let mut daemon = harness.build_daemon().unwrap();
+    let threshold = daemon
+        .config
+        .team_config
+        .workflow_policy
+        .stall_threshold_secs;
+    insert_working_shim_handle(&mut daemon, "lead", threshold + 10, threshold + 10);
+
+    let signal = daemon.supervisory_progress_signal("lead", threshold);
+    assert_eq!(signal.short_label(), "stale review backlog");
+    assert!(daemon.is_supervisory_lane_stalled("lead", threshold));
+    daemon.record_supervisory_stall_reason("lead", threshold, signal);
+
+    let events =
+        crate::team::events::read_events(&crate::team::team_events_path(harness.project_root()))
+            .unwrap();
+    let event = events
+        .iter()
+        .find(|event| event.event == "stall_detected" && event.role.as_deref() == Some("lead"))
+        .expect("expected manager review backlog stall event");
+    assert_eq!(
+        event.reason.as_deref(),
+        Some("supervisory_stalled_manager_review_backlog")
+    );
+    assert!(event.details.as_deref().is_some_and(|details| {
+        details.contains("stale review backlog; next: review and disposition queued work")
+    }));
+}
+
+#[test]
+fn stalled_architect_planning_inbox_records_actionable_control_plane_signal() {
+    let harness = intervention_team_harness()
+        .with_member_state("architect", MemberState::Working)
+        .with_pane("architect", "%999996");
+    let mut daemon = harness.build_daemon().unwrap();
+    let threshold = daemon
+        .config
+        .team_config
+        .workflow_policy
+        .stall_threshold_secs;
+    insert_working_shim_handle(&mut daemon, "architect", threshold + 10, threshold + 10);
+
+    let root = harness.inbox_root();
+    inbox::init_inbox(&root, "architect").unwrap();
+    let mut message = InboxMessage::new_send(
+        "daemon",
+        "architect",
+        "Board needs replenishment: 2 idle engineers, 0 todo tasks. Create tasks from planning/roadmap.md.",
+    );
+    message.timestamp = crate::team::now_unix().saturating_sub(threshold + 10);
+    inbox::deliver_to_inbox(&root, &message).unwrap();
+
+    let signal = daemon.supervisory_progress_signal("architect", threshold);
+    assert_eq!(signal.short_label(), "stale planning inbox");
+    assert!(daemon.is_supervisory_lane_stalled("architect", threshold));
+    daemon.record_supervisory_stall_reason("architect", threshold, signal);
+
+    let events =
+        crate::team::events::read_events(&crate::team::team_events_path(harness.project_root()))
+            .unwrap();
+    let event = events
+        .iter()
+        .find(|event| event.event == "stall_detected" && event.role.as_deref() == Some("architect"))
+        .expect("expected architect planning inbox stall event");
+    assert_eq!(
+        event.reason.as_deref(),
+        Some("supervisory_stalled_architect_planning_inbox")
+    );
+    assert!(event.details.as_deref().is_some_and(|details| {
+        details.contains("stale planning inbox; next: create concrete board tasks")
+    }));
+}
+
+#[test]
+fn fresh_architect_planning_inbox_is_not_control_plane_stall() {
+    let harness = intervention_team_harness()
+        .with_member_state("architect", MemberState::Working)
+        .with_pane("architect", "%999996");
+    let mut daemon = harness.build_daemon().unwrap();
+    let threshold = daemon
+        .config
+        .team_config
+        .workflow_policy
+        .stall_threshold_secs;
+    insert_working_shim_handle(&mut daemon, "architect", threshold + 10, threshold + 10);
+
+    let root = harness.inbox_root();
+    inbox::init_inbox(&root, "architect").unwrap();
+    inbox::deliver_to_inbox(
+        &root,
+        &InboxMessage::new_send(
+            "daemon",
+            "architect",
+            "Board needs replenishment: 2 idle engineers, 0 todo tasks. Create tasks from planning/roadmap.md.",
+        ),
+    )
+    .unwrap();
+
+    let signal = daemon.supervisory_progress_signal("architect", threshold);
+    assert_eq!(signal.short_label(), "inbox batching");
+    assert!(!daemon.is_supervisory_lane_stalled("architect", threshold));
+}
+
+#[test]
 fn healthy_manager_dispatch_gap_does_not_fallback_dispatch() {
     let harness = intervention_team_harness()
         .with_member_state("lead", MemberState::Idle)

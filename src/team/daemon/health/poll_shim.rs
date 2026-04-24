@@ -1592,15 +1592,23 @@ impl TeamDaemon {
         let summary = self.supervisory_stall_summary(name).unwrap_or_else(|| {
             format!("{name} stayed in Working for {stall_secs}s (reason={reason})")
         });
+        let signal = self.supervisory_progress_signal(
+            name,
+            self.config.team_config.shim_working_state_timeout_secs,
+        );
+        let event_reason = self
+            .supervisory_lane(name)
+            .map(|lane| signal.stall_reason_for_lane(lane))
+            .unwrap_or_else(|| reason.to_string());
         let supervisory_task = format!("supervisory::{name}");
 
-        tracing::warn!(member = name, reason, summary = %summary, "supervisory stall detected");
+        tracing::warn!(member = name, reason = %event_reason, summary = %summary, "supervisory stall detected");
 
         let mut event = crate::team::events::TeamEvent::stall_detected_with_reason(
             name,
             None,
             stall_secs,
-            Some(reason),
+            Some(&event_reason),
         );
         event.task = Some(supervisory_task.clone());
         event.details = Some(summary.clone());
@@ -1633,7 +1641,7 @@ impl TeamDaemon {
                 return Ok(());
             }
 
-            self.handle_shim_cold_respawn(name, reason)?;
+            self.handle_shim_cold_respawn(name, &event_reason)?;
             self.intervention_cooldowns
                 .insert(escalation_key, std::time::Instant::now());
 
@@ -1654,7 +1662,7 @@ impl TeamDaemon {
                 );
             }
 
-            self.record_task_escalated(name, supervisory_task.clone(), Some(reason));
+            self.record_task_escalated(name, supervisory_task.clone(), Some(&event_reason));
             self.record_agent_restarted(
                 name,
                 supervisory_task,
@@ -1664,10 +1672,10 @@ impl TeamDaemon {
             return Ok(());
         }
 
-        self.handle_shim_cold_respawn(name, reason)?;
+        self.handle_shim_cold_respawn(name, &event_reason)?;
         self.intervention_cooldowns
             .insert(format!("stall-restart::{name}"), std::time::Instant::now());
-        self.record_agent_restarted(name, supervisory_task, reason, restart_count);
+        self.record_agent_restarted(name, supervisory_task, &event_reason, restart_count);
         Ok(())
     }
 
@@ -1684,7 +1692,13 @@ impl TeamDaemon {
             .filter(|event| event.event == "agent_restarted")
             .filter(|event| event.role.as_deref() == Some(name))
             .filter(|event| event.task.as_deref() == Some(supervisory_task.as_str()))
-            .filter(|event| event.reason.as_deref() == Some(SUPERVISORY_STALLED_REASON))
+            .filter(|event| {
+                event.reason.as_deref() == Some(SUPERVISORY_STALLED_REASON)
+                    || event
+                        .reason
+                        .as_deref()
+                        .is_some_and(|reason| reason.starts_with("supervisory_stalled_"))
+            })
             .count() as u32;
         Ok(count)
     }
@@ -2614,12 +2628,16 @@ mod tests {
             assert!(events.iter().any(|event| {
                 event.event == "stall_detected"
                     && event.role.as_deref() == Some(member_name)
-                    && event.reason.as_deref() == Some("supervisory_stalled")
+                    && event.reason.as_deref().is_some_and(|reason| {
+                        reason.starts_with(&format!("supervisory_stalled_{member_name}_"))
+                    })
             }));
             assert!(events.iter().any(|event| {
                 event.event == "agent_restarted"
                     && event.role.as_deref() == Some(member_name)
-                    && event.reason.as_deref() == Some("supervisory_stalled")
+                    && event.reason.as_deref().is_some_and(|reason| {
+                        reason.starts_with(&format!("supervisory_stalled_{member_name}_"))
+                    })
             }));
         }
     }
@@ -2803,7 +2821,10 @@ mod tests {
         assert!(events.iter().any(|event| {
             event.event == "task_escalated"
                 && event.role.as_deref() == Some("manager")
-                && event.reason.as_deref() == Some("supervisory_stalled")
+                && event
+                    .reason
+                    .as_deref()
+                    .is_some_and(|reason| reason.starts_with("supervisory_stalled_manager_"))
         }));
         assert!(events.iter().any(|event| {
             event.event == "agent_restarted"
