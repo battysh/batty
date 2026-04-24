@@ -87,10 +87,9 @@ impl TeamDaemon {
             // escalates (`escalation_sent = true`), the architect signal becomes
             // load-bearing again, so we only suppress the pre-escalation window.
             .filter(|name| {
-                !self
-                    .owned_task_interventions
+                self.owned_task_interventions
                     .get(name.as_str())
-                    .is_some_and(|state| !state.escalation_sent)
+                    .is_none_or(|state| state.escalation_sent)
             })
             .filter_map(|name| {
                 let task_ids: Vec<u32> = tasks
