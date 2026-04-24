@@ -55,6 +55,7 @@ pub use daemon_mgmt::*;
 mod session;
 pub use session::*;
 pub mod autoresearch;
+pub(crate) mod mcp;
 pub mod merge;
 pub mod message;
 pub mod metrics;

@@ -224,6 +224,15 @@ fatal: Not a valid object name eng-main/<eng>
 
 **Fix direction:** Either namespace MCP servers per engineer (port / socket / DDB prefix), or serialize access to shared resources via the daemon.
 
+**Status 2026-04-24:** Fixed in Task #694. Batty now exports per-member MCP
+namespace variables into launched agents and shim subprocesses:
+`BATTY_MCP_NAMESPACE`, `BATTY_MCP_RESOURCE_DIR`, `BATTY_MCP_PORT_BASE`, and
+`BATTY_MCP_SHARED_LOCK`. MCP configs can use the namespace/resource/port values
+for per-engineer isolation, while non-namespaceable servers can wrap startup
+with the shared lock path. `docs/reference/environment-variables.md` lists the
+unsafe resource categories and `docs/troubleshooting.md` includes a two-engineer
+collision-avoidance runbook.
+
 ---
 
 ## P2-5 — `kanban-md` default path mismatch

@@ -107,6 +107,7 @@ pub(in crate::team) fn spawn_shim(
     member_name: &str,
     agent_type: &str,
     agent_cmd: &str,
+    project_root: &Path,
     work_dir: &Path,
     pty_log_path: Option<&Path>,
     graceful_shutdown_timeout_secs: u64,
@@ -162,6 +163,15 @@ pub(in crate::team) fn spawn_shim(
 
     // Set BATTY_MEMBER so detect_sender() works in SDK mode subprocesses
     cmd.env("BATTY_MEMBER", member_name);
+    let mcp_isolation = crate::team::mcp::McpIsolation::for_member(project_root, member_name);
+    if let Err(error) = mcp_isolation.create_dirs() {
+        warn!(
+            member = member_name,
+            error = %error,
+            "failed to create MCP namespace directories before shim spawn"
+        );
+    }
+    mcp_isolation.apply_to_command(&mut cmd);
     cmd.env(
         "BATTY_GRACEFUL_SHUTDOWN_TIMEOUT_SECS",
         graceful_shutdown_timeout_secs.to_string(),

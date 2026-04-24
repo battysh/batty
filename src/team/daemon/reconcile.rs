@@ -135,6 +135,7 @@ impl TeamDaemon {
                 &member.name,
                 agent_name,
                 &agent_cmd,
+                &self.config.project_root,
                 &work_dir,
                 Some(&pty_log_path),
                 self.config

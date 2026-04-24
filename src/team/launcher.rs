@@ -400,6 +400,7 @@ impl TeamDaemon {
                         &member.name,
                         &agent_type,
                         &plan.short_cmd,
+                        &self.config.project_root,
                         &plan.work_dir,
                         Some(&log_path),
                         self.config
@@ -704,9 +705,12 @@ pub(super) fn write_launch_script(
     set_executable(&batty_wrapper);
 
     let auth_prelude = claude_auth_prelude(agent_name, claude_auth);
+    let mcp_isolation = crate::team::mcp::McpIsolation::for_member(project_root, member_name);
+    let _ = mcp_isolation.create_dirs();
+    let mcp_prelude = mcp_isolation.shell_exports();
 
     let script = format!(
-        "#!/bin/bash\n{auth_prelude}export PATH='{}':\"$PATH\"\nexport BATTY_MEMBER='{member_name}'\ncd '{launch_dir_str}'\n{agent_cmd}\n",
+        "#!/bin/bash\n{auth_prelude}{mcp_prelude}export PATH='{}':\"$PATH\"\nexport BATTY_MEMBER='{member_name}'\ncd '{launch_dir_str}'\n{agent_cmd}\n",
         wrapper_dir.to_string_lossy(),
     );
     std::fs::write(&script_path, &script)
@@ -1318,6 +1322,63 @@ mod tests {
             content.contains("exec sleep"),
             "SDK mode codex needs a sentinel sleep process"
         );
+    }
+
+    #[test]
+    fn launch_scripts_namespace_mcp_resources_per_member() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path();
+        let work_dir = project.join("wt");
+        std::fs::create_dir_all(&work_dir).unwrap();
+
+        write_launch_script(
+            "eng-1-1",
+            "claude",
+            &default_claude_auth(),
+            "role prompt",
+            None,
+            &work_dir,
+            project,
+            true,
+            false,
+            None,
+            false,
+        )
+        .unwrap();
+        write_launch_script(
+            "eng-1-2",
+            "claude",
+            &default_claude_auth(),
+            "role prompt",
+            None,
+            &work_dir,
+            project,
+            true,
+            false,
+            None,
+            false,
+        )
+        .unwrap();
+
+        let slug = project.file_name().unwrap().to_string_lossy();
+        let script_1 = std::fs::read_to_string(
+            std::env::temp_dir().join(format!("batty-launch-{slug}-eng-1-1.sh")),
+        )
+        .unwrap();
+        let script_2 = std::fs::read_to_string(
+            std::env::temp_dir().join(format!("batty-launch-{slug}-eng-1-2.sh")),
+        )
+        .unwrap();
+
+        assert!(script_1.contains("export BATTY_MCP_NAMESPACE="));
+        assert!(script_1.contains(".batty/mcp/namespaces/eng-1-1"));
+        assert!(script_2.contains(".batty/mcp/namespaces/eng-1-2"));
+        assert!(!script_1.contains(".batty/mcp/namespaces/eng-1-2"));
+        assert!(script_1.contains("export BATTY_MCP_SHARED_LOCK="));
+        assert!(script_2.contains("export BATTY_MCP_SHARED_LOCK="));
+        assert!(project.join(".batty/mcp/namespaces/eng-1-1").is_dir());
+        assert!(project.join(".batty/mcp/namespaces/eng-1-2").is_dir());
+        assert!(project.join(".batty/mcp/shared-locks").is_dir());
     }
 
     #[test]
