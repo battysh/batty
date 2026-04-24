@@ -1203,7 +1203,7 @@ mod tests {
             .expect("stale event");
         let details = stale.details.as_deref().unwrap_or_default();
         assert!(details.contains("dirty=true"));
-        assert!(details.contains("auto-rebuild refused"));
+        assert!(details.contains("auto-restart refused"));
     }
 
     #[test]
