@@ -885,8 +885,7 @@ fn effective_context_limit_tokens(model: Option<&str>, used_tokens: u64) -> u64 
     // for a 1M agent at ~20% real usage. Each firing increments the
     // context_pressure_tracker's pressure_score, cycling on/off and
     // eventually escalating to Nudge and Restart against a healthy agent.
-    static BUMP_LATCHED: std::sync::atomic::AtomicBool =
-        std::sync::atomic::AtomicBool::new(false);
+    static BUMP_LATCHED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     let bumped = 1_000_000;
     if BUMP_LATCHED.load(std::sync::atomic::Ordering::Relaxed) {
         return bumped;

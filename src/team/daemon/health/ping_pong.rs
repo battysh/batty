@@ -41,11 +41,8 @@ impl TeamDaemon {
                     if secs_since_pong > timeout_secs {
                         let recently_active = handle
                             .secs_since_last_activity()
-                            .is_some_and(|secs_since_activity| {
-                                secs_since_activity <= timeout_secs
-                            });
-                        let working =
-                            handle.state == crate::shim::protocol::ShimState::Working;
+                            .is_some_and(|secs_since_activity| secs_since_activity <= timeout_secs);
+                        let working = handle.state == crate::shim::protocol::ShimState::Working;
                         Some((secs_since_pong, working && recently_active))
                     } else {
                         None
@@ -64,9 +61,7 @@ impl TeamDaemon {
                 } else {
                     warn!(
                         member = name.as_str(),
-                        secs_since_pong,
-                        timeout_secs,
-                        "shim handle stale — no Pong within timeout"
+                        secs_since_pong, timeout_secs, "shim handle stale — no Pong within timeout"
                     );
                     self.record_orchestrator_action(format!(
                         "health: shim {} stale (no Pong for {}s, timeout={}s)",

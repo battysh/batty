@@ -840,13 +840,9 @@ impl TeamDaemon {
                         if {
                             let claim = task.claimed_by.as_deref();
                             let resolved = claim.and_then(|c| {
-                                super::health::resolve_engineer_claim(
-                                    &self.config.members,
-                                    c,
-                                )
+                                super::health::resolve_engineer_claim(&self.config.members, c)
                             });
-                            claim != Some(engineer.as_str())
-                                && resolved != Some(engineer.as_str())
+                            claim != Some(engineer.as_str()) && resolved != Some(engineer.as_str())
                         } =>
                     {
                         Some((

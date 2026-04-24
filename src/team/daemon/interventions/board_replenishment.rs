@@ -46,13 +46,10 @@ impl TeamDaemon {
         let inbox_root = inbox::inboxes_root(&self.config.project_root);
         let tasks = crate::task::load_tasks_from_dir(&board_dir.join("tasks"))?;
         let dispatchable_task_ids: std::collections::HashSet<u32> =
-            crate::team::resolver::engineer_dispatchable_tasks(
-                &board_dir,
-                &self.config.members,
-            )?
-            .into_iter()
-            .map(|task| task.id)
-            .collect();
+            crate::team::resolver::engineer_dispatchable_tasks(&board_dir, &self.config.members)?
+                .into_iter()
+                .map(|task| task.id)
+                .collect();
         let replenishment_targets: Vec<MemberInstance> = self
             .config
             .members
