@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -50,6 +50,25 @@ pub(crate) struct GithubFeedbackSnapshot {
     pub(crate) failed: HashMap<u32, GithubVerificationRecord>,
     pub(crate) passed: HashMap<u32, GithubVerificationRecord>,
     pub(crate) warnings: Vec<GithubFeedbackWarning>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GithubReleaseFeedbackSummary {
+    pub current_commit: Option<String>,
+    pub clean: bool,
+    pub failing: Vec<GithubReleaseFeedbackItem>,
+    pub warnings: Vec<GithubReleaseFeedbackItem>,
+    pub stale: Vec<GithubReleaseFeedbackItem>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GithubReleaseFeedbackItem {
+    pub check_name: String,
+    pub status: String,
+    pub commit: Option<String>,
+    pub age_secs: Option<u64>,
+    pub next_action: Option<String>,
+    pub details: Option<String>,
 }
 
 pub(crate) fn github_feedback_path(project_root: &Path) -> PathBuf {
@@ -191,6 +210,63 @@ pub(crate) fn summarize_github_feedback_records(
     snapshot
 }
 
+pub(crate) fn summarize_release_github_feedback(
+    project_root: &Path,
+    current_commit: Option<&str>,
+) -> Result<GithubReleaseFeedbackSummary> {
+    let records = load_github_feedback(project_root)?;
+    Ok(summarize_release_github_feedback_records(
+        &records,
+        current_commit,
+        chrono::Utc::now().timestamp().max(0) as u64,
+    ))
+}
+
+pub(crate) fn summarize_release_github_feedback_records(
+    records: &[GithubVerificationRecord],
+    current_commit: Option<&str>,
+    now_secs: u64,
+) -> GithubReleaseFeedbackSummary {
+    let mut latest_current = BTreeMap::<String, GithubReleaseFeedbackItem>::new();
+    let mut stale = Vec::new();
+
+    for record in records {
+        let item = release_feedback_item(record, now_secs);
+        if let (Some(record_commit), Some(current_commit)) =
+            (record.commit.as_deref(), current_commit)
+            && !git_ref_matches(record_commit, current_commit)
+        {
+            stale.push(item);
+            continue;
+        }
+        latest_current.insert(record.check_name.clone(), item);
+    }
+
+    stale.sort_by(|left, right| {
+        left.check_name
+            .cmp(&right.check_name)
+            .then_with(|| left.commit.cmp(&right.commit))
+    });
+
+    let mut failing = Vec::new();
+    let mut warnings = Vec::new();
+    for item in latest_current.into_values() {
+        if GithubVerificationRecord::status_is_failure(&item.status) {
+            failing.push(item);
+        } else if GithubVerificationRecord::status_is_warning(&item.status) {
+            warnings.push(item);
+        }
+    }
+
+    GithubReleaseFeedbackSummary {
+        current_commit: current_commit.map(str::to_string),
+        clean: failing.is_empty() && warnings.is_empty(),
+        failing,
+        warnings,
+        stale,
+    }
+}
+
 pub(crate) fn active_github_blockers_for_tasks(
     project_root: &Path,
     tasks: &[&Task],
@@ -207,18 +283,33 @@ pub(crate) fn active_github_blockers_for_tasks(
 }
 
 impl GithubVerificationRecord {
-    pub(crate) fn is_failure(&self) -> bool {
+    fn status_is_failure(status: &str) -> bool {
         matches!(
-            normalize_status(&self.status).as_str(),
+            normalize_status(status).as_str(),
             "failure" | "failed" | "error" | "cancelled" | "timed_out"
         )
     }
 
-    pub(crate) fn is_success(&self) -> bool {
+    fn status_is_success(status: &str) -> bool {
         matches!(
-            normalize_status(&self.status).as_str(),
+            normalize_status(status).as_str(),
             "success" | "succeeded" | "passed" | "pass"
         )
+    }
+
+    fn status_is_warning(status: &str) -> bool {
+        matches!(
+            normalize_status(status).as_str(),
+            "warning" | "warn" | "neutral" | "skipped" | "pending" | "queued"
+        )
+    }
+
+    pub(crate) fn is_failure(&self) -> bool {
+        Self::status_is_failure(&self.status)
+    }
+
+    pub(crate) fn is_success(&self) -> bool {
+        Self::status_is_success(&self.status)
     }
 
     pub(crate) fn status_summary(&self) -> String {
@@ -262,6 +353,20 @@ impl GithubVerificationRecord {
             self.blocked_on_summary(),
             self.next_action_summary()
         )
+    }
+}
+
+fn release_feedback_item(
+    record: &GithubVerificationRecord,
+    now_secs: u64,
+) -> GithubReleaseFeedbackItem {
+    GithubReleaseFeedbackItem {
+        check_name: record.check_name.clone(),
+        status: record.status.clone(),
+        commit: record.commit.clone(),
+        age_secs: record.ts.map(|ts| now_secs.saturating_sub(ts)),
+        next_action: record.next_action.clone(),
+        details: record.details.clone(),
     }
 }
 
@@ -372,5 +477,50 @@ mod tests {
             snapshot.warnings[0].kind,
             GithubFeedbackWarningKind::UnknownTask
         );
+    }
+
+    #[test]
+    fn release_feedback_reports_clean_when_no_current_warnings_or_failures() {
+        let records = vec![record(42, "success", "abcdef123456")];
+        let snapshot =
+            summarize_release_github_feedback_records(&records, Some("abcdef123456"), 1_000);
+
+        assert!(snapshot.clean);
+        assert!(snapshot.failing.is_empty());
+        assert!(snapshot.warnings.is_empty());
+        assert!(snapshot.stale.is_empty());
+    }
+
+    #[test]
+    fn release_feedback_classifies_failure_warning_and_stale_records() {
+        let records = vec![
+            GithubVerificationRecord {
+                status: "failure".to_string(),
+                ts: Some(900),
+                ..record(42, "failure", "abcdef123456")
+            },
+            GithubVerificationRecord {
+                check_name: "ci/lint".to_string(),
+                status: "warning".to_string(),
+                ts: Some(880),
+                ..record(42, "warning", "abcdef123456")
+            },
+            GithubVerificationRecord {
+                check_name: "ci/old".to_string(),
+                status: "failure".to_string(),
+                ts: Some(100),
+                ..record(42, "failure", "deadbee")
+            },
+        ];
+        let snapshot =
+            summarize_release_github_feedback_records(&records, Some("abcdef123456"), 1_000);
+
+        assert!(!snapshot.clean);
+        assert_eq!(snapshot.failing[0].check_name, "ci/test");
+        assert_eq!(snapshot.failing[0].age_secs, Some(100));
+        assert_eq!(snapshot.warnings[0].check_name, "ci/lint");
+        assert_eq!(snapshot.warnings[0].age_secs, Some(120));
+        assert_eq!(snapshot.stale[0].check_name, "ci/old");
+        assert_eq!(snapshot.stale[0].age_secs, Some(900));
     }
 }

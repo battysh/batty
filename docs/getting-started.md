@@ -247,8 +247,11 @@ batty release --readiness
 
 The readiness report is written to `.batty/releases/readiness.{json,md}` and
 includes the current commit, proposed tag, recently merged task ids,
-verification evidence, and explicit blockers such as a dirty worktree, missing
-verification summary, or stale daemon binary.
+verification evidence, GitHub verification feedback from
+`.batty/github_verification.jsonl`, and explicit blockers such as a dirty
+worktree, missing verification summary, failing GitHub check for the current
+HEAD, or stale daemon binary. A green main with no current GitHub feedback still
+prints a clean GitHub feedback section so the absence of feedback is visible.
 
 ## 10. Optional: Discord Control Surface (Recommended)
 

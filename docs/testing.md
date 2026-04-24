@@ -74,6 +74,13 @@ failed line as audit history. Records for unknown tasks or stale
 branches/commits are ignored for blocking and emitted as daemon
 warnings instead.
 
+`batty release --readiness` also reads the same file and renders a
+release-level GitHub feedback section. Failing records for the current HEAD
+block readiness, warning-only statuses such as `warning` or `neutral` are
+reported without blocking, and records for non-HEAD commits are listed as stale
+with their recorded commit and age. When no current failing or warning feedback
+exists, the readiness artifact still prints an explicit clean section.
+
 ## Writing a new prescriptive scenario
 
 Every prescriptive scenario lives in `tests/scenarios/prescribed/`.
