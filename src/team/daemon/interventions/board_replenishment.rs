@@ -109,6 +109,11 @@ impl TeamDaemon {
             return Ok(());
         }
 
+        if self.maybe_emit_review_drain_before_planning(&tasks)? {
+            self.clear_board_replenishment_streaks(&replenishment_keys);
+            return Ok(());
+        }
+
         let todo_count = tasks.iter().filter(|task| task.status == "todo").count();
         let in_progress_count = tasks
             .iter()

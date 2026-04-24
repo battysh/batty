@@ -1144,8 +1144,10 @@ mod tests {
             },
             workflow_metrics: Some(status::WorkflowMetrics {
                 runnable_count: 3,
+                implementation_runnable_count: 3,
                 blocked_count: 1,
                 in_review_count: 1,
+                actionable_review_count: 1,
                 in_progress_count: 2,
                 stale_in_progress_count: 1,
                 aged_todo_count: 0,
