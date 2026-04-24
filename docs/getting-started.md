@@ -232,12 +232,24 @@ re-runs the release verification command before tagging. If
 `workflow_policy.verification.test_command`; otherwise it falls back to
 `cargo test`.
 
-The command fails fast if you are not on `main`, if the worktree is dirty, if
-the verification command is red, if the changelog entry is missing, or if the
-target tag already exists. On success it writes release notes into
+The command fails if you are not on `main`, if the worktree is dirty, if the
+verification command is red, if the changelog entry is missing, or if the target
+tag already exists. Every attempt writes an operator publish handoff to
+`.batty/reports/release/publish-handoff.json` with the tag/version, git ref,
+verification evidence, release notes and changelog paths, blocked reasons, and
+manual publish commands. On success it also writes release notes into
 `.batty/releases/`, creates the annotated git tag, and records the attempt in
 `.batty/releases/latest.{json,md}` plus the normal Batty event/telemetry
 surfaces.
+
+Batty does not push branches, push tags, or publish packages. After inspecting
+the handoff and resolving any `blocked_reasons`, an operator publishes manually:
+
+```sh
+git push origin main
+git push origin v<version>
+cargo publish --package batty-cli
+```
 
 To produce a release-readiness artifact without tagging, run:
 
