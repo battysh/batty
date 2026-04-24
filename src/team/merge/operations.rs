@@ -4,6 +4,7 @@
 //! fast-forward merges it. `reset_engineer_worktree` returns the worktree to
 //! the engineer's base branch after a successful merge.
 
+use std::collections::BTreeSet;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
@@ -24,6 +25,99 @@ use super::lock::{MergeMode, MergeOutcome, MergeSuccess};
 struct RootMergePlan {
     mode: MergeMode,
     reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct RootDirtyState {
+    pub(crate) staged_paths: Vec<String>,
+    pub(crate) unstaged_paths: Vec<String>,
+    pub(crate) runtime_paths: Vec<String>,
+    pub(crate) source_paths: Vec<String>,
+}
+
+impl RootDirtyState {
+    pub(crate) fn is_clean(&self) -> bool {
+        self.runtime_paths.is_empty() && self.source_paths.is_empty()
+    }
+
+    pub(crate) fn is_runtime_only(&self) -> bool {
+        !self.is_clean() && self.source_paths.is_empty()
+    }
+}
+
+pub(crate) fn inspect_root_dirty_state(project_root: &Path) -> Result<RootDirtyState> {
+    let staged_paths = git_name_only(project_root, &["diff", "--cached", "--name-only"])?;
+    let mut unstaged_paths = git_name_only(project_root, &["diff", "--name-only"])?;
+    unstaged_paths.extend(git_name_only(
+        project_root,
+        &["ls-files", "--others", "--exclude-standard"],
+    )?);
+    unstaged_paths.sort();
+    unstaged_paths.dedup();
+
+    let all_paths = staged_paths
+        .iter()
+        .chain(unstaged_paths.iter())
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let mut runtime_paths = Vec::new();
+    let mut source_paths = Vec::new();
+    for path in all_paths {
+        if is_batty_managed_runtime_path(&path) {
+            runtime_paths.push(path);
+        } else {
+            source_paths.push(path);
+        }
+    }
+
+    Ok(RootDirtyState {
+        staged_paths,
+        unstaged_paths,
+        runtime_paths,
+        source_paths,
+    })
+}
+
+fn git_name_only(project_root: &Path, args: &[&str]) -> Result<Vec<String>> {
+    let output = run_git_with_context(
+        project_root,
+        args,
+        &format!("inspect root dirty paths with git {}", args.join(" ")),
+    )?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        bail!(
+            "{}",
+            describe_git_failure(
+                project_root,
+                args,
+                &format!("inspect root dirty paths with git {}", args.join(" ")),
+                &stderr,
+            )
+        );
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(ToOwned::to_owned)
+        .collect())
+}
+
+fn is_batty_managed_runtime_path(path: &str) -> bool {
+    path == ".batty/team_config/board/.lock"
+        || path == ".batty/team_config/board/activity.jsonl"
+        || path == ".batty/events.jsonl"
+        || path == ".batty/telemetry.db"
+        || path == ".batty/telemetry.db-shm"
+        || path == ".batty/telemetry.db-wal"
+        || path == ".omx/notepad.md"
+        || path == ".omx/project-memory.json"
+        || path.starts_with(".batty/")
+        || path.starts_with(".batty-target/")
+        || path.starts_with(".omx/logs/")
+        || path.starts_with(".omx/state/")
+        || path.starts_with("target/")
 }
 
 pub(crate) fn merge_engineer_branch(
@@ -166,14 +260,25 @@ pub(crate) fn merge_engineer_branch_into_trunk(
 
 fn plan_root_merge(project_root: &Path, trunk_branch: &str) -> Result<RootMergePlan> {
     let branch = current_worktree_branch(project_root).unwrap_or_else(|_| "HEAD".to_string());
-    let has_user_changes = worktree_has_user_changes(project_root)?;
-    if branch == trunk_branch && !has_user_changes {
-        return Ok(RootMergePlan {
-            mode: MergeMode::DirectRoot,
-            reason: None,
-        });
+    if branch == trunk_branch {
+        let root_dirty = inspect_root_dirty_state(project_root)?;
+        if root_dirty.is_runtime_only() {
+            return Ok(RootMergePlan {
+                mode: MergeMode::DirectRoot,
+                reason: Some(format!(
+                    "root {trunk_branch} checkout has runtime-only local changes"
+                )),
+            });
+        }
+        if root_dirty.is_clean() {
+            return Ok(RootMergePlan {
+                mode: MergeMode::DirectRoot,
+                reason: None,
+            });
+        }
     }
 
+    let has_user_changes = worktree_has_user_changes(project_root)?;
     let reason = match (branch.as_str(), has_user_changes) {
         (branch, true) if branch == trunk_branch => {
             format!("root {trunk_branch} checkout has local changes")
@@ -561,6 +666,51 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let err = merge_engineer_branch(tmp.path(), "eng-1-1").unwrap_err();
         assert!(err.to_string().contains("no worktree found"));
+    }
+
+    #[test]
+    fn root_dirty_state_blocks_staged_source_edits() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "root-dirty-staged");
+        std::fs::write(repo.join("src").join("lib.rs"), "pub fn changed() {}\n").unwrap();
+        git_ok(&repo, &["add", "src/lib.rs"]);
+
+        let state = inspect_root_dirty_state(&repo).unwrap();
+
+        assert_eq!(state.staged_paths, vec!["src/lib.rs"]);
+        assert_eq!(state.source_paths, vec!["src/lib.rs"]);
+        assert!(state.runtime_paths.is_empty());
+    }
+
+    #[test]
+    fn root_dirty_state_blocks_unstaged_source_edits() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "root-dirty-unstaged");
+        std::fs::write(repo.join("src").join("lib.rs"), "pub fn changed() {}\n").unwrap();
+
+        let state = inspect_root_dirty_state(&repo).unwrap();
+
+        assert_eq!(state.unstaged_paths, vec!["src/lib.rs"]);
+        assert_eq!(state.source_paths, vec!["src/lib.rs"]);
+        assert!(state.runtime_paths.is_empty());
+    }
+
+    #[test]
+    fn root_dirty_state_allows_runtime_only_noise() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "root-dirty-runtime");
+        let activity = repo.join(".batty").join("team_config").join("board");
+        std::fs::create_dir_all(&activity).unwrap();
+        std::fs::write(activity.join("activity.jsonl"), "{\"event\":\"tick\"}\n").unwrap();
+
+        let state = inspect_root_dirty_state(&repo).unwrap();
+
+        assert!(state.is_runtime_only());
+        assert_eq!(
+            state.runtime_paths,
+            vec![".batty/team_config/board/activity.jsonl"]
+        );
+        assert!(state.source_paths.is_empty());
     }
 
     #[test]
@@ -1071,6 +1221,51 @@ overall_parity: 100%
                 );
             }
             other => panic!("expected isolated merge success, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn merge_with_runtime_only_dirty_main_uses_direct_root_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "batty-merge-test");
+        let worktree_dir = repo.join(".batty").join("worktrees").join("eng-runtime");
+        let team_config_dir = repo.join(".batty").join("team_config");
+
+        setup_engineer_worktree(&repo, &worktree_dir, "eng-runtime", &team_config_dir).unwrap();
+
+        std::fs::write(worktree_dir.join("feature.txt"), "engineer version\n").unwrap();
+        git_ok(&worktree_dir, &["add", "feature.txt"]);
+        git_ok(&worktree_dir, &["commit", "-m", "engineer update"]);
+
+        let activity_dir = repo.join(".batty").join("team_config").join("board");
+        std::fs::create_dir_all(&activity_dir).unwrap();
+        std::fs::write(
+            activity_dir.join("activity.jsonl"),
+            "{\"event\":\"tick\"}\n",
+        )
+        .unwrap();
+
+        let result = merge_engineer_branch(&repo, "eng-runtime").unwrap();
+        match result {
+            MergeOutcome::Success(success) => {
+                assert_eq!(success.mode, MergeMode::DirectRoot);
+                assert!(
+                    success
+                        .reason
+                        .as_deref()
+                        .is_some_and(|reason| reason.contains("runtime-only local changes")),
+                    "expected runtime-only direct-root reason, got {success:?}"
+                );
+                assert_eq!(
+                    git_stdout(&repo, &["show", "main:feature.txt"]),
+                    "engineer version"
+                );
+                assert_eq!(
+                    std::fs::read_to_string(activity_dir.join("activity.jsonl")).unwrap(),
+                    "{\"event\":\"tick\"}\n"
+                );
+            }
+            other => panic!("expected direct merge success, got {other:?}"),
         }
     }
 

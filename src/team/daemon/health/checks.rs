@@ -187,6 +187,15 @@ impl TeamDaemon {
             }
         }
 
+        if let Ok(root_dirty) = crate::team::merge::inspect_root_dirty_state(&project_root)
+            && !root_dirty.source_paths.is_empty()
+        {
+            warn!(
+                paths = %root_dirty.source_paths.join(", "),
+                "project root has dirty source changes that will block review auto-merges"
+            );
+        }
+
         let members: Vec<_> = self
             .config
             .members
