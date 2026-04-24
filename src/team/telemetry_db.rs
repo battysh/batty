@@ -12,7 +12,7 @@ use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 
 use super::events::TeamEvent;
-use super::metrics::TaskCycleTimeRecord;
+use super::metrics::{ReviewQueueSnapshot, TaskCycleTimeRecord};
 use super::test_results::{TestFailure, TestResults};
 
 /// Database file name under `.batty/`.
@@ -63,6 +63,22 @@ const TASK_METRICS_COLUMNS: &[SchemaColumn] = &[
     SchemaColumn {
         name: "merge_time_secs",
         definition: "merge_time_secs INTEGER",
+    },
+    SchemaColumn {
+        name: "review_entered_at",
+        definition: "review_entered_at INTEGER",
+    },
+    SchemaColumn {
+        name: "review_disposition_at",
+        definition: "review_disposition_at INTEGER",
+    },
+    SchemaColumn {
+        name: "review_disposition",
+        definition: "review_disposition TEXT",
+    },
+    SchemaColumn {
+        name: "review_disposition_latency_secs",
+        definition: "review_disposition_latency_secs INTEGER",
     },
     SchemaColumn {
         name: "confidence_score",
@@ -225,6 +241,10 @@ fn init_schema(conn: &Connection) -> Result<()> {
             handoff_successes INTEGER NOT NULL DEFAULT 0,
             carry_forward_effective INTEGER,
             merge_time_secs  INTEGER,
+            review_entered_at INTEGER,
+            review_disposition_at INTEGER,
+            review_disposition TEXT,
+            review_disposition_latency_secs INTEGER,
             confidence_score REAL,
             orphan_reconciliation_branch_mismatch_count INTEGER NOT NULL DEFAULT 0
         );
@@ -273,6 +293,18 @@ fn init_schema(conn: &Connection) -> Result<()> {
             max_stall_secs  INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY (role, signal)
         );
+
+        CREATE TABLE IF NOT EXISTS review_queue_metrics (
+            id                     INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp              INTEGER NOT NULL,
+            queue_depth            INTEGER NOT NULL,
+            oldest_review_age_secs INTEGER,
+            over_slo_count         INTEGER NOT NULL,
+            review_slo_secs        INTEGER NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_review_queue_metrics_ts
+            ON review_queue_metrics(timestamp);
         ",
     )
     .context("failed to initialize telemetry schema")?;
@@ -355,6 +387,7 @@ pub(crate) fn install_legacy_schema_for_tests(conn: &Connection) -> Result<()> {
         DROP TABLE IF EXISTS session_summary;
         DROP TABLE IF EXISTS test_case_metrics;
         DROP TABLE IF EXISTS task_cycle_times;
+        DROP TABLE IF EXISTS review_queue_metrics;
 
         CREATE TABLE events (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -427,6 +460,15 @@ pub struct EngineerThroughputRow {
 pub struct HourlyThroughputRow {
     pub hour_start: i64,
     pub completed_tasks: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewQueueMetricRow {
+    pub timestamp: i64,
+    pub queue_depth: i64,
+    pub oldest_review_age_secs: Option<i64>,
+    pub over_slo_count: i64,
+    pub review_slo_secs: i64,
 }
 
 pub fn record_test_results(
@@ -525,8 +567,11 @@ fn update_metrics_for_event(conn: &Connection, event: &TeamEvent) -> Result<()> 
             }
             if let Some(task) = &event.task {
                 conn.execute(
-                    "INSERT INTO task_metrics (task_id, completed_at) VALUES (?1, ?2)
-                     ON CONFLICT(task_id) DO UPDATE SET completed_at = ?2",
+                    "INSERT INTO task_metrics (task_id, completed_at, review_entered_at)
+                     VALUES (?1, ?2, ?2)
+                     ON CONFLICT(task_id) DO UPDATE SET
+                       completed_at = ?2,
+                       review_entered_at = ?2",
                     params![task, event.ts as i64],
                 )?;
                 conn.execute(
@@ -613,6 +658,7 @@ fn update_metrics_for_event(conn: &Connection, event: &TeamEvent) -> Result<()> 
                      ON CONFLICT(task_id) DO UPDATE SET merge_time_secs = ?2 - COALESCE(task_metrics.started_at, ?2)",
                     params![task, event.ts as i64],
                 )?;
+                update_review_disposition(conn, task, event.ts as i64, event.event.as_str())?;
             }
             // Fix #2: Increment total_merges on latest session.
             conn.execute(
@@ -620,6 +666,11 @@ fn update_metrics_for_event(conn: &Connection, event: &TeamEvent) -> Result<()> 
                  WHERE rowid = (SELECT rowid FROM session_summary ORDER BY started_at DESC LIMIT 1)",
                 [],
             )?;
+        }
+        "task_reworked" => {
+            if let Some(task) = &event.task {
+                update_review_disposition(conn, task, event.ts as i64, "task_reworked")?;
+            }
         }
         "merge_confidence_scored" => {
             if let Some(task) = &event.task {
@@ -809,6 +860,29 @@ fn upsert_non_engineer_stall_metric(
     Ok(())
 }
 
+fn update_review_disposition(
+    conn: &Connection,
+    task_id: &str,
+    disposition_at: i64,
+    disposition: &str,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO task_metrics
+         (task_id, review_disposition_at, review_disposition, review_disposition_latency_secs)
+         VALUES (?1, ?2, ?3, NULL)
+         ON CONFLICT(task_id) DO UPDATE SET
+           review_disposition_at = ?2,
+           review_disposition = ?3,
+           review_disposition_latency_secs = CASE
+             WHEN COALESCE(task_metrics.review_entered_at, task_metrics.completed_at) IS NULL
+               THEN NULL
+             ELSE MAX(0, ?2 - COALESCE(task_metrics.review_entered_at, task_metrics.completed_at))
+           END",
+        params![task_id, disposition_at, disposition],
+    )?;
+    Ok(())
+}
+
 fn upsert_agent_counter(conn: &Connection, role: &str, column: &str) -> Result<()> {
     // column is a known static string, safe to interpolate.
     let sql = format!(
@@ -944,6 +1018,10 @@ pub struct TaskMetricsRow {
     pub handoff_successes: i64,
     pub carry_forward_effective: Option<bool>,
     pub merge_time_secs: Option<i64>,
+    pub review_entered_at: Option<i64>,
+    pub review_disposition_at: Option<i64>,
+    pub review_disposition: Option<String>,
+    pub review_disposition_latency_secs: Option<i64>,
     pub confidence_score: Option<f64>,
     pub orphan_reconciliation_branch_mismatch_count: i64,
 }
@@ -953,7 +1031,8 @@ pub fn query_task_metrics(conn: &Connection) -> Result<Vec<TaskMetricsRow>> {
         "SELECT task_id, started_at, completed_at, retries, narration_rejections, escalations,
                 context_restart_count, handoff_attempts, handoff_successes,
                 carry_forward_effective, merge_time_secs, confidence_score,
-                orphan_reconciliation_branch_mismatch_count
+                orphan_reconciliation_branch_mismatch_count, review_entered_at,
+                review_disposition_at, review_disposition, review_disposition_latency_secs
          FROM task_metrics ORDER BY started_at DESC NULLS LAST LIMIT 50",
     )?;
     let rows = stmt
@@ -972,6 +1051,10 @@ pub fn query_task_metrics(conn: &Connection) -> Result<Vec<TaskMetricsRow>> {
                 merge_time_secs: row.get(10)?,
                 confidence_score: row.get(11)?,
                 orphan_reconciliation_branch_mismatch_count: row.get(12)?,
+                review_entered_at: row.get(13)?,
+                review_disposition_at: row.get(14)?,
+                review_disposition: row.get(15)?,
+                review_disposition_latency_secs: row.get(16)?,
             })
         })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -1145,6 +1228,46 @@ pub fn query_hourly_throughput(
         })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
     Ok(rows)
+}
+
+pub fn record_review_queue_snapshot(
+    conn: &Connection,
+    snapshot: &ReviewQueueSnapshot,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO review_queue_metrics
+         (timestamp, queue_depth, oldest_review_age_secs, over_slo_count, review_slo_secs)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![
+            snapshot.timestamp,
+            snapshot.queue_depth,
+            snapshot.oldest_review_age_secs,
+            snapshot.over_slo_count,
+            snapshot.review_slo_secs,
+        ],
+    )
+    .context("failed to record review queue metrics")?;
+    Ok(())
+}
+
+pub fn query_latest_review_queue_metric(conn: &Connection) -> Result<Option<ReviewQueueMetricRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT timestamp, queue_depth, oldest_review_age_secs, over_slo_count, review_slo_secs
+         FROM review_queue_metrics
+         ORDER BY timestamp DESC, id DESC
+         LIMIT 1",
+    )?;
+    let mut rows = stmt.query([])?;
+    let Some(row) = rows.next()? else {
+        return Ok(None);
+    };
+    Ok(Some(ReviewQueueMetricRow {
+        timestamp: row.get(0)?,
+        queue_depth: row.get(1)?,
+        oldest_review_age_secs: row.get(2)?,
+        over_slo_count: row.get(3)?,
+        review_slo_secs: row.get(4)?,
+    }))
 }
 
 /// Recent events row for `batty telemetry events`.
@@ -1454,21 +1577,31 @@ pub fn query_review_metrics(conn: &Connection) -> Result<ReviewMetricsRow> {
         }
     }
 
-    // Compute average review latency: time between task_completed and its
-    // corresponding merge event for each task.
+    // Prefer durable per-task disposition latency. Fall back to event joins
+    // so older databases still report historical review latency.
     let avg_review_latency_secs: Option<f64> = conn
         .query_row(
-            "SELECT AVG(m.timestamp - c.timestamp)
-             FROM events c
-             JOIN events m ON c.task_id = m.task_id
-               AND m.event_type IN ('task_auto_merged', 'task_manual_merged')
-             WHERE c.event_type = 'task_completed'
-               AND c.task_id IS NOT NULL
-               AND m.timestamp >= c.timestamp",
+            "SELECT AVG(review_disposition_latency_secs)
+             FROM task_metrics
+             WHERE review_disposition_latency_secs IS NOT NULL",
             [],
             |row| row.get(0),
         )
-        .unwrap_or(None);
+        .unwrap_or(None)
+        .or_else(|| {
+            conn.query_row(
+                "SELECT AVG(m.timestamp - c.timestamp)
+                 FROM events c
+                 JOIN events m ON c.task_id = m.task_id
+                   AND m.event_type IN ('task_auto_merged', 'task_manual_merged', 'task_reworked')
+                 WHERE c.event_type = 'task_completed'
+                   AND c.task_id IS NOT NULL
+                   AND m.timestamp >= c.timestamp",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(None)
+        });
 
     let mut rejection_reasons = rejection_reasons
         .into_iter()
@@ -2290,6 +2423,79 @@ mod tests {
         // avg = (100 + 300) / 2 = 200
         let avg = row.avg_review_latency_secs.unwrap();
         assert!((avg - 200.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn review_metrics_records_rework_disposition_latency() {
+        let conn = open_in_memory().unwrap();
+
+        let mut completed = TeamEvent::task_completed("eng-1", Some("30"));
+        completed.ts = 3000;
+        insert_event(&conn, &completed).unwrap();
+        let mut reworked = TeamEvent::task_reworked("eng-1", "30");
+        reworked.ts = 3180;
+        insert_event(&conn, &reworked).unwrap();
+
+        let tasks = query_task_metrics(&conn).unwrap();
+        let task = tasks.iter().find(|task| task.task_id == "30").unwrap();
+        assert_eq!(task.review_entered_at, Some(3000));
+        assert_eq!(task.review_disposition_at, Some(3180));
+        assert_eq!(task.review_disposition.as_deref(), Some("task_reworked"));
+        assert_eq!(task.review_disposition_latency_secs, Some(180));
+
+        let row = query_review_metrics(&conn).unwrap();
+        assert_eq!(row.rework_count, 1);
+        assert_eq!(row.avg_review_latency_secs, Some(180.0));
+    }
+
+    #[test]
+    fn review_metrics_resets_latency_after_rework_cycle() {
+        let conn = open_in_memory().unwrap();
+
+        let mut first_completed = TeamEvent::task_completed("eng-1", Some("31"));
+        first_completed.ts = 1000;
+        insert_event(&conn, &first_completed).unwrap();
+        let mut reworked = TeamEvent::task_reworked("eng-1", "31");
+        reworked.ts = 1120;
+        insert_event(&conn, &reworked).unwrap();
+
+        let mut second_completed = TeamEvent::task_completed("eng-1", Some("31"));
+        second_completed.ts = 2000;
+        insert_event(&conn, &second_completed).unwrap();
+        let mut merged = TeamEvent::task_manual_merged("31");
+        merged.ts = 2090;
+        insert_event(&conn, &merged).unwrap();
+
+        let tasks = query_task_metrics(&conn).unwrap();
+        let task = tasks.iter().find(|task| task.task_id == "31").unwrap();
+        assert_eq!(task.review_entered_at, Some(2000));
+        assert_eq!(task.review_disposition_at, Some(2090));
+        assert_eq!(
+            task.review_disposition.as_deref(),
+            Some("task_manual_merged")
+        );
+        assert_eq!(task.review_disposition_latency_secs, Some(90));
+    }
+
+    #[test]
+    fn review_queue_snapshot_round_trips() {
+        let conn = open_in_memory().unwrap();
+        let snapshot = ReviewQueueSnapshot {
+            timestamp: 42,
+            queue_depth: 3,
+            oldest_review_age_secs: Some(7200),
+            over_slo_count: 2,
+            review_slo_secs: 3600,
+        };
+
+        record_review_queue_snapshot(&conn, &snapshot).unwrap();
+        let row = query_latest_review_queue_metric(&conn).unwrap().unwrap();
+
+        assert_eq!(row.timestamp, 42);
+        assert_eq!(row.queue_depth, 3);
+        assert_eq!(row.oldest_review_age_secs, Some(7200));
+        assert_eq!(row.over_slo_count, 2);
+        assert_eq!(row.review_slo_secs, 3600);
     }
 
     #[test]

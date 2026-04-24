@@ -213,6 +213,32 @@ impl TeamDaemon {
         self.emit_event(TeamEvent::daemon_heartbeat(uptime_secs));
     }
 
+    pub(super) fn record_review_queue_snapshot(&mut self) -> Result<()> {
+        if !self.optional_subsystem_ready("telemetry") {
+            return Ok(());
+        }
+        let review_slo_secs = self.config.team_config.workflow_policy.review_timeout_secs;
+        let snapshot = crate::team::metrics::collect_review_queue_snapshot(
+            &self.board_dir(),
+            review_slo_secs,
+        )?;
+
+        let result = match &self.telemetry_db {
+            Some(conn) => crate::team::telemetry_db::record_review_queue_snapshot(conn, &snapshot),
+            None => Ok(()),
+        };
+        match result {
+            Ok(()) => {
+                self.record_optional_subsystem_success("telemetry");
+                Ok(())
+            }
+            Err(error) => {
+                self.record_optional_subsystem_failure("telemetry", &error.to_string());
+                Err(error)
+            }
+        }
+    }
+
     pub(super) fn record_daemon_stopped(&mut self, reason: &str, uptime_secs: u64) {
         let exit_category = crate::team::daemon_mgmt::classify_daemon_exit_reason(reason);
         self.emit_event(TeamEvent::daemon_exited(reason, uptime_secs, exit_category));

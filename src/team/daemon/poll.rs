@@ -300,6 +300,9 @@ impl TeamDaemon {
         self.run_recoverable_step("maybe_emit_task_aging_alerts", |daemon| {
             daemon.maybe_emit_task_aging_alerts()
         });
+        self.run_recoverable_step("record_review_queue_snapshot", |daemon| {
+            daemon.record_review_queue_snapshot()
+        });
         self.run_recoverable_step("maybe_auto_unblock_blocked_tasks", |daemon| {
             daemon.maybe_auto_unblock_blocked_tasks()
         });

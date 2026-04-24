@@ -854,6 +854,10 @@ mod tests {
             "Context Pressure Warnings Per Agent",
             "Board Task Count by Status Over Time",
             "Tasks Archived Per Hour",
+            "Review Queue Depth",
+            "Oldest Review Age",
+            "Review Over SLO",
+            "Review Disposition Latency",
         ];
         for expected in required {
             assert!(
