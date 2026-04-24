@@ -1047,10 +1047,15 @@ fn team_lifecycle(report: &status::TeamStatusJsonReport) -> TeamLifecycle {
         TeamLifecycle::Stopped
     } else if report.watchdog.current_backoff_secs.is_some()
         || report.watchdog.state.eq_ignore_ascii_case("recovering")
+        || report.watchdog.state.eq_ignore_ascii_case("restarting")
         || report.watchdog.state.eq_ignore_ascii_case("backoff")
     {
         TeamLifecycle::Recovering
-    } else if !report.health.unhealthy_members.is_empty() {
+    } else if matches!(
+        report.watchdog.state.as_str(),
+        "circuit-open" | "offline" | "degraded"
+    ) || !report.health.unhealthy_members.is_empty()
+    {
         TeamLifecycle::Degraded
     } else {
         TeamLifecycle::Running
@@ -1132,6 +1137,7 @@ mod tests {
                 current_backoff_secs: None,
                 last_exit_category: None,
                 last_exit_reason: None,
+                ..status::WatchdogStatus::default()
             },
             health: status::TeamStatusHealth {
                 session_running: true,
@@ -1321,6 +1327,15 @@ mod tests {
             Some("eng-1 stayed in Working for 5m (timeout=60s)")
         );
         assert_eq!(status.members[1].review_task_ids, vec!["43".to_string()]);
+    }
+
+    #[test]
+    fn team_lifecycle_treats_offline_watchdog_as_degraded() {
+        let mut report = sample_report();
+        report.health.unhealthy_members.clear();
+        report.watchdog.state = "offline".to_string();
+
+        assert_eq!(team_lifecycle(&report), TeamLifecycle::Degraded);
     }
 
     #[test]
