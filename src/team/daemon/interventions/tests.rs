@@ -1724,8 +1724,66 @@ fn build_owned_task_intervention_message_includes_parent_escalation() {
 }
 
 #[test]
-fn build_review_intervention_message_includes_merge_and_rework_paths() {
+fn build_review_intervention_message_suppresses_merge_without_verified_lane() {
     let harness = triage_harness().with_board_task(71, "task-71", "review", Some("eng-1"));
+    let daemon = harness.build_daemon().unwrap();
+    let tasks = crate::task::load_tasks_from_dir(&harness.board_tasks_dir()).unwrap();
+    let member = daemon
+        .config
+        .members
+        .iter()
+        .find(|member| member.name == "lead")
+        .unwrap()
+        .clone();
+
+    let message = daemon.build_review_intervention_message(&member, &[&tasks[0]], &tasks);
+
+    assert!(message.contains("Review backlog detected"));
+    assert!(message.contains("MERGE SUPPRESSED"));
+    assert!(message.contains("task branch metadata missing"));
+    assert!(message.contains("kanban-md move --dir"));
+    assert!(message.contains("batty assign eng-1"));
+    assert!(message.contains("batty send architect"));
+}
+
+#[test]
+fn build_review_intervention_message_includes_merge_path_for_verified_lane() {
+    let harness = TestHarness::new()
+        .with_member(architect_member("architect"))
+        .with_member(manager_member("lead", Some("architect")))
+        .with_member(engineer_member("eng-1", Some("lead"), true))
+        .with_member_state("lead", MemberState::Idle)
+        .with_pane("lead", "%999999");
+    let project_root = harness.project_root();
+    fs::write(project_root.join("README.md"), "test\n").unwrap();
+    crate::team::test_support::git_ok(project_root, &["init", "-b", "main"]);
+    crate::team::test_support::git_ok(project_root, &["config", "user.email", "batty@example.com"]);
+    crate::team::test_support::git_ok(project_root, &["config", "user.name", "Batty Tests"]);
+    crate::team::test_support::git_ok(project_root, &["add", "."]);
+    crate::team::test_support::git_ok(project_root, &["commit", "-m", "initial"]);
+
+    let team_config_dir = project_root.join(".batty").join("team_config");
+    let worktree_dir = project_root.join(".batty").join("worktrees").join("eng-1");
+    let base_branch = crate::team::task_loop::engineer_base_branch_name("eng-1");
+    crate::team::task_loop::setup_engineer_worktree(
+        project_root,
+        &worktree_dir,
+        &base_branch,
+        &team_config_dir,
+    )
+    .unwrap();
+    crate::team::task_loop::checkout_worktree_branch_from_main(&worktree_dir, "eng-1/71").unwrap();
+    fs::write(worktree_dir.join("feature.txt"), "done\n").unwrap();
+    crate::team::test_support::git_ok(&worktree_dir, &["add", "feature.txt"]);
+    crate::team::test_support::git_ok(&worktree_dir, &["commit", "-m", "task work"]);
+
+    fs::create_dir_all(harness.board_tasks_dir()).unwrap();
+    fs::write(
+        harness.board_tasks_dir().join("071-task-71.md"),
+        "---\nid: 71\ntitle: task-71\nstatus: review\npriority: high\nclaimed_by: eng-1\nbranch: eng-1/71\nclass: standard\n---\n\nTask description.\n",
+    )
+    .unwrap();
+
     let daemon = harness.build_daemon().unwrap();
     let tasks = crate::task::load_tasks_from_dir(&harness.board_tasks_dir()).unwrap();
     let member = daemon
