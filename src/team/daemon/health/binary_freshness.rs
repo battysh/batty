@@ -26,11 +26,15 @@ use std::time::UNIX_EPOCH;
 
 use anyhow::{Context, Result};
 
+use crate::team::merge::inspect_root_dirty_state;
+
 /// Commits newer than the binary by less than this window are treated
 /// as "fresh enough" — avoids false alarms for a just-rebuilt binary
 /// racing a freshly-pushed commit.
 pub const DEFAULT_STALE_THRESHOLD_SECS: i64 = 600; // 10 minutes
-pub const STALE_RECOVERY_COMMAND: &str = "cargo build --release && cp target/release/batty ~/.cargo/bin/batty && codesign --force --sign - ~/.cargo/bin/batty && batty stop && batty start --resume";
+pub const STALE_RECOVERY_COMMAND: &str = "batty daemon-restart-if-stale";
+pub const STALE_RECOVERY_DRY_RUN_COMMAND: &str = "batty daemon-restart-if-stale --dry-run";
+pub const STALE_MANUAL_RECOVERY_COMMAND: &str = "cargo build --release && cp target/release/batty ~/.cargo/bin/batty && codesign --force --sign - ~/.cargo/bin/batty && batty stop && batty start";
 
 /// Result of a binary-vs-HEAD freshness check.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,8 +53,8 @@ pub struct BinaryFreshness {
     pub binary_mtime: i64,
     /// Unix timestamp of the HEAD commit (author date).
     pub head_ts: i64,
-    /// Whether the source worktree has uncommitted changes. Dirty trees
-    /// are not safe for daemon-owned rebuild/restart automation.
+    /// Whether the source worktree has uncommitted non-runtime changes.
+    /// Batty-managed runtime noise is safe for daemon-owned recovery.
     pub worktree_dirty: bool,
 }
 
@@ -70,11 +74,14 @@ impl BinaryFreshness {
     pub fn recovery_action(&self) -> String {
         if self.worktree_dirty {
             format!(
-                "auto-rebuild refused: worktree has uncommitted changes; next: inspect `git status --short`, commit/stash/clear the dirty worktree, then run `{}`",
-                STALE_RECOVERY_COMMAND
+                "auto-restart refused: source worktree has uncommitted changes; next: inspect `git status --short`, commit/stash/clear the source edits, then run `{}`; manual fallback: `{}`",
+                STALE_RECOVERY_COMMAND, STALE_MANUAL_RECOVERY_COMMAND
             )
         } else {
-            format!("next: run `{}`", STALE_RECOVERY_COMMAND)
+            format!(
+                "next: run `{}` to inspect, then `{}`",
+                STALE_RECOVERY_DRY_RUN_COMMAND, STALE_RECOVERY_COMMAND
+            )
         }
     }
 
@@ -146,7 +153,8 @@ pub fn evaluate_with_stamps(
         // fresh from a runtime-behavior perspective.
         return Ok(BinaryFreshness::fresh_with_stamps(binary_mtime, head_ts));
     }
-    let worktree_dirty = worktree_has_uncommitted_changes(repo_root)?;
+    let root_dirty = inspect_root_dirty_state(repo_root)?;
+    let worktree_dirty = !root_dirty.source_paths.is_empty();
 
     Ok(BinaryFreshness {
         fresh: false,
@@ -259,28 +267,6 @@ fn commits_touching_src_since(repo_root: &Path, since_ts: i64) -> Result<(u32, S
 
     let (_, hash, subject) = newest.unwrap_or_default();
     Ok((count, subject, hash))
-}
-
-fn worktree_has_uncommitted_changes(repo_root: &Path) -> Result<bool> {
-    let output = Command::new("git")
-        .args(["status", "--porcelain"])
-        .current_dir(repo_root)
-        .output()
-        .with_context(|| {
-            format!(
-                "failed to invoke git status while checking dirty state in {}",
-                repo_root.display()
-            )
-        })?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        anyhow::bail!(
-            "git status failed while checking dirty state in {}: {}",
-            repo_root.display(),
-            stderr
-        );
-    }
-    Ok(!String::from_utf8_lossy(&output.stdout).trim().is_empty())
 }
 
 #[cfg(test)]
@@ -432,8 +418,38 @@ mod tests {
         assert!(!report.fresh);
         assert!(report.worktree_dirty);
         assert!(
-            report.status_line().contains("auto-rebuild refused"),
-            "dirty stale report should refuse daemon-owned rebuild, got {:?}",
+            report.status_line().contains("auto-restart refused"),
+            "dirty stale report should refuse daemon-owned restart, got {:?}",
+            report.status_line()
+        );
+        assert!(
+            report.status_line().contains(STALE_MANUAL_RECOVERY_COMMAND),
+            "dirty stale report should include manual fallback, got {:?}",
+            report.status_line()
+        );
+    }
+
+    #[test]
+    fn runtime_only_dirty_state_does_not_refuse_auto_restart() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path();
+        init_repo(repo);
+        commit_file_with_time(repo, "src/foo.rs", "fn a() {}", 1_700_000_000);
+        commit_file_with_time(repo, "src/bar.rs", "fn b() {}", 1_700_001_000);
+        let telemetry = repo.join(".batty").join("telemetry.db");
+        fs::create_dir_all(telemetry.parent().unwrap()).unwrap();
+        fs::write(telemetry, "runtime noise\n").unwrap();
+
+        let report = evaluate_with_stamps(repo, 1_700_000_000, 1_700_001_800, 600).unwrap();
+
+        assert!(!report.fresh);
+        assert!(
+            !report.worktree_dirty,
+            "runtime-only dirty state should not block safe daemon restart"
+        );
+        assert!(
+            report.status_line().contains(STALE_RECOVERY_COMMAND),
+            "stale runtime-only report should point to safe command, got {:?}",
             report.status_line()
         );
     }

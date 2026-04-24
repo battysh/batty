@@ -81,6 +81,14 @@ pub enum Command {
         health: bool,
     },
 
+    /// Safely rebuild and restart the daemon only when its binary is stale
+    #[command(name = "daemon-restart-if-stale")]
+    DaemonRestartIfStale {
+        /// Show the safe restart plan without rebuilding or restarting
+        #[arg(long, default_value_t = false)]
+        dry_run: bool,
+    },
+
     /// Prevent an engineer from receiving new auto-dispatch work
     Bench {
         /// Engineer instance (e.g., "eng-1-1")
@@ -2974,6 +2982,17 @@ mod tests {
                 assert!(resume);
             }
             other => panic!("expected daemon command with resume, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn daemon_restart_if_stale_subcommand_parses() {
+        let cli = Cli::parse_from(["batty", "daemon-restart-if-stale", "--dry-run"]);
+        match cli.command {
+            Command::DaemonRestartIfStale { dry_run } => {
+                assert!(dry_run);
+            }
+            other => panic!("expected daemon-restart-if-stale command, got {other:?}"),
         }
     }
 

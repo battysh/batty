@@ -1351,6 +1351,11 @@ fn main() -> Result<()> {
             )?;
         }
 
+        Command::DaemonRestartIfStale { dry_run } => {
+            let report = team::restart_daemon_if_stale(&root, dry_run)?;
+            println!("{}", report.render());
+        }
+
         Command::Daemon {
             project_root,
             resume,
