@@ -529,6 +529,10 @@ pub fn team_status(project_root: &Path, json: bool, detail: bool, health: bool) 
                 println!("- {line}");
             }
         }
+        if let Some(formatted) = status::format_review_blocks(&review_queue) {
+            println!();
+            println!("{formatted}");
+        }
         if let Some(optional_subsystems) = optional_subsystems {
             println!();
             println!(

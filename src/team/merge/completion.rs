@@ -3070,7 +3070,7 @@ mod tests {
         git_ok(&worktree_dir, &["commit", "-m", "engineer update"]);
         seed_completion_packet_metadata(&repo, 42, "merge-blocked-task", &worktree_dir);
 
-        std::fs::write(repo.join("journal.rs"), "fn dirty_main() {}\n").unwrap();
+        git_ok(&repo, &["checkout", "-b", "root-side-branch"]);
         std::fs::create_dir_all(repo.join(".batty")).unwrap();
         std::fs::write(
             repo.join(".batty").join("integration-worktrees"),

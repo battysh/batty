@@ -2374,6 +2374,31 @@ Merge Modes: direct ok {} / fail {} | isolated ok {} / fail {}",
     )
 }
 
+pub(crate) fn format_review_blocks(review_queue: &[StatusTaskEntry]) -> Option<String> {
+    let blocked = review_queue
+        .iter()
+        .filter_map(|task| {
+            task.blocked_on.as_ref().map(|blocked_on| {
+                let next_action = task
+                    .next_action
+                    .as_deref()
+                    .unwrap_or("resolve the blocker, then retry review");
+                format!(
+                    "#{} {}: {blocked_on} Next: {next_action}",
+                    task.id, task.title
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    if blocked.is_empty() {
+        return None;
+    }
+
+    let mut lines = vec!["Review Blocks".to_string()];
+    lines.extend(blocked.into_iter().map(|line| format!("- {line}")));
+    Some(lines.join("\n"))
+}
+
 fn compute_idle_with_runnable(
     board_dir: &Path,
     members: &[MemberInstance],
@@ -4137,6 +4162,34 @@ mod tests {
         assert_eq!(review_queue[0].review_owner.as_deref(), Some("manager"));
         assert_eq!(review_queue[0].next_action.as_deref(), Some("review now"));
         assert!(review_queue[0].test_summary.is_none());
+    }
+
+    #[test]
+    fn format_review_blocks_surfaces_dirty_main_next_action() {
+        let formatted = format_review_blocks(&[StatusTaskEntry {
+            id: 42,
+            title: "Review task".to_string(),
+            status: "review".to_string(),
+            priority: "high".to_string(),
+            claimed_by: Some("eng-1".to_string()),
+            review_owner: Some("manager".to_string()),
+            blocked_on: Some(
+                "Dirty source paths: src/lib.rs. Next action: commit, stash, or clean these root worktree changes before retrying the review merge."
+                    .to_string(),
+            ),
+            branch: Some("eng-1/42".to_string()),
+            worktree_path: None,
+            commit: None,
+            branch_mismatch: None,
+            next_action: None,
+            test_summary: None,
+        }])
+        .unwrap();
+
+        assert!(formatted.contains("Review Blocks"));
+        assert!(formatted.contains("#42 Review task"));
+        assert!(formatted.contains("src/lib.rs"));
+        assert!(formatted.contains("retry review"));
     }
 
     #[test]

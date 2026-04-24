@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::process::Command;
 use std::time::Instant;
@@ -11,7 +11,8 @@ use crate::task::load_tasks_from_dir;
 use crate::team::board::{WorkflowMetadata, read_workflow_metadata};
 use crate::team::daemon::verification::run_automatic_verification;
 use crate::team::merge::{
-    MergeLock, MergeMode, MergeOutcome, infer_merge_mode_from_failure, merge_engineer_branch,
+    MergeLock, MergeMode, MergeOutcome, RootDirtyState, infer_merge_mode_from_failure,
+    inspect_root_dirty_state, merge_engineer_branch,
 };
 use crate::team::task_loop::{current_worktree_branch, read_task_title};
 
@@ -237,6 +238,60 @@ impl TeamDaemon {
         let board_dir_str = board_dir.to_string_lossy().to_string();
         let manager_name = self.manager_name(&request.engineer);
         let task_title = read_task_title(&board_dir, request.task_id);
+        let root_dirty = inspect_root_dirty_state(self.project_root())?;
+        if let Some(block_detail) = dirty_main_review_merge_block_detail(&root_dirty) {
+            let notice = format!(
+                "merge queue: blocked auto-merge for task #{} because main has source edits. {block_detail}",
+                request.task_id
+            );
+            self.record_orchestrator_action(notice.clone());
+            mark_review_merge_blocked(&board_dir, request.task_id, &block_detail);
+
+            let manager_notice = format!(
+                "Task #{} from {} passed tests but cannot be auto-merged while main has dirty source edits.\nTitle: {}\n{}\nLeave the task in review and clean, commit, or stash the root changes before retrying.",
+                request.task_id, request.engineer, task_title, block_detail
+            );
+            if let Some(ref manager_name) = manager_name {
+                self.queue_message("daemon", manager_name, &manager_notice)?;
+                self.mark_member_working(manager_name);
+                self.notify_reports_to(manager_name, &manager_notice)?;
+            }
+
+            let engineer_notice = format!(
+                "Your task passed tests, but Batty paused the merge because main has dirty source edits.\n{}\nWait for lead direction before making more changes.",
+                block_detail
+            );
+            self.queue_message("daemon", &request.engineer, &engineer_notice)?;
+
+            warn!(
+                engineer = request.engineer,
+                task_id = request.task_id,
+                dirty_paths = %root_dirty.source_paths.join(", "),
+                "merge queue blocked by dirty main source changes"
+            );
+            return Ok(MergeQueueOutcome::Skipped);
+        }
+        if root_dirty.is_runtime_only() {
+            match snapshot_runtime_dirty_main(self.project_root(), request, &task_title, &root_dirty)
+            {
+                Ok(Some(snapshot_path)) => self.record_orchestrator_action(format!(
+                    "merge queue: preserved runtime-only dirty main state before task #{} merge ({snapshot_path})",
+                    request.task_id
+                )),
+                Ok(None) => {}
+                Err(error) => {
+                    warn!(
+                        task_id = request.task_id,
+                        error = %error,
+                        "failed to snapshot runtime-only dirty main state before merge"
+                    );
+                    self.record_orchestrator_action(format!(
+                        "merge queue: runtime-only dirty main snapshot failed before task #{} merge ({error})",
+                        request.task_id
+                    ));
+                }
+            }
+        }
         let pre_merge_head = git_head(self.project_root())?;
 
         match merge_engineer_branch(self.project_root(), &request.engineer)? {
@@ -551,6 +606,144 @@ fn merge_request_skip_reason(
     }
 
     Ok(None)
+}
+
+fn dirty_main_review_merge_block_detail(root_dirty: &RootDirtyState) -> Option<String> {
+    if root_dirty.source_paths.is_empty() {
+        return None;
+    }
+
+    let staged_source = root_dirty
+        .staged_paths
+        .iter()
+        .filter(|path| root_dirty.source_paths.contains(path))
+        .cloned()
+        .collect::<Vec<_>>();
+    let unstaged_source = root_dirty
+        .unstaged_paths
+        .iter()
+        .filter(|path| root_dirty.source_paths.contains(path))
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut parts = vec![format!(
+        "Dirty source paths: {}.",
+        root_dirty.source_paths.join(", ")
+    )];
+    if !staged_source.is_empty() {
+        parts.push(format!("Staged: {}.", staged_source.join(", ")));
+    }
+    if !unstaged_source.is_empty() {
+        parts.push(format!(
+            "Unstaged/untracked: {}.",
+            unstaged_source.join(", ")
+        ));
+    }
+    parts.push(
+        "Next action: commit, stash, or clean these root worktree changes before retrying the review merge."
+            .to_string(),
+    );
+    Some(parts.join(" "))
+}
+
+fn mark_review_merge_blocked(board_dir: &std::path::Path, task_id: u32, block_detail: &str) {
+    let mut fields = HashMap::new();
+    fields.insert("blocked_on".to_string(), block_detail.to_string());
+    fields.insert("block_reason".to_string(), block_detail.to_string());
+    if let Err(error) = crate::team::task_cmd::cmd_update(board_dir, task_id, fields) {
+        warn!(
+            task_id,
+            error = %error,
+            "failed to record dirty-main merge block on review task"
+        );
+    }
+}
+
+fn snapshot_runtime_dirty_main(
+    project_root: &std::path::Path,
+    request: &MergeRequest,
+    task_title: &str,
+    root_dirty: &RootDirtyState,
+) -> Result<Option<String>> {
+    if !root_dirty.is_runtime_only() {
+        return Ok(None);
+    }
+
+    let task = load_tasks_from_dir(
+        &project_root
+            .join(".batty")
+            .join("team_config")
+            .join("board")
+            .join("tasks"),
+    )?
+    .into_iter()
+    .find(|task| task.id == request.task_id)
+    .unwrap_or_else(|| fallback_snapshot_task(request, task_title));
+    let source_head = git_head(project_root).ok();
+    let reason = format!(
+        "runtime-only dirty main before review merge; paths: {}",
+        root_dirty.runtime_paths.join(", ")
+    );
+    let snapshot_path = crate::team::checkpoint::write_dirty_lane_snapshot(
+        project_root,
+        project_root,
+        "main",
+        &task,
+        "main",
+        &request.branch,
+        &reason,
+        source_head.as_deref(),
+    )?;
+    let snapshot_relative = snapshot_path
+        .strip_prefix(project_root)
+        .unwrap_or(&snapshot_path)
+        .to_string_lossy()
+        .to_string();
+    let record = crate::team::checkpoint::PreservedLaneRecord::snapshot(
+        "main",
+        &task,
+        "main",
+        &request.branch,
+        &reason,
+        source_head,
+        snapshot_relative.clone(),
+    );
+    crate::team::checkpoint::write_preserved_lane_record(project_root, &record)?;
+    Ok(Some(snapshot_relative))
+}
+
+fn fallback_snapshot_task(request: &MergeRequest, task_title: &str) -> crate::task::Task {
+    crate::task::Task {
+        id: request.task_id,
+        title: task_title.to_string(),
+        status: "review".to_string(),
+        priority: "high".to_string(),
+        assignee: None,
+        claimed_by: Some(request.engineer.clone()),
+        claimed_at: None,
+        claim_ttl_secs: None,
+        claim_expires_at: None,
+        last_progress_at: None,
+        claim_warning_sent_at: None,
+        claim_extensions: None,
+        last_output_bytes: None,
+        blocked: None,
+        tags: Vec::new(),
+        depends_on: Vec::new(),
+        review_owner: None,
+        blocked_on: None,
+        worktree_path: None,
+        branch: Some(request.branch.clone()),
+        commit: None,
+        artifacts: Vec::new(),
+        next_action: None,
+        scheduled_for: None,
+        cron_schedule: None,
+        cron_last_run: None,
+        completed: None,
+        description: String::new(),
+        batty_config: None,
+        source_path: PathBuf::new(),
+    }
 }
 
 fn missing_completion_packet_detail(
@@ -908,6 +1101,49 @@ mod tests {
         assert_eq!(queue.queued_len(), 0);
     }
 
+    #[test]
+    fn dirty_main_review_merge_block_detail_names_staged_source_paths() {
+        let detail = dirty_main_review_merge_block_detail(&RootDirtyState {
+            staged_paths: vec!["src/lib.rs".to_string()],
+            unstaged_paths: Vec::new(),
+            runtime_paths: Vec::new(),
+            source_paths: vec!["src/lib.rs".to_string()],
+        })
+        .unwrap();
+
+        assert!(detail.contains("Dirty source paths: src/lib.rs."));
+        assert!(detail.contains("Staged: src/lib.rs."));
+        assert!(detail.contains("Next action: commit, stash, or clean"));
+    }
+
+    #[test]
+    fn dirty_main_review_merge_block_detail_names_unstaged_source_paths() {
+        let detail = dirty_main_review_merge_block_detail(&RootDirtyState {
+            staged_paths: Vec::new(),
+            unstaged_paths: vec!["src/lib.rs".to_string()],
+            runtime_paths: Vec::new(),
+            source_paths: vec!["src/lib.rs".to_string()],
+        })
+        .unwrap();
+
+        assert!(detail.contains("Dirty source paths: src/lib.rs."));
+        assert!(detail.contains("Unstaged/untracked: src/lib.rs."));
+        assert!(detail.contains("Next action: commit, stash, or clean"));
+    }
+
+    #[test]
+    fn dirty_main_review_merge_block_detail_ignores_runtime_only_paths() {
+        assert!(
+            dirty_main_review_merge_block_detail(&RootDirtyState {
+                staged_paths: Vec::new(),
+                unstaged_paths: vec![".batty/team_config/board/activity.jsonl".to_string()],
+                runtime_paths: vec![".batty/team_config/board/activity.jsonl".to_string()],
+                source_paths: Vec::new(),
+            })
+            .is_none()
+        );
+    }
+
     fn write_task_file(project_root: &Path, id: u32, title: &str, status: &str) {
         let tasks_dir = project_root
             .join(".batty")
@@ -982,8 +1218,13 @@ mod tests {
         std::fs::write(worktree_dir.join("note.txt"), "queued merge\n").unwrap();
         git_ok(&worktree_dir, &["add", "note.txt"]);
         git_ok(&worktree_dir, &["commit", "-m", "queue merge"]);
-        std::fs::write(repo.join("local-wip.txt"), "root dirty\n").unwrap();
-        git_ok(&repo, &["add", "local-wip.txt"]);
+        let activity_dir = repo.join(".batty").join("team_config").join("board");
+        std::fs::create_dir_all(&activity_dir).unwrap();
+        std::fs::write(
+            activity_dir.join("activity.jsonl"),
+            "{\"event\":\"tick\"}\n",
+        )
+        .unwrap();
         let branch = current_worktree_branch(&worktree_dir).unwrap();
         let commit = current_head(&worktree_dir);
         write_completion_metadata(
@@ -1022,9 +1263,10 @@ mod tests {
             crate::team::test_support::git_stdout(&repo, &["show", "main:note.txt"]),
             "queued merge"
         );
-        assert_eq!(
-            std::fs::read_to_string(repo.join("local-wip.txt")).unwrap(),
-            "root dirty\n"
+        assert!(
+            std::fs::read_to_string(activity_dir.join("activity.jsonl"))
+                .unwrap()
+                .contains("{\"event\":\"tick\"}")
         );
         let task = crate::task::Task::from_file(
             &repo
@@ -1048,14 +1290,103 @@ mod tests {
         .unwrap();
         assert!(
             manager_messages.iter().any(|message| {
-                message
-                    .body
-                    .contains("Merge mode: isolated integration checkout")
-                    && message
+                message.body.contains("Task #42 completed from merge queue")
+                    && message.body.contains("Merge: success")
+                    && !message
                         .body
-                        .contains("root main checkout has local changes")
+                        .contains("Merge mode: isolated integration checkout")
             }),
-            "manager should see isolated merge reason: {manager_messages:?}"
+            "manager should see a normal successful merge: {manager_messages:?}"
+        );
+        assert!(
+            crate::team::checkpoint::read_preserved_lane_record(&repo, "main").is_some(),
+            "runtime-only dirty main state should be snapshotted before merge"
+        );
+    }
+
+    #[test]
+    fn daemon_process_merge_queue_blocks_dirty_main_source_edits() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "batty-merge-queue-dirty-main-test");
+        write_task_file(&repo, 42, "dirty-main-task", "review");
+
+        let team_config_dir = repo.join(".batty").join("team_config");
+        let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
+        setup_engineer_worktree(&repo, &worktree_dir, "eng-1", &team_config_dir).unwrap();
+        std::fs::write(worktree_dir.join("note.txt"), "queued merge\n").unwrap();
+        git_ok(&worktree_dir, &["add", "note.txt"]);
+        git_ok(&worktree_dir, &["commit", "-m", "queue merge"]);
+        let branch = current_worktree_branch(&worktree_dir).unwrap();
+        let commit = current_head(&worktree_dir);
+        write_completion_metadata(
+            &repo,
+            42,
+            "dirty-main-task",
+            &branch,
+            &worktree_dir,
+            &commit,
+        );
+        std::fs::write(repo.join("src").join("lib.rs"), "pub fn dirty_main() {}\n").unwrap();
+
+        let members = vec![
+            manager_member("manager", None),
+            engineer_member("eng-1", Some("manager"), true),
+        ];
+        let mut daemon = make_test_daemon(&repo, members);
+        daemon.set_active_task_for_test("eng-1", 42);
+        daemon.set_member_state_for_test("eng-1", MemberState::Working);
+        daemon.enqueue_merge_request(MergeRequest {
+            task_id: 42,
+            engineer: "eng-1".to_string(),
+            branch,
+            worktree_dir: worktree_dir.clone(),
+            queued_at: Instant::now(),
+            test_passed: true,
+            should_post_merge_verify: true,
+            test_duration_ms: 1,
+            confidence: 0.95,
+            files_changed: 1,
+            lines_changed: 1,
+        });
+
+        daemon.process_merge_queue().unwrap();
+
+        let show = Command::new("git")
+            .args(["show", "main:note.txt"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        assert!(!show.status.success(), "review branch should not merge");
+        let task = crate::task::Task::from_file(
+            &repo
+                .join(".batty")
+                .join("team_config")
+                .join("board")
+                .join("tasks")
+                .join("042-dirty-main-task.md"),
+        )
+        .unwrap();
+        assert_eq!(task.status, "review");
+        assert!(
+            task.blocked_on
+                .as_deref()
+                .is_some_and(|block| block.contains("src/lib.rs")
+                    && block.contains("Next action: commit, stash, or clean"))
+        );
+        assert_eq!(daemon.active_task_id("eng-1"), Some(42));
+
+        let manager_messages = crate::team::inbox::pending_messages(
+            &crate::team::inbox::inboxes_root(&repo),
+            "manager",
+        )
+        .unwrap();
+        assert!(
+            manager_messages.iter().any(|message| {
+                message.body.contains("dirty source edits")
+                    && message.body.contains("src/lib.rs")
+                    && message.body.contains("Leave the task in review")
+            }),
+            "manager should see dirty-main block: {manager_messages:?}"
         );
     }
 
