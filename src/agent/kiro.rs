@@ -19,12 +19,19 @@ pub const KIRO_DEFAULT_MODEL: &str = "claude-opus-4.6-1m";
 pub struct KiroCliAdapter {
     /// Override the kiro binary name/path (default: "kiro-cli").
     program: String,
+    /// Model to request when launching Kiro without an agent config.
+    model: String,
 }
 
 impl KiroCliAdapter {
     pub fn new(program: Option<String>) -> Self {
+        Self::new_with_model(program, None)
+    }
+
+    pub fn new_with_model(program: Option<String>, model: Option<String>) -> Self {
         Self {
             program: program.unwrap_or_else(|| "kiro-cli".to_string()),
+            model: model.unwrap_or_else(|| KIRO_DEFAULT_MODEL.to_string()),
         }
     }
 }
@@ -35,18 +42,20 @@ pub fn write_kiro_agent_config(
     member_name: &str,
     prompt: &str,
     work_dir: &Path,
+    model: Option<&str>,
 ) -> anyhow::Result<String> {
     let agent_name = format!("batty-{member_name}");
     let agents_dir = work_dir.join(".kiro").join("agents");
     std::fs::create_dir_all(&agents_dir)?;
     let config_path = agents_dir.join(format!("{agent_name}.json"));
+    let model = model.unwrap_or(KIRO_DEFAULT_MODEL);
     let config = serde_json::json!({
         "name": agent_name,
         "description": format!("Batty-managed agent for {member_name}"),
         "prompt": prompt,
         "tools": ["*"],
         "allowedTools": ["*"],
-        "model": KIRO_DEFAULT_MODEL,
+        "model": model,
         "includeMcpJson": true
     });
     std::fs::write(&config_path, serde_json::to_string_pretty(&config)?)?;
@@ -110,7 +119,8 @@ impl AgentAdapter for KiroCliAdapter {
         } else {
             let escaped = prompt.replace('\'', "'\\''");
             Ok(format!(
-                "exec '{escaped_program}' chat --trust-all-tools --model {KIRO_DEFAULT_MODEL} '{escaped}'"
+                "exec '{escaped_program}' chat --trust-all-tools --model {} '{escaped}'",
+                self.model
             ))
         }
     }
@@ -200,7 +210,17 @@ mod tests {
         let cmd = adapter
             .launch_command("do the thing", false, false, None)
             .unwrap();
-        assert!(cmd.contains("--model"));
+        assert!(cmd.contains(&format!("--model {KIRO_DEFAULT_MODEL}")));
+        assert!(cmd.contains("'do the thing'"));
+    }
+
+    #[test]
+    fn launch_command_with_raw_prompt_uses_configured_model() {
+        let adapter = KiroCliAdapter::new_with_model(None, Some("claude-sonnet-4.5".to_string()));
+        let cmd = adapter
+            .launch_command("do the thing", false, false, None)
+            .unwrap();
+        assert!(cmd.contains("--model claude-sonnet-4.5"));
         assert!(cmd.contains("'do the thing'"));
     }
 
@@ -229,7 +249,7 @@ mod tests {
     fn write_agent_config_creates_json() {
         let tmp = tempfile::tempdir().unwrap();
         let name =
-            write_kiro_agent_config("architect", "You are an architect", tmp.path()).unwrap();
+            write_kiro_agent_config("architect", "You are an architect", tmp.path(), None).unwrap();
         assert_eq!(name, "batty-architect");
         let config_path = tmp.path().join(".kiro/agents/batty-architect.json");
         assert!(config_path.exists());
@@ -239,6 +259,23 @@ mod tests {
         assert_eq!(content["model"], KIRO_DEFAULT_MODEL);
         assert_eq!(content["tools"], serde_json::json!(["*"]));
         assert_eq!(content["allowedTools"], serde_json::json!(["*"]));
+    }
+
+    #[test]
+    fn write_agent_config_uses_configured_model() {
+        let tmp = tempfile::tempdir().unwrap();
+        let name = write_kiro_agent_config(
+            "architect",
+            "You are an architect",
+            tmp.path(),
+            Some("claude-sonnet-4.5"),
+        )
+        .unwrap();
+        assert_eq!(name, "batty-architect");
+        let config_path = tmp.path().join(".kiro/agents/batty-architect.json");
+        let content: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
+        assert_eq!(content["model"], "claude-sonnet-4.5");
     }
 
     #[test]
