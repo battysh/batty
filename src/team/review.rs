@@ -542,6 +542,8 @@ fn extract_task_ids(text: &str) -> BTreeSet<u32> {
     let hash_pattern = Regex::new(r"(?i)#(\d+)\b").expect("hash task id regex should compile");
     let task_pattern =
         Regex::new(r"(?i)\btask[-_ /]?(\d+)\b").expect("task task id regex should compile");
+    let branch_suffix_pattern =
+        Regex::new(r"(?:^|/)(\d+)\b").expect("branch suffix task id regex should compile");
 
     for captures in hash_pattern.captures_iter(text) {
         if let Some(id) = captures
@@ -552,6 +554,14 @@ fn extract_task_ids(text: &str) -> BTreeSet<u32> {
         }
     }
     for captures in task_pattern.captures_iter(text) {
+        if let Some(id) = captures
+            .get(1)
+            .and_then(|value| value.as_str().parse::<u32>().ok())
+        {
+            ids.insert(id);
+        }
+    }
+    for captures in branch_suffix_pattern.captures_iter(text) {
         if let Some(id) = captures
             .get(1)
             .and_then(|value| value.as_str().parse::<u32>().ok())
@@ -806,6 +816,15 @@ mod tests {
         );
 
         assert!(blockers.is_empty());
+    }
+
+    #[test]
+    fn task_reference_mismatch_detects_numeric_task_branch_suffix() {
+        let blockers = task_reference_mismatch_blockers(699, "eng-1-1/687", &[]);
+
+        assert_eq!(blockers.len(), 1);
+        assert!(blockers[0].contains("#687"));
+        assert!(blockers[0].contains("assigned task is #699"));
     }
 
     #[test]

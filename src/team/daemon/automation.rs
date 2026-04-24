@@ -2101,13 +2101,21 @@ impl TeamDaemon {
             .collect::<Vec<_>>();
 
         for (task_id, title, dependencies, recipient) in unblocked_tasks {
-            task_cmd::transition_task_with_attribution(
-                &board_dir,
-                task_id,
-                "todo",
-                task_cmd::StatusTransitionAttribution::daemon("daemon.automation.auto_unblock"),
-            )
-            .with_context(|| format!("failed to auto-unblock task #{task_id}"))?;
+            let current_task = crate::task::load_task_by_id(&board_dir.join("tasks"), task_id)
+                .with_context(|| format!("failed to reload task #{task_id} before auto-unblock"))?;
+            if current_task.status == "blocked" {
+                task_cmd::transition_task_with_attribution(
+                    &board_dir,
+                    task_id,
+                    "todo",
+                    task_cmd::StatusTransitionAttribution::daemon("daemon.automation.auto_unblock"),
+                )
+                .with_context(|| format!("failed to auto-unblock task #{task_id}"))?;
+            } else {
+                task_cmd::clear_blocked_fields(&board_dir, task_id).with_context(|| {
+                    format!("failed to clear stale blocked fields for task #{task_id}")
+                })?;
+            }
 
             let dependency_list = dependencies
                 .iter()

@@ -49,6 +49,11 @@ pub(crate) enum BoardFinding {
         title: String,
         branch: String,
     },
+    CrossTaskMetadataDrift {
+        task_id: u32,
+        title: String,
+        reasons: Vec<String>,
+    },
     BlockedTaskResolved {
         task_id: u32,
         title: String,
@@ -164,6 +169,21 @@ pub(crate) fn scan_board_health(
                     });
                 }
             }
+        }
+
+        let drift_reasons = crate::team::completion::completion_metadata_drift_reasons(
+            project_root,
+            &task.source_path,
+            task.id,
+            task.branch.as_deref(),
+            &task.artifacts,
+        )?;
+        if !drift_reasons.is_empty() {
+            findings.push(BoardFinding::CrossTaskMetadataDrift {
+                task_id: task.id,
+                title: task.title.clone(),
+                reasons: drift_reasons,
+            });
         }
 
         if task.status == "blocked"
@@ -340,14 +360,20 @@ pub(crate) fn apply_safe_fixes(board_dir: &Path, report: &ReconciliationReport) 
             }
             BoardFinding::BlockedTaskResolved { task_id, title, .. } => {
                 if crate::team::task_cmd::find_task_path(board_dir, *task_id).is_ok() {
-                    crate::team::task_cmd::transition_task_with_attribution(
-                        board_dir,
-                        *task_id,
-                        "todo",
-                        crate::team::task_cmd::StatusTransitionAttribution::daemon(
-                            "daemon.board_reconciliation.unblocked",
-                        ),
-                    )?;
+                    let current_task =
+                        crate::task::load_task_by_id(&tasks_dir, *task_id)?;
+                    if current_task.status == "blocked" {
+                        crate::team::task_cmd::transition_task_with_attribution(
+                            board_dir,
+                            *task_id,
+                            "todo",
+                            crate::team::task_cmd::StatusTransitionAttribution::daemon(
+                                "daemon.board_reconciliation.unblocked",
+                            ),
+                        )?;
+                    } else {
+                        crate::team::task_cmd::clear_blocked_fields(board_dir, *task_id)?;
+                    }
                     fixes.push(AppliedFix::UnblockedTask {
                         task_id: *task_id,
                         title: title.clone(),
@@ -377,6 +403,7 @@ pub(crate) fn apply_safe_fixes(board_dir: &Path, report: &ReconciliationReport) 
                 }
             }
             BoardFinding::DoneTaskHasUnmergedBranch { .. }
+            | BoardFinding::CrossTaskMetadataDrift { .. }
             | BoardFinding::StuckTaskNoCommits { .. }
             | BoardFinding::DoneTaskReadyToArchive { .. } => {}
         }
@@ -421,6 +448,16 @@ pub(crate) fn render_report(report: &ReconciliationReport) -> String {
             } => {
                 out.push_str(&format!(
                     "WARN: task #{task_id} ({title}) is done but branch '{branch}' is not merged into main\n"
+                ));
+            }
+            BoardFinding::CrossTaskMetadataDrift {
+                task_id,
+                title,
+                reasons,
+            } => {
+                out.push_str(&format!(
+                    "WARN: task #{task_id} ({title}) has cross-task completion metadata drift ({})\n",
+                    reasons.join("; ")
                 ));
             }
             BoardFinding::BlockedTaskResolved {
@@ -500,6 +537,25 @@ pub(crate) fn render_apply_report(report: &ApplyReport) -> String {
             }
             AppliedFix::ArchivedDoneTask { task_id, title } => {
                 out.push_str(&format!("  - archived task #{task_id} ({title})\n"));
+            }
+            AppliedFix::CompletedMergedReviewTask {
+                task_id,
+                title,
+                reason,
+            } => {
+                out.push_str(&format!(
+                    "  - completed merged review task #{task_id} ({title}): {reason}\n"
+                ));
+            }
+            AppliedFix::RequeuedReviewTask {
+                task_id,
+                title,
+                reasons,
+            } => {
+                out.push_str(&format!(
+                    "  - requeued review task #{task_id} ({title}): {}\n",
+                    reasons.join("; ")
+                ));
             }
         }
     }
@@ -673,6 +729,43 @@ mod tests {
             finding,
             BoardFinding::DoneTaskHasUnmergedBranch { task_id: 2, .. }
         )));
+    }
+
+    #[test]
+    fn scan_reports_cross_task_metadata_drift() {
+        let tmp = tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "reconcile_metadata_drift");
+        write_task(
+            &repo,
+            687,
+            "wrong-metadata",
+            "review",
+            Some("eng-1"),
+            &[],
+            Some("eng-1-1/699"),
+            Some("abc1234"),
+            None,
+            None,
+        );
+
+        let report = scan_board_health(
+            &repo,
+            &repo.join(".batty").join("team_config").join("board"),
+            &ReconciliationOptions {
+                git_available: false,
+                ..ReconciliationOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert!(report.findings.iter().any(|finding| matches!(
+            finding,
+            BoardFinding::CrossTaskMetadataDrift { task_id: 687, reasons, .. }
+                if reasons.iter().any(|reason| reason.contains("#699"))
+        )));
+        let rendered = render_report(&report);
+        assert!(rendered.contains("cross-task completion metadata drift"));
+        assert!(rendered.contains("#699"));
     }
 
     #[test]

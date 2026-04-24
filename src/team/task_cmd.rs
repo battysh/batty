@@ -103,6 +103,11 @@ pub(crate) fn transition_task_preserving_block_with_attribution(
     Ok(())
 }
 
+pub(crate) fn clear_blocked_fields(board_dir: &Path, task_id: u32) -> Result<()> {
+    let task_path = find_task_path(board_dir, task_id)?;
+    update_task_frontmatter(&task_path, clear_blocked)
+}
+
 #[allow(dead_code)]
 pub(crate) fn block_task_with_reason(board_dir: &Path, task_id: u32, reason: &str) -> Result<()> {
     block_task_with_reason_and_attribution(
@@ -1298,6 +1303,25 @@ mod tests {
         .unwrap();
 
         let task = Task::from_file(&task_path).unwrap();
+        assert!(task.blocked.is_none());
+        assert!(task.blocked_on.is_none());
+    }
+
+    #[test]
+    fn clearing_blocked_fields_preserves_review_status() {
+        let tmp = tempfile::tempdir().unwrap();
+        let board_dir = tmp.path();
+        let task_path = write_task_file(board_dir, 18, "review");
+        std::fs::write(
+            &task_path,
+            "---\nid: 18\ntitle: Task 18\nstatus: review\npriority: high\nblocked: true\nblock_reason: stale dependency hold\nblocked_on: stale dependency hold\nclass: standard\n---\n\nTask body.\n",
+        )
+        .unwrap();
+
+        clear_blocked_fields(board_dir, 18).unwrap();
+
+        let task = Task::from_file(&task_path).unwrap();
+        assert_eq!(task.status, "review");
         assert!(task.blocked.is_none());
         assert!(task.blocked_on.is_none());
     }

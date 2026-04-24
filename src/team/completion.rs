@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::task::load_tasks_from_dir;
+use crate::task::{Task, load_tasks_from_dir};
 
 use super::board::{WorkflowMetadata, read_workflow_metadata, write_workflow_metadata};
 use super::daemon::verification;
@@ -83,6 +83,127 @@ pub fn apply_completion_to_metadata(packet: &CompletionPacket, metadata: &mut Wo
     metadata.outcome = Some(packet.outcome.clone());
 }
 
+pub(crate) fn validate_completion_metadata_target(
+    project_root: &Path,
+    task_path: &Path,
+    expected_task_id: u32,
+    branch: Option<&str>,
+    artifacts: &[String],
+) -> Result<()> {
+    let reasons = completion_metadata_drift_reasons(
+        project_root,
+        task_path,
+        expected_task_id,
+        branch,
+        artifacts,
+    )?;
+    if reasons.is_empty() {
+        Ok(())
+    } else {
+        anyhow::bail!(
+            "completion metadata target mismatch for task #{expected_task_id}: {}",
+            reasons.join("; ")
+        )
+    }
+}
+
+pub(crate) fn completion_metadata_drift_reasons(
+    project_root: &Path,
+    task_path: &Path,
+    expected_task_id: u32,
+    branch: Option<&str>,
+    artifacts: &[String],
+) -> Result<Vec<String>> {
+    let task = Task::from_file(task_path).with_context(|| {
+        format!(
+            "failed to read task frontmatter from {}",
+            task_path.display()
+        )
+    })?;
+    let mut reasons = Vec::new();
+
+    if task.id != expected_task_id {
+        reasons.push(format!(
+            "task path {} has frontmatter id #{} instead of #{}",
+            task_path.display(),
+            task.id,
+            expected_task_id
+        ));
+    }
+
+    if let Some(branch) = branch.map(str::trim).filter(|value| !value.is_empty()) {
+        reasons.extend(crate::team::review::task_reference_mismatch_blockers(
+            expected_task_id,
+            branch,
+            &[],
+        ));
+    }
+
+    for artifact in artifacts {
+        reasons.extend(artifact_task_id_drift_reasons(
+            project_root,
+            expected_task_id,
+            artifact,
+        )?);
+    }
+
+    Ok(reasons)
+}
+
+fn artifact_task_id_drift_reasons(
+    project_root: &Path,
+    expected_task_id: u32,
+    artifact: &str,
+) -> Result<Vec<String>> {
+    let artifact = artifact.trim();
+    if artifact.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut reasons = Vec::new();
+    if let Some(task_id) = artifact_task_id_from_path(artifact)
+        && task_id != expected_task_id
+    {
+        reasons.push(format!(
+            "artifact `{artifact}` references task #{task_id} instead of #{expected_task_id}"
+        ));
+    }
+
+    let artifact_path = PathBuf::from(artifact);
+    let artifact_path = if artifact_path.is_absolute() {
+        artifact_path
+    } else {
+        project_root.join(artifact_path)
+    };
+    if artifact_path.extension().is_some_and(|ext| ext == "json") && artifact_path.exists() {
+        let content = std::fs::read_to_string(&artifact_path)
+            .with_context(|| format!("failed to read artifact {}", artifact_path.display()))?;
+        let value: serde_json::Value = serde_json::from_str(&content)
+            .with_context(|| format!("failed to parse artifact {}", artifact_path.display()))?;
+        if let Some(task_id) = value.get("task_id").and_then(|value| value.as_u64())
+            && task_id != u64::from(expected_task_id)
+        {
+            reasons.push(format!(
+                "artifact `{artifact}` contains task_id #{task_id} instead of #{expected_task_id}"
+            ));
+        }
+    }
+
+    Ok(reasons)
+}
+
+fn artifact_task_id_from_path(artifact: &str) -> Option<u32> {
+    let name = Path::new(artifact).file_name()?.to_str()?;
+    let (_, after_marker) = name.split_once("task-")?;
+    let digits = after_marker
+        .chars()
+        .take_while(|ch| ch.is_ascii_digit())
+        .collect::<String>();
+    (!digits.is_empty())
+        .then(|| digits.parse::<u32>().ok())
+        .flatten()
+}
+
 fn scope_review_blockers(
     project_root: &Path,
     task_text: &str,
@@ -118,6 +239,13 @@ pub(crate) fn ingest_completion_message(project_root: &Path, message: &str) -> R
     let task_path = find_task_path(project_root, packet.task_id)?;
     let task_text = std::fs::read_to_string(&task_path)
         .with_context(|| format!("failed to read {}", task_path.display()))?;
+    validate_completion_metadata_target(
+        project_root,
+        &task_path,
+        packet.task_id,
+        packet.branch.as_deref(),
+        &packet.artifacts,
+    )?;
     let mut metadata = read_workflow_metadata(&task_path)?;
     apply_completion_to_metadata(&packet, &mut metadata);
     let mut review_blockers = validation.missing_fields;
@@ -398,6 +526,68 @@ outcome: ready_for_review
         assert_eq!(metadata.commit.as_deref(), Some("abc1234"));
         assert_eq!(metadata.tests_run, Some(true));
         assert!(metadata.review_blockers.is_empty());
+    }
+
+    #[test]
+    fn ingest_completion_message_rejects_branch_task_mismatch_without_writing_metadata() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = team_config_dir(tmp.path()).join("board").join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+        let task_path = tasks_dir.join("027-task.md");
+        std::fs::write(
+            &task_path,
+            "---\nid: 27\ntitle: Completion packets\nstatus: review\npriority: medium\nclaimed_by: eng-1-4\nclass: standard\n---\n\nTask body.\n",
+        )
+        .unwrap();
+
+        let error = ingest_completion_message(
+            tmp.path(),
+            r#"Done.
+
+## Completion Packet
+
+```json
+{"task_id":27,"branch":"eng-1-4/task-99","worktree_path":".batty/worktrees/eng-1-4","commit":"abc1234","changed_paths":["src/team/completion.rs"],"tests_run":true,"tests_passed":true,"artifacts":[],"outcome":"ready_for_review"}
+```"#,
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("branch `eng-1-4/task-99` references task(s) #99"));
+        let metadata = read_workflow_metadata(&task_path).unwrap();
+        assert!(metadata.branch.is_none());
+        assert!(metadata.commit.is_none());
+    }
+
+    #[test]
+    fn completion_metadata_validator_rejects_artifact_task_id_mismatch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = team_config_dir(tmp.path()).join("board").join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+        let task_path = tasks_dir.join("027-task.md");
+        std::fs::write(
+            &task_path,
+            "---\nid: 27\ntitle: Completion packets\nstatus: review\npriority: medium\nclass: standard\n---\n\nTask body.\n",
+        )
+        .unwrap();
+        let artifact = ".batty/reports/verification/completion/task-099-eng-1-attempt-1.json";
+        let artifact_path = tmp.path().join(artifact);
+        std::fs::create_dir_all(artifact_path.parent().unwrap()).unwrap();
+        std::fs::write(&artifact_path, r#"{"task_id":99,"passed":true}"#).unwrap();
+
+        let error = validate_completion_metadata_target(
+            tmp.path(),
+            &task_path,
+            27,
+            Some("eng-1-4/task-27"),
+            &[artifact.to_string()],
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("artifact"));
+        assert!(error.contains("#99"));
+        assert!(error.contains("#27"));
     }
 
     #[test]
