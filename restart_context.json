@@ -1,0 +1,14 @@
+{
+  "role": "eng-1-3",
+  "task_id": 722,
+  "task_title": "Add review queue age telemetry and dashboard panels",
+  "task_description": "Task body:\n- Change `src/team/telemetry_db.rs`, `src/team/metrics.rs`, `src/team/grafana.rs` or the bundled Grafana dashboard asset, and any existing telemetry tests that cover board/review metrics.\n- Emit durable telemetry for each review task age bucket: total review queue depth, oldest review age seconds, count over the configured review SLO, and merge/rework disposition latency when a review leaves the queue.\n- Surface these values in the Grafana dashboard without requiring a new datasource or manual SQL entry.\n- Add unit tests for the telemetry aggregation using temporary board/task fixtures, including empty review queue, fresh review task, and overdue review task cases.\n- Acceptance criteria: `cargo fmt --check`, focused telemetry/dashboard tests, and `cargo test --lib review_queue` or the closest matching review/telemetry filter all pass.",
+  "branch": "eng-1-2/722",
+  "worktree_path": "/Users/zedmor/batty/.batty/worktrees/eng-1-3",
+  "restart_count": 1,
+  "reason": "context_pressure",
+  "output_bytes": 7774,
+  "last_commit": "648cf4fa8808708d2c94d8599a86f600445d05ff",
+  "created_at_epoch_secs": 1777046260,
+  "handoff_consumed": true
+}
