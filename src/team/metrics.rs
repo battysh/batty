@@ -7,8 +7,9 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use chrono::{DateTime, Duration, FixedOffset, TimeZone, Utc};
+use serde::Deserialize;
 
-use crate::task::{Task, load_tasks_from_dir};
+use crate::task::{Task, load_tasks_from_dir, parse_frontmatter_timestamp_compat};
 
 use super::board::read_task_lifecycle_timestamps;
 
@@ -54,6 +55,25 @@ pub struct InProgressTaskSummary {
     pub engineer: Option<String>,
     pub priority: String,
     pub minutes_in_progress: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewQueueSnapshot {
+    pub timestamp: i64,
+    pub queue_depth: i64,
+    pub oldest_review_age_secs: Option<i64>,
+    pub over_slo_count: i64,
+    pub review_slo_secs: i64,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct ReviewTaskTimestampFrontmatter {
+    #[serde(default)]
+    created: Option<String>,
+    #[serde(default)]
+    started: Option<String>,
+    #[serde(default)]
+    updated: Option<String>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -251,6 +271,77 @@ pub fn longest_running_in_progress_tasks(
     tasks
 }
 
+pub fn collect_review_queue_snapshot(
+    board_dir: &Path,
+    review_slo_secs: u64,
+) -> Result<ReviewQueueSnapshot> {
+    collect_review_queue_snapshot_at(board_dir, review_slo_secs, Utc::now())
+}
+
+pub fn collect_review_queue_snapshot_at(
+    board_dir: &Path,
+    review_slo_secs: u64,
+    now: DateTime<Utc>,
+) -> Result<ReviewQueueSnapshot> {
+    let tasks_dir = board_dir.join("tasks");
+    if !tasks_dir.is_dir() {
+        return Ok(ReviewQueueSnapshot {
+            timestamp: now.timestamp(),
+            queue_depth: 0,
+            oldest_review_age_secs: None,
+            over_slo_count: 0,
+            review_slo_secs: review_slo_secs as i64,
+        });
+    }
+
+    let mut ages = Vec::new();
+    for task in load_tasks_from_dir(&tasks_dir)? {
+        if task.status == "review" {
+            ages.push(review_task_age_secs(&task, now)?);
+        }
+    }
+
+    let review_slo_secs = review_slo_secs as i64;
+    let over_slo_count = ages.iter().filter(|age| **age >= review_slo_secs).count() as i64;
+
+    Ok(ReviewQueueSnapshot {
+        timestamp: now.timestamp(),
+        queue_depth: ages.len() as i64,
+        oldest_review_age_secs: ages.iter().copied().max(),
+        over_slo_count,
+        review_slo_secs,
+    })
+}
+
+fn review_task_age_secs(task: &Task, now: DateTime<Utc>) -> Result<i64> {
+    let content = std::fs::read_to_string(&task.source_path)?;
+    let (frontmatter, _) = split_task_frontmatter(&content)?;
+    let parsed: ReviewTaskTimestampFrontmatter = serde_yaml::from_str(frontmatter)?;
+    let timestamp = parsed.updated.or(parsed.started).or(parsed.created);
+    Ok(timestamp
+        .as_deref()
+        .and_then(parse_frontmatter_timestamp_compat)
+        .map(|timestamp| now.signed_duration_since(timestamp).num_seconds().max(0))
+        .unwrap_or(0))
+}
+
+fn split_task_frontmatter(content: &str) -> Result<(&str, &str)> {
+    let trimmed = content.trim_start();
+    anyhow::ensure!(
+        trimmed.starts_with("---"),
+        "task file missing YAML frontmatter"
+    );
+    let after_open = trimmed[3..].strip_prefix('\n').unwrap_or(&trimmed[3..]);
+    let close_pos = after_open
+        .find("\n---")
+        .ok_or_else(|| anyhow::anyhow!("task file missing closing frontmatter delimiter"))?;
+    let frontmatter = &after_open[..close_pos];
+    let body = after_open[close_pos + 4..]
+        .strip_prefix('\n')
+        .unwrap_or(&after_open[close_pos + 4..]);
+    Ok((frontmatter, body))
+}
+
 fn duration_minutes(
     start: Option<DateTime<FixedOffset>>,
     end: Option<DateTime<FixedOffset>>,
@@ -337,6 +428,21 @@ mod tests {
         std::fs::write(tasks_dir.join(format!("{id:03}-{title}.md")), content).unwrap();
     }
 
+    fn write_review_task_with_updated(
+        board_dir: &Path,
+        id: u32,
+        title: &str,
+        updated: DateTime<Utc>,
+    ) {
+        let tasks_dir = board_dir.join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+        let content = format!(
+            "---\nid: {id}\ntitle: {title}\nstatus: review\npriority: medium\nupdated: {}\n---\n\nTask body.\n",
+            updated.to_rfc3339()
+        );
+        std::fs::write(tasks_dir.join(format!("{id:03}-{title}.md")), content).unwrap();
+    }
+
     #[test]
     fn compute_metrics_handles_empty_board() {
         let tmp = tempfile::tempdir().unwrap();
@@ -387,6 +493,50 @@ mod tests {
         assert_eq!(metrics.idle_with_runnable, vec!["eng-3"]);
         assert!(metrics.oldest_review_age_secs.is_some());
         assert!(metrics.oldest_assignment_age_secs.is_some());
+    }
+
+    #[test]
+    fn review_queue_snapshot_handles_empty_queue() {
+        let tmp = tempfile::tempdir().unwrap();
+        let board_dir = tmp.path().join(".batty").join("team_config").join("board");
+        std::fs::create_dir_all(board_dir.join("tasks")).unwrap();
+        let now = Utc.with_ymd_and_hms(2026, 4, 24, 12, 0, 0).unwrap();
+
+        let snapshot = collect_review_queue_snapshot_at(&board_dir, 3600, now).unwrap();
+
+        assert_eq!(snapshot.queue_depth, 0);
+        assert_eq!(snapshot.oldest_review_age_secs, None);
+        assert_eq!(snapshot.over_slo_count, 0);
+        assert_eq!(snapshot.review_slo_secs, 3600);
+    }
+
+    #[test]
+    fn review_queue_snapshot_counts_fresh_review_task() {
+        let tmp = tempfile::tempdir().unwrap();
+        let board_dir = tmp.path().join(".batty").join("team_config").join("board");
+        let now = Utc.with_ymd_and_hms(2026, 4, 24, 12, 0, 0).unwrap();
+        write_review_task_with_updated(&board_dir, 10, "fresh-review", now - Duration::minutes(30));
+
+        let snapshot = collect_review_queue_snapshot_at(&board_dir, 3600, now).unwrap();
+
+        assert_eq!(snapshot.queue_depth, 1);
+        assert_eq!(snapshot.oldest_review_age_secs, Some(1800));
+        assert_eq!(snapshot.over_slo_count, 0);
+    }
+
+    #[test]
+    fn review_queue_snapshot_counts_overdue_review_task() {
+        let tmp = tempfile::tempdir().unwrap();
+        let board_dir = tmp.path().join(".batty").join("team_config").join("board");
+        let now = Utc.with_ymd_and_hms(2026, 4, 24, 12, 0, 0).unwrap();
+        write_review_task_with_updated(&board_dir, 20, "fresh-review", now - Duration::minutes(30));
+        write_review_task_with_updated(&board_dir, 21, "overdue-review", now - Duration::hours(2));
+
+        let snapshot = collect_review_queue_snapshot_at(&board_dir, 3600, now).unwrap();
+
+        assert_eq!(snapshot.queue_depth, 2);
+        assert_eq!(snapshot.oldest_review_age_secs, Some(7200));
+        assert_eq!(snapshot.over_slo_count, 1);
     }
 
     #[test]

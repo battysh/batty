@@ -1803,6 +1803,128 @@
       ],
       "title": "Tasks Archived Per Hour",
       "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "batty-telemetry"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 12,
+        "y": 138
+      },
+      "id": 131,
+      "targets": [
+        {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "batty-telemetry"
+          },
+          "queryText": "SELECT COALESCE((SELECT queue_depth FROM review_queue_metrics ORDER BY timestamp DESC, id DESC LIMIT 1), 0) AS value;",
+          "queryType": "table",
+          "rawQueryText": "SELECT COALESCE((SELECT queue_depth FROM review_queue_metrics ORDER BY timestamp DESC, id DESC LIMIT 1), 0) AS value;",
+          "rawSql": "SELECT COALESCE((SELECT queue_depth FROM review_queue_metrics ORDER BY timestamp DESC, id DESC LIMIT 1), 0) AS value;",
+          "refId": "A"
+        }
+      ],
+      "title": "Review Queue Depth",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "batty-telemetry"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 18,
+        "y": 138
+      },
+      "id": 132,
+      "targets": [
+        {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "batty-telemetry"
+          },
+          "queryText": "SELECT COALESCE((SELECT oldest_review_age_secs FROM review_queue_metrics ORDER BY timestamp DESC, id DESC LIMIT 1), 0) AS value;",
+          "queryType": "table",
+          "rawQueryText": "SELECT COALESCE((SELECT oldest_review_age_secs FROM review_queue_metrics ORDER BY timestamp DESC, id DESC LIMIT 1), 0) AS value;",
+          "rawSql": "SELECT COALESCE((SELECT oldest_review_age_secs FROM review_queue_metrics ORDER BY timestamp DESC, id DESC LIMIT 1), 0) AS value;",
+          "refId": "A"
+        }
+      ],
+      "title": "Oldest Review Age",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "batty-telemetry"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 0,
+        "y": 146
+      },
+      "id": 133,
+      "targets": [
+        {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "batty-telemetry"
+          },
+          "queryText": "SELECT COALESCE((SELECT over_slo_count FROM review_queue_metrics ORDER BY timestamp DESC, id DESC LIMIT 1), 0) AS value;",
+          "queryType": "table",
+          "rawQueryText": "SELECT COALESCE((SELECT over_slo_count FROM review_queue_metrics ORDER BY timestamp DESC, id DESC LIMIT 1), 0) AS value;",
+          "rawSql": "SELECT COALESCE((SELECT over_slo_count FROM review_queue_metrics ORDER BY timestamp DESC, id DESC LIMIT 1), 0) AS value;",
+          "refId": "A"
+        }
+      ],
+      "title": "Review Over SLO",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "batty-telemetry"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 18,
+        "x": 6,
+        "y": 146
+      },
+      "id": 134,
+      "targets": [
+        {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "batty-telemetry"
+          },
+          "queryText": "SELECT COALESCE(ROUND(AVG(review_disposition_latency_secs), 1), 0) AS value FROM task_metrics WHERE review_disposition_latency_secs IS NOT NULL;",
+          "queryType": "table",
+          "rawQueryText": "SELECT COALESCE(ROUND(AVG(review_disposition_latency_secs), 1), 0) AS value FROM task_metrics WHERE review_disposition_latency_secs IS NOT NULL;",
+          "rawSql": "SELECT COALESCE(ROUND(AVG(review_disposition_latency_secs), 1), 0) AS value FROM task_metrics WHERE review_disposition_latency_secs IS NOT NULL;",
+          "refId": "A"
+        }
+      ],
+      "title": "Review Disposition Latency",
+      "type": "gauge"
     }
   ],
   "refresh": "30s",
