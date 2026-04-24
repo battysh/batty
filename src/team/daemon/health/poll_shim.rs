@@ -2008,7 +2008,7 @@ mod tests {
             "fresh-Working agent must not be killed for lifetime zero output"
         );
         assert!(
-            daemon.working_since.get("priya").is_some(),
+            daemon.working_since.contains_key("priya"),
             "working_since must be preserved on skip path"
         );
     }
@@ -2050,7 +2050,7 @@ mod tests {
         let mut daemon = TestDaemonBuilder::new(tmp.path()).build();
         insert_mock_handle(&mut daemon, "eng-1");
 
-        assert!(daemon.working_since.get("eng-1").is_none());
+        assert!(!daemon.working_since.contains_key("eng-1"));
 
         daemon
             .handle_shim_event(
@@ -2063,7 +2063,7 @@ mod tests {
             )
             .unwrap();
         assert!(
-            daemon.working_since.get("eng-1").is_some(),
+            daemon.working_since.contains_key("eng-1"),
             "Idle→Working must seed working_since"
         );
 
@@ -2078,7 +2078,7 @@ mod tests {
             )
             .unwrap();
         assert!(
-            daemon.working_since.get("eng-1").is_none(),
+            !daemon.working_since.contains_key("eng-1"),
             "Working→Idle must clear working_since"
         );
     }
