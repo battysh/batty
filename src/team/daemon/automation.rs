@@ -2357,8 +2357,20 @@ impl TeamDaemon {
         ) {
             return Ok(());
         }
+        if self.maybe_emit_review_drain_before_planning(&board_tasks)? {
+            return Ok(());
+        }
+        let actionable_review_count = board_tasks
+            .iter()
+            .filter(|task| task.status == "review")
+            .filter(|task| !crate::team::status::is_review_task_explicitly_blocked(task))
+            .count();
+        let implementation_work_summary = crate::team::tact::parser::implementation_work_summary(
+            dispatchable_task_count,
+            actionable_review_count,
+        );
         let board_summary = format!(
-            "todo={}, backlog={}, in-progress={}, review={}, done={}, idle_engineers={}, dispatchable_tasks={}",
+            "todo={}, backlog={}, in-progress={}, review={}, actionable_review={}, done={}, idle_engineers={}, dispatchable_tasks={}, implementation_work={}",
             board_tasks
                 .iter()
                 .filter(|task| task.status == "todo")
@@ -2375,12 +2387,14 @@ impl TeamDaemon {
                 .iter()
                 .filter(|task| task.status == "review")
                 .count(),
+            actionable_review_count,
             board_tasks
                 .iter()
                 .filter(|task| task.status == "done")
                 .count(),
             idle_engineer_count,
-            dispatchable_task_count
+            dispatchable_task_count,
+            implementation_work_summary
         );
         let recent_completions = crate::team::events::read_events(&crate::team::team_events_path(
             &self.config.project_root,

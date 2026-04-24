@@ -57,7 +57,7 @@ impl TeamDaemon {
             let review_tasks: Vec<&crate::task::Task> = tasks
                 .iter()
                 .filter(|task| {
-                    review_backlog_owner_for_task(task, &self.config.members).as_deref()
+                    actionable_review_backlog_owner_for_task(task, &self.config.members).as_deref()
                         == Some(name.as_str())
                 })
                 .collect();
@@ -123,6 +123,30 @@ impl TeamDaemon {
         }
 
         Ok(())
+    }
+
+    pub(in super::super) fn maybe_emit_review_drain_before_planning(
+        &mut self,
+        tasks: &[crate::task::Task],
+    ) -> Result<bool> {
+        let keys = actionable_review_intervention_keys(tasks, &self.config.members);
+        if keys.is_empty() {
+            return Ok(false);
+        }
+
+        let already_cooling_down = keys
+            .iter()
+            .filter(|key| self.intervention_on_cooldown(key))
+            .cloned()
+            .collect::<std::collections::HashSet<_>>();
+        if already_cooling_down.len() == keys.len() {
+            return Ok(false);
+        }
+
+        self.maybe_intervene_review_backlog()?;
+        Ok(keys
+            .iter()
+            .any(|key| !already_cooling_down.contains(key) && self.intervention_on_cooldown(key)))
     }
 
     pub(super) fn build_review_intervention_message(
@@ -404,6 +428,30 @@ pub(super) fn review_backlog_owner_for_task(
     )
 }
 
+pub(super) fn actionable_review_backlog_owner_for_task(
+    task: &crate::task::Task,
+    members: &[MemberInstance],
+) -> Option<String> {
+    if crate::team::status::is_review_task_explicitly_blocked(task) {
+        return None;
+    }
+    review_backlog_owner_for_task(task, members)
+}
+
+pub(super) fn actionable_review_intervention_keys(
+    tasks: &[crate::task::Task],
+    members: &[MemberInstance],
+) -> Vec<String> {
+    let mut keys = tasks
+        .iter()
+        .filter_map(|task| actionable_review_backlog_owner_for_task(task, members))
+        .map(|owner| review_intervention_key(&owner))
+        .collect::<Vec<_>>();
+    keys.sort();
+    keys.dedup();
+    keys
+}
+
 pub(super) fn review_intervention_key(member_name: &str) -> String {
     format!("review::{member_name}")
 }
@@ -624,6 +672,37 @@ mod tests {
         assert_eq!(
             review_backlog_owner_for_task(&task, &members),
             Some("lead".to_string())
+        );
+    }
+
+    #[test]
+    fn actionable_review_owner_skips_explicitly_blocked_review_task() {
+        let mut task = make_task(42, "review", Some("eng-1"));
+        task.blocked_on = Some("waiting on external reviewer".to_string());
+        let members = vec![
+            make_member("lead", RoleType::Manager, Some("architect")),
+            make_member("eng-1", RoleType::Engineer, Some("lead")),
+        ];
+
+        assert_eq!(
+            actionable_review_backlog_owner_for_task(&task, &members),
+            None
+        );
+    }
+
+    #[test]
+    fn actionable_review_intervention_keys_dedupes_owner_keys() {
+        let task_a = make_task(42, "review", Some("eng-1"));
+        let task_b = make_task(43, "review", Some("eng-2"));
+        let members = vec![
+            make_member("lead", RoleType::Manager, Some("architect")),
+            make_member("eng-1", RoleType::Engineer, Some("lead")),
+            make_member("eng-2", RoleType::Engineer, Some("lead")),
+        ];
+
+        assert_eq!(
+            actionable_review_intervention_keys(&[task_a, task_b], &members),
+            vec!["review::lead".to_string()]
         );
     }
 }

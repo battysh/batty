@@ -166,8 +166,10 @@ pub(crate) struct OptionalSubsystemStatus {
 #[derive(Debug, Clone, PartialEq, Default, Serialize)]
 pub struct WorkflowMetrics {
     pub runnable_count: u32,
+    pub implementation_runnable_count: u32,
     pub blocked_count: u32,
     pub in_review_count: u32,
+    pub actionable_review_count: u32,
     pub in_progress_count: u32,
     pub stale_in_progress_count: u32,
     pub aged_todo_count: u32,
@@ -1953,8 +1955,10 @@ fn compute_metrics_with_telemetry_and_aging(
 
     Ok(WorkflowMetrics {
         runnable_count: board_metrics.runnable_count,
+        implementation_runnable_count: board_metrics.implementation_runnable_count,
         blocked_count: board_metrics.blocked_count,
         in_review_count: board_metrics.in_review_count,
+        actionable_review_count: board_metrics.actionable_review_count,
         in_progress_count: board_metrics.in_progress_count,
         stale_in_progress_count: board_metrics.stale_in_progress_count,
         aged_todo_count: board_metrics.aged_todo_count,
@@ -1989,8 +1993,10 @@ pub fn compute_metrics_with_events(
 /// Board-only metrics (no event/review data).
 struct BoardMetrics {
     runnable_count: u32,
+    implementation_runnable_count: u32,
     blocked_count: u32,
     in_review_count: u32,
+    actionable_review_count: u32,
     in_progress_count: u32,
     stale_in_progress_count: u32,
     aged_todo_count: u32,
@@ -2010,8 +2016,10 @@ fn compute_board_metrics(
     if !tasks_dir.is_dir() {
         return Ok(BoardMetrics {
             runnable_count: 0,
+            implementation_runnable_count: 0,
             blocked_count: 0,
             in_review_count: 0,
+            actionable_review_count: 0,
             in_progress_count: 0,
             stale_in_progress_count: 0,
             aged_todo_count: 0,
@@ -2027,8 +2035,10 @@ fn compute_board_metrics(
     if tasks.is_empty() {
         return Ok(BoardMetrics {
             runnable_count: 0,
+            implementation_runnable_count: 0,
             blocked_count: 0,
             in_review_count: 0,
+            actionable_review_count: 0,
             in_progress_count: 0,
             stale_in_progress_count: 0,
             aged_todo_count: 0,
@@ -2055,6 +2065,11 @@ fn compute_board_metrics(
         .filter(|task| task.status == "blocked" || task.blocked.is_some())
         .count() as u32;
     let in_review_count = tasks.iter().filter(|task| task.status == "review").count() as u32;
+    let actionable_review_count = tasks
+        .iter()
+        .filter(|task| task.status == "review")
+        .filter(|task| !is_review_task_explicitly_blocked(task))
+        .count() as u32;
     let in_progress_count = tasks
         .iter()
         .filter(|task| matches!(task.status.as_str(), "in-progress" | "in_progress"))
@@ -2100,8 +2115,10 @@ fn compute_board_metrics(
 
     Ok(BoardMetrics {
         runnable_count,
+        implementation_runnable_count: engineer_runnable_count,
         blocked_count,
         in_review_count,
+        actionable_review_count,
         in_progress_count,
         stale_in_progress_count: aging.stale_in_progress.len() as u32,
         aged_todo_count: aging.aged_todo.len() as u32,
@@ -2304,13 +2321,20 @@ pub fn format_metrics(metrics: &WorkflowMetrics) -> String {
         .avg_review_latency_secs
         .map(|secs| format_age(Some(secs as u64)))
         .unwrap_or_else(|| "-".to_string());
+    let implementation_summary = crate::team::tact::parser::implementation_work_summary(
+        metrics.implementation_runnable_count as usize,
+        metrics.actionable_review_count as usize,
+    );
 
     format!(
         "Workflow Metrics\n\
 Runnable: {}\n\
+Implementation Runnable: {}\n\
 Blocked: {}\n\
 In Review: {}\n\
+Actionable Review: {}\n\
 In Progress: {}\n\
+Implementation Work: {}\n\
 Aging Alerts: stale in-progress {} | aged todo {} | stale review {}\n\
 Idle With Runnable: {}\n\
 Top Runnable: {}\n\
@@ -2321,9 +2345,12 @@ Queue: {} | Avg Latency: {} | Auto-merge Rate: {} | Rework Rate: {}\n\
 Auto: {} | Manual: {} | Rework: {} | Nudges: {} | Escalations: {}\n\
 Merge Modes: direct ok {} / fail {} | isolated ok {} / fail {}",
         metrics.runnable_count,
+        metrics.implementation_runnable_count,
         metrics.blocked_count,
         metrics.in_review_count,
+        metrics.actionable_review_count,
         metrics.in_progress_count,
+        implementation_summary,
         metrics.stale_in_progress_count,
         metrics.aged_todo_count,
         metrics.stale_review_count,
@@ -2379,6 +2406,16 @@ fn compute_idle_with_runnable(
         .collect::<Vec<_>>();
     idle.sort();
     idle
+}
+
+pub(crate) fn is_review_task_explicitly_blocked(task: &task::Task) -> bool {
+    task.blocked
+        .as_deref()
+        .is_some_and(|value| !value.trim().is_empty())
+        || task
+            .blocked_on
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
 }
 
 fn task_priority_rank(priority: &str) -> u8 {
@@ -3686,8 +3723,10 @@ mod tests {
         .unwrap();
 
         assert_eq!(metrics.runnable_count, 1);
+        assert_eq!(metrics.implementation_runnable_count, 1);
         assert_eq!(metrics.blocked_count, 1);
         assert_eq!(metrics.in_review_count, 1);
+        assert_eq!(metrics.actionable_review_count, 1);
         assert_eq!(metrics.in_progress_count, 2);
         assert_eq!(metrics.idle_with_runnable, vec!["eng-4".to_string()]);
         assert!(metrics.oldest_review_age_secs.is_some());
@@ -3717,6 +3756,7 @@ mod tests {
 
         // runnable_count still reports 1 — the task IS dispatchable in general.
         assert_eq!(metrics.runnable_count, 1);
+        assert_eq!(metrics.implementation_runnable_count, 0);
         // But no engineer should be flagged as idle-with-runnable because
         // no engineer-dispatchable task exists.
         assert!(
@@ -3753,7 +3793,51 @@ mod tests {
         .unwrap();
 
         assert_eq!(metrics.runnable_count, 2);
+        assert_eq!(metrics.implementation_runnable_count, 1);
         assert_eq!(metrics.idle_with_runnable, vec!["eng-1".to_string()]);
+    }
+
+    #[test]
+    fn format_metrics_distinguishes_no_work_from_review_bottleneck() {
+        let no_work = format_metrics(&WorkflowMetrics::default());
+        assert!(no_work.contains("Implementation Work: no executable implementation work"));
+
+        let review_bottleneck = format_metrics(&WorkflowMetrics {
+            in_review_count: 1,
+            actionable_review_count: 1,
+            ..WorkflowMetrics::default()
+        });
+        assert!(
+            review_bottleneck.contains("Implementation Work: review backlog is the bottleneck")
+        );
+
+        let runnable = format_metrics(&WorkflowMetrics {
+            runnable_count: 1,
+            implementation_runnable_count: 1,
+            actionable_review_count: 1,
+            ..WorkflowMetrics::default()
+        });
+        assert!(runnable.contains("Implementation Work: executable implementation work available"));
+    }
+
+    #[test]
+    fn compute_metrics_excludes_blocked_review_from_actionable_review_count() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_board_task(
+            tmp.path(),
+            "001-actionable-review.md",
+            "id: 1\ntitle: Actionable review\nstatus: review\npriority: high\nclaimed_by: eng-1\n",
+        );
+        write_board_task(
+            tmp.path(),
+            "002-blocked-review.md",
+            "id: 2\ntitle: Blocked review\nstatus: review\npriority: high\nclaimed_by: eng-1\nblocked_on: external reviewer\n",
+        );
+
+        let metrics = compute_metrics(&board_dir(tmp.path()), &[engineer("eng-1")]).unwrap();
+
+        assert_eq!(metrics.in_review_count, 2);
+        assert_eq!(metrics.actionable_review_count, 1);
     }
 
     #[test]

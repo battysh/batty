@@ -91,8 +91,11 @@ impl TeamDaemon {
             let review_count = tasks
                 .iter()
                 .filter(|task| {
-                    super::review::review_backlog_owner_for_task(task, &self.config.members)
-                        .as_deref()
+                    super::review::actionable_review_backlog_owner_for_task(
+                        task,
+                        &self.config.members,
+                    )
+                    .as_deref()
                         == Some(name.as_str())
                 })
                 .count();

@@ -84,6 +84,19 @@ pub fn parse_task_specs(response: &str) -> Vec<TaskSpec> {
     parse_planning_response(response)
 }
 
+pub fn implementation_work_summary(
+    implementation_runnable_count: usize,
+    actionable_review_count: usize,
+) -> &'static str {
+    if implementation_runnable_count > 0 {
+        "executable implementation work available"
+    } else if actionable_review_count > 0 {
+        "review backlog is the bottleneck"
+    } else {
+        "no executable implementation work"
+    }
+}
+
 fn build_create_task_args(spec: &TaskSpec) -> Vec<String> {
     let mut args = vec![
         "create".to_string(),
@@ -487,6 +500,22 @@ Second body."#;
     fn test_parse_task_specs_empty() {
         assert!(parse_task_specs("").is_empty());
         assert!(parse_task_specs("garbage").is_empty());
+    }
+
+    #[test]
+    fn implementation_work_summary_distinguishes_review_bottleneck() {
+        assert_eq!(
+            implementation_work_summary(0, 0),
+            "no executable implementation work"
+        );
+        assert_eq!(
+            implementation_work_summary(0, 2),
+            "review backlog is the bottleneck"
+        );
+        assert_eq!(
+            implementation_work_summary(1, 2),
+            "executable implementation work available"
+        );
     }
 
     #[test]

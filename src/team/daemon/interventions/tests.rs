@@ -1260,6 +1260,132 @@ fn maybe_intervene_board_replenishment_fires_when_todo_below_threshold_and_idle_
 }
 
 #[test]
+fn board_replenishment_surfaces_actionable_review_backlog_before_planning() {
+    let harness = intervention_team_harness()
+        .with_member_state("architect", MemberState::Idle)
+        .with_member_state("lead", MemberState::Idle)
+        .with_member_state("eng-1", MemberState::Idle)
+        .with_member_state("eng-2", MemberState::Idle)
+        .with_pane("architect", "%999996")
+        .with_pane("lead", "%999997")
+        .with_board_task(191, "completed-work", "review", Some("eng-1"));
+    let mut daemon = harness.build_daemon().unwrap();
+    enter_idle_epoch(&mut daemon, "architect");
+    enter_idle_epoch(&mut daemon, "lead");
+
+    daemon.maybe_intervene_board_replenishment().unwrap();
+
+    let lead_pending = harness.pending_inbox_messages("lead").unwrap();
+    assert_eq!(lead_pending.len(), 1);
+    assert!(lead_pending[0].body.contains("Review backlog detected"));
+    assert!(
+        harness
+            .pending_inbox_messages("architect")
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        daemon
+            .intervention_cooldowns
+            .contains_key(&review_intervention_key("lead"))
+    );
+}
+
+#[test]
+fn board_replenishment_allows_planning_after_review_drain_is_on_cooldown() {
+    let harness = intervention_team_harness()
+        .with_member_state("architect", MemberState::Idle)
+        .with_member_state("lead", MemberState::Idle)
+        .with_member_state("eng-1", MemberState::Idle)
+        .with_member_state("eng-2", MemberState::Idle)
+        .with_pane("architect", "%999996")
+        .with_pane("lead", "%999997")
+        .with_board_task(191, "completed-work", "review", Some("eng-1"));
+    let mut daemon = harness.build_daemon().unwrap();
+    enter_idle_epoch(&mut daemon, "architect");
+    enter_idle_epoch(&mut daemon, "lead");
+    daemon.maybe_intervene_board_replenishment().unwrap();
+
+    enter_idle_epoch(&mut daemon, "architect");
+    daemon.maybe_intervene_board_replenishment().unwrap();
+    enter_idle_epoch(&mut daemon, "architect");
+    daemon.maybe_intervene_board_replenishment().unwrap();
+
+    let lead_pending = harness.pending_inbox_messages("lead").unwrap();
+    assert_eq!(lead_pending.len(), 1, "review drain should not spam");
+    let architect_pending = harness.pending_inbox_messages("architect").unwrap();
+    assert_eq!(architect_pending.len(), 1);
+    assert!(
+        architect_pending[0]
+            .body
+            .contains("Board needs replenishment")
+    );
+}
+
+#[test]
+fn board_replenishment_ignores_explicitly_blocked_review_backlog() {
+    let harness = intervention_team_harness()
+        .with_member_state("architect", MemberState::Idle)
+        .with_member_state("lead", MemberState::Idle)
+        .with_member_state("eng-1", MemberState::Idle)
+        .with_member_state("eng-2", MemberState::Idle)
+        .with_pane("architect", "%999996")
+        .with_pane("lead", "%999997");
+    write_board_task_file(
+        harness.project_root(),
+        191,
+        "blocked-review",
+        "review",
+        Some("eng-1"),
+        &[],
+        Some("waiting on external reviewer"),
+    );
+    let mut daemon = harness.build_daemon().unwrap();
+    enter_idle_epoch(&mut daemon, "architect");
+    enter_idle_epoch(&mut daemon, "lead");
+
+    daemon.maybe_intervene_board_replenishment().unwrap();
+    enter_idle_epoch(&mut daemon, "architect");
+    daemon.maybe_intervene_board_replenishment().unwrap();
+
+    assert!(harness.pending_inbox_messages("lead").unwrap().is_empty());
+    let architect_pending = harness.pending_inbox_messages("architect").unwrap();
+    assert_eq!(architect_pending.len(), 1);
+    assert!(
+        architect_pending[0]
+            .body
+            .contains("Board needs replenishment")
+    );
+}
+
+#[test]
+fn board_replenishment_does_not_gate_when_runnable_work_covers_idle_engineers() {
+    let harness = intervention_team_harness()
+        .with_member_state("architect", MemberState::Idle)
+        .with_member_state("lead", MemberState::Idle)
+        .with_member_state("eng-1", MemberState::Idle)
+        .with_member_state("eng-2", MemberState::Idle)
+        .with_pane("architect", "%999996")
+        .with_pane("lead", "%999997")
+        .with_board_task(191, "completed-work", "review", Some("eng-1"))
+        .with_board_task(192, "open-a", "todo", None)
+        .with_board_task(193, "open-b", "todo", None);
+    let mut daemon = harness.build_daemon().unwrap();
+    enter_idle_epoch(&mut daemon, "architect");
+    enter_idle_epoch(&mut daemon, "lead");
+
+    daemon.maybe_intervene_board_replenishment().unwrap();
+
+    assert!(harness.pending_inbox_messages("lead").unwrap().is_empty());
+    assert!(
+        harness
+            .pending_inbox_messages("architect")
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
 fn maybe_intervene_board_replenishment_respects_cooldown() {
     let harness = intervention_team_harness()
         .with_member_state("architect", MemberState::Idle)
