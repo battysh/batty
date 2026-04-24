@@ -1056,6 +1056,7 @@ impl TeamDaemon {
             member_name,
             &plan.agent_type,
             &plan.agent_cmd,
+            &self.config.project_root,
             &plan.work_dir,
             log_path,
             self.config

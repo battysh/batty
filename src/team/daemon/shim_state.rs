@@ -97,6 +97,7 @@ impl TeamDaemon {
                 &persisted.id,
                 &persisted.agent_type,
                 &persisted.agent_cmd,
+                &self.config.project_root,
                 &persisted.work_dir,
                 None,
                 self.config

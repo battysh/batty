@@ -80,6 +80,39 @@ Run that in the DevSpace startup hook before AIM package discovery. If a public
 upstream AIM issue or PR becomes available, add its link to `planning/issues.md`
 and keep this workaround until the soft-delete behavior is fixed.
 
+## MCP servers collide between concurrent engineers
+
+**Cause:** Some MCP servers use fixed ports, socket paths, cache files, or
+remote lock/table keys. If two Batty engineers launch the same server with those
+singleton resources, one can fail silently or corrupt shared state.
+
+Batty exports a per-member MCP namespace into every launched agent process:
+
+```sh
+printf '%s\n' "$BATTY_MCP_NAMESPACE"
+printf '%s\n' "$BATTY_MCP_RESOURCE_DIR"
+printf '%s\n' "$BATTY_MCP_PORT_BASE"
+```
+
+Configure MCP servers to derive resources from those variables:
+
+```sh
+--state-dir "$BATTY_MCP_RESOURCE_DIR/server-name"
+--socket "$BATTY_MCP_RESOURCE_DIR/server-name.sock"
+--port "$BATTY_MCP_PORT_BASE"
+--ddb-prefix "$BATTY_MCP_NAMESPACE"
+```
+
+If a server cannot be namespaced, serialize it with the shared Batty lock:
+
+```sh
+flock "$BATTY_MCP_SHARED_LOCK" mcp-server-command
+```
+
+Two concurrent engineers should report different namespace/resource/port values
+and the same shared lock path. If not, restart the Batty daemon with a current
+binary and confirm the agent was launched by Batty rather than by hand.
+
 ## No session to attach to
 
 **Cause:** The team session isn't running.
