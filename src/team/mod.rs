@@ -66,6 +66,7 @@ pub mod openclaw;
 pub mod openclaw_contract;
 pub mod parity;
 pub mod policy;
+pub(crate) mod process_tree;
 pub mod prompt_compose;
 pub mod quality_metrics;
 pub mod reload;

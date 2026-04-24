@@ -265,6 +265,12 @@ collision-avoidance runbook.
 
 **Fix direction:** Port our `/proc` ancestor-walk logic upstream.
 
+**Status 2026-04-24:** Fixed in Task #697. Startup now inspects the process
+table with `/proc/<pid>/stat` on Linux and a `ps` fallback elsewhere, walks the
+current process ancestor chain, and ignores Batty wrapper processes in that
+chain while still rejecting unrelated Batty processes that indicate a real
+concurrent run.
+
 ---
 
 ## Cross-cutting themes
