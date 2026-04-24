@@ -39,6 +39,47 @@ cargo install kanban-md --locked
 
 Ensure `~/.cargo/bin` is in your `PATH`.
 
+## DevSpace AIM catalog entries duplicate across launches
+
+**Cause:** AIM currently soft-deletes packages on uninstall. Old
+`~/.aim/packages/*/eventId-*` directories can survive across DevSpace launches,
+so later Batty-launched engineer sessions can see duplicate package/catalog
+entries.
+
+Batty does not currently ship the affected DevSpace startup hook in this repo.
+If your environment uses an external bootstrap script such as
+`blueprint_startup.sh`, keep the AIM cleanup workaround there until AIM fixes
+uninstall behavior.
+
+Safe workaround: keep only the newest `eventId-*` directory inside each AIM
+package directory before launching Batty sessions.
+
+```sh
+for package_dir in "${HOME}"/.aim/packages/*; do
+  [ -d "${package_dir}" ] || continue
+  newest=""
+  newest_mtime=0
+
+  for event_dir in "${package_dir}"/eventId-*; do
+    [ -d "${event_dir}" ] || continue
+    mtime="$(stat -c '%Y' "${event_dir}" 2>/dev/null || stat -f '%m' "${event_dir}")"
+    if [ "${mtime}" -gt "${newest_mtime}" ]; then
+      newest="${event_dir}"
+      newest_mtime="${mtime}"
+    fi
+  done
+
+  for event_dir in "${package_dir}"/eventId-*; do
+    [ -d "${event_dir}" ] || continue
+    [ "${event_dir}" = "${newest}" ] || rm -rf -- "${event_dir}"
+  done
+done
+```
+
+Run that in the DevSpace startup hook before AIM package discovery. If a public
+upstream AIM issue or PR becomes available, add its link to `planning/issues.md`
+and keep this workaround until the soft-delete behavior is fixed.
+
 ## No session to attach to
 
 **Cause:** The team session isn't running.

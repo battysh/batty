@@ -170,6 +170,8 @@ fatal: Not a valid object name eng-main/<eng>
 
 **Fix direction:** This is an AIM bug, not batty. Flag upstream; keep our workaround in `blueprint_startup.sh` meanwhile.
 
+**Upstream tracking:** No public AIM issue/PR link found yet as of 2026-04-23. Keep the DevSpace startup-hook cleanup workaround and record the upstream link here once AIM exposes one.
+
 ---
 
 ## P2-1 — Worktree-root cosmetic staleness warnings against `main`
