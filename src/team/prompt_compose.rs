@@ -250,7 +250,7 @@ mod tests {
 
         assert!(prompt.contains("Hello eng-1-1 from engineer -> manager"));
         assert!(prompt.contains("## Posture: Deep Worker"));
-        assert!(prompt.contains("## Model Class: Standard"));
+        assert!(prompt.contains("## Model Class: Frontier"));
         assert!(prompt.contains("## Provider: Codex"));
     }
 }
