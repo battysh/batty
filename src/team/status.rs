@@ -1622,15 +1622,32 @@ pub(crate) fn board_status_task_queues(
         tasks_dir.parent().unwrap_or(&tasks_dir),
         "board_status_task_queues",
     )?;
+    let github_feedback =
+        crate::team::github_feedback::summarize_github_feedback_for_tasks(project_root, &tasks)
+            .unwrap_or_default();
     for task in &tasks {
         let inferred = infer_runtime_task_metadata(project_root, task);
         let branch_mismatch = task_branch_mismatch(project_root, task, &inferred);
         let review_state = super::review::classify_review_task(project_root, task, &tasks);
-        let test_summary = crate::team::board::read_workflow_metadata(&task.source_path)
+        let mut test_summary = crate::team::board::read_workflow_metadata(&task.source_path)
             .ok()
             .and_then(|metadata| metadata.test_results)
             .filter(|results| results.failed > 0)
             .map(|results| results.failure_summary());
+        let mut blocked_on = task.blocked_on.clone();
+        let mut next_action = match review_state {
+            ReviewQueueState::Current => task.next_action.clone(),
+            ReviewQueueState::Stale(stale) => Some(stale.status_next_action()),
+        };
+        if let Some(feedback) = github_feedback.failed.get(&task.id) {
+            blocked_on = Some(feedback.blocked_on_summary());
+            next_action = Some(feedback.next_action_summary());
+            test_summary = Some(feedback.status_summary());
+        } else if test_summary.is_none()
+            && let Some(feedback) = github_feedback.passed.get(&task.id)
+        {
+            test_summary = Some(feedback.status_summary());
+        }
         let entry = StatusTaskEntry {
             id: task.id,
             title: task.title.clone(),
@@ -1638,7 +1655,7 @@ pub(crate) fn board_status_task_queues(
             priority: task.priority.clone(),
             claimed_by: task.claimed_by.clone(),
             review_owner: task.review_owner.clone(),
-            blocked_on: task.blocked_on.clone(),
+            blocked_on,
             branch: task.branch.clone().or_else(|| inferred.branch.clone()),
             worktree_path: task
                 .worktree_path
@@ -1646,10 +1663,7 @@ pub(crate) fn board_status_task_queues(
                 .or_else(|| inferred.worktree_path.clone()),
             commit: task.commit.clone().or_else(|| inferred.commit.clone()),
             branch_mismatch,
-            next_action: match review_state {
-                ReviewQueueState::Current => task.next_action.clone(),
-                ReviewQueueState::Stale(stale) => Some(stale.status_next_action()),
-            },
+            next_action,
             test_summary,
         };
 
@@ -4482,6 +4496,96 @@ mod tests {
         assert_eq!(
             active_tasks[0].test_summary.as_deref(),
             Some("1 tests failed: parser::it_works (assertion failed at src/parser.rs:12:5)")
+        );
+    }
+
+    #[test]
+    fn board_status_task_queues_surfaces_failed_github_feedback() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = tmp
+            .path()
+            .join(".batty")
+            .join("team_config")
+            .join("board")
+            .join("tasks");
+        fs::create_dir_all(&tasks_dir).unwrap();
+        fs::write(
+            tasks_dir.join("042-review.md"),
+            "---\nid: 42\ntitle: Review task\nstatus: review\npriority: high\nclaimed_by: eng-1\nbranch: eng-1/42\ncommit: abcdef1\nclass: standard\n---\n",
+        )
+        .unwrap();
+        crate::team::github_feedback::write_github_feedback_record(
+            tmp.path(),
+            &crate::team::github_feedback::GithubVerificationRecord {
+                task_id: 42,
+                branch: Some("eng-1/42".to_string()),
+                commit: Some("abcdef1".to_string()),
+                check_name: "ci/test".to_string(),
+                status: "failure".to_string(),
+                next_action: Some("fix failing CI".to_string()),
+                details: Some("unit test failed".to_string()),
+                ts: Some(1),
+            },
+        )
+        .unwrap();
+
+        let (_, review_queue) = board_status_task_queues(tmp.path()).unwrap();
+
+        assert_eq!(review_queue.len(), 1);
+        assert_eq!(
+            review_queue[0].blocked_on.as_deref(),
+            Some("GitHub check failed: ci/test on eng-1/42@abcdef1 (unit test failed)")
+        );
+        assert_eq!(
+            review_queue[0].next_action.as_deref(),
+            Some("fix failing CI")
+        );
+        assert_eq!(
+            review_queue[0].test_summary.as_deref(),
+            Some("GitHub check failed: ci/test on eng-1/42@abcdef1")
+        );
+    }
+
+    #[test]
+    fn board_status_task_queues_clears_github_failure_after_passing_record() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = tmp
+            .path()
+            .join(".batty")
+            .join("team_config")
+            .join("board")
+            .join("tasks");
+        fs::create_dir_all(&tasks_dir).unwrap();
+        fs::write(
+            tasks_dir.join("042-review.md"),
+            "---\nid: 42\ntitle: Review task\nstatus: review\npriority: high\nclaimed_by: eng-1\nbranch: eng-1/42\ncommit: abcdef1\nnext_action: review now\nclass: standard\n---\n",
+        )
+        .unwrap();
+        for status in ["failure", "success"] {
+            crate::team::github_feedback::write_github_feedback_record(
+                tmp.path(),
+                &crate::team::github_feedback::GithubVerificationRecord {
+                    task_id: 42,
+                    branch: Some("eng-1/42".to_string()),
+                    commit: Some("abcdef1".to_string()),
+                    check_name: "ci/test".to_string(),
+                    status: status.to_string(),
+                    next_action: Some("fix failing CI".to_string()),
+                    details: None,
+                    ts: Some(1),
+                },
+            )
+            .unwrap();
+        }
+
+        let (_, review_queue) = board_status_task_queues(tmp.path()).unwrap();
+
+        assert_eq!(review_queue.len(), 1);
+        assert!(review_queue[0].blocked_on.is_none());
+        assert_eq!(review_queue[0].next_action.as_deref(), Some("review now"));
+        assert_eq!(
+            review_queue[0].test_summary.as_deref(),
+            Some("GitHub check passed: ci/test on eng-1/42@abcdef1")
         );
     }
 

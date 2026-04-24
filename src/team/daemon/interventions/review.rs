@@ -246,6 +246,10 @@ impl TeamDaemon {
             .iter()
             .find(|candidate| candidate.name == first_report)
             .is_some_and(|candidate| candidate.role_type == RoleType::Engineer);
+        let github_blockers = crate::team::github_feedback::active_github_blockers_for_tasks(
+            &self.config.project_root,
+            review_tasks,
+        );
 
         let mut message = format!(
             "Review backlog detected: direct-report work has completed and is waiting for your review: {task_summary}.\n\
@@ -345,6 +349,18 @@ impl TeamDaemon {
             message.push_str(&format!(
                 "\n{step}. MERGE SUPPRESSED — branch verification failed for these lanes:\n{}",
                 suppressed_cmds.join("\n"),
+            ));
+            step += 1;
+        }
+
+        if !github_blockers.is_empty() {
+            let github_lines = github_blockers
+                .iter()
+                .map(|feedback| format!("   {}", feedback.intervention_line()))
+                .collect::<Vec<_>>();
+            message.push_str(&format!(
+                "\n{step}. GITHUB/CI BLOCKERS — external verification failed for these lanes:\n{}",
+                github_lines.join("\n"),
             ));
             step += 1;
         }

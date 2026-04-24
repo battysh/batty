@@ -692,6 +692,49 @@ fn maybe_intervene_manager_dispatch_gap_queues_for_idle_lead() {
 }
 
 #[test]
+fn maybe_intervene_manager_dispatch_gap_mentions_github_feedback_blocker() {
+    let harness = intervention_team_harness()
+        .with_member_state("lead", MemberState::Idle)
+        .with_member_state("eng-1", MemberState::Idle)
+        .with_member_state("eng-2", MemberState::Idle)
+        .with_pane("lead", "%999997")
+        .with_board_task(192, "open-task", "todo", None);
+    fs::write(
+        harness.board_tasks_dir().join("191-active-task.md"),
+        "---\nid: 191\ntitle: active-task\nstatus: in-progress\npriority: high\nclaimed_by: eng-1\nbranch: eng-1/191\ncommit: abcdef1\nclass: standard\n---\n\nTask description.\n",
+    )
+    .unwrap();
+    crate::team::github_feedback::write_github_feedback_record(
+        harness.project_root(),
+        &crate::team::github_feedback::GithubVerificationRecord {
+            task_id: 191,
+            branch: Some("eng-1/191".to_string()),
+            commit: Some("abcdef1".to_string()),
+            check_name: "ci/test".to_string(),
+            status: "failure".to_string(),
+            next_action: Some("send rework to eng-1".to_string()),
+            details: None,
+            ts: Some(1),
+        },
+    )
+    .unwrap();
+    let mut daemon = harness.build_daemon().unwrap();
+
+    enter_idle_epoch(&mut daemon, "lead");
+    daemon.maybe_intervene_manager_dispatch_gap().unwrap();
+
+    let pending = harness.pending_inbox_messages("lead").unwrap();
+    assert_eq!(pending.len(), 1);
+    assert!(pending[0].body.contains("GitHub/CI verification blockers"));
+    assert!(
+        pending[0]
+            .body
+            .contains("#191 GitHub check failed: ci/test on eng-1/191@abcdef1")
+    );
+    assert!(pending[0].body.contains("send rework to eng-1"));
+}
+
+#[test]
 fn maybe_intervene_manager_dispatch_gap_skips_in_board_first_mode() {
     let harness = intervention_team_harness()
         .with_member_state("lead", MemberState::Idle)
@@ -2108,6 +2151,46 @@ fn build_review_intervention_message_prepends_review_policy() {
     let message = daemon.build_review_intervention_message(&member, &[&tasks[0]], &tasks);
 
     assert!(message.starts_with("Review policy context:\nReview must confirm tests and scope."));
+}
+
+#[test]
+fn build_review_intervention_message_includes_github_feedback_blocker() {
+    let harness = triage_harness();
+    fs::create_dir_all(harness.board_tasks_dir()).unwrap();
+    fs::write(
+        harness.board_tasks_dir().join("171-task-171.md"),
+        "---\nid: 171\ntitle: task-171\nstatus: review\npriority: high\nclaimed_by: eng-1\nbranch: eng-1/171\ncommit: abcdef1\nclass: standard\n---\n\nTask description.\n",
+    )
+    .unwrap();
+    crate::team::github_feedback::write_github_feedback_record(
+        harness.project_root(),
+        &crate::team::github_feedback::GithubVerificationRecord {
+            task_id: 171,
+            branch: Some("eng-1/171".to_string()),
+            commit: Some("abcdef1".to_string()),
+            check_name: "ci/test".to_string(),
+            status: "failure".to_string(),
+            next_action: Some("fix CI".to_string()),
+            details: Some("cargo test failed".to_string()),
+            ts: Some(1),
+        },
+    )
+    .unwrap();
+    let daemon = harness.build_daemon().unwrap();
+    let tasks = crate::task::load_tasks_from_dir(&harness.board_tasks_dir()).unwrap();
+    let member = daemon
+        .config
+        .members
+        .iter()
+        .find(|member| member.name == "lead")
+        .unwrap()
+        .clone();
+
+    let message = daemon.build_review_intervention_message(&member, &[&tasks[0]], &tasks);
+
+    assert!(message.contains("GITHUB/CI BLOCKERS"));
+    assert!(message.contains("#171 GitHub check failed: ci/test on eng-1/171@abcdef1"));
+    assert!(message.contains("Next action: fix CI"));
 }
 
 #[test]

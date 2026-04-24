@@ -51,6 +51,17 @@ pub struct QualityMetricsInfo<'a> {
     pub time_to_completion_secs: u64,
 }
 
+pub struct GithubVerificationFeedbackInfo<'a> {
+    pub task: &'a str,
+    pub branch: Option<&'a str>,
+    pub commit: Option<&'a str>,
+    pub check_name: &'a str,
+    pub success: Option<bool>,
+    pub reason: &'a str,
+    pub next_action: Option<&'a str>,
+    pub details: Option<&'a str>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 
 pub struct TeamEvent {
@@ -925,6 +936,36 @@ impl TeamEvent {
             reason: Some(reason.into()),
             details: details.map(str::to_string),
             ..Self::base("auto_merge_post_verify_result")
+        }
+    }
+
+    pub fn github_verification_feedback(info: &GithubVerificationFeedbackInfo<'_>) -> Self {
+        let details = serde_json::json!({
+            "branch": info.branch,
+            "commit": info.commit,
+            "check_name": info.check_name,
+            "next_action": info.next_action,
+            "details": info.details,
+        });
+        Self {
+            action_type: Some("github_verification".into()),
+            task: Some(info.task.into()),
+            success: info.success,
+            reason: Some(info.reason.into()),
+            git_ref: info.commit.map(str::to_string),
+            details: Some(details.to_string()),
+            ..Self::base("github_verification_feedback")
+        }
+    }
+
+    pub fn github_verification_warning(task: &str, reason: &str, details: Option<&str>) -> Self {
+        Self {
+            action_type: Some("github_verification".into()),
+            task: Some(task.into()),
+            success: None,
+            reason: Some(reason.into()),
+            details: details.map(str::to_string),
+            ..Self::base("github_verification_warning")
         }
     }
 

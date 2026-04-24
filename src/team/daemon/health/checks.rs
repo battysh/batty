@@ -101,6 +101,79 @@ fn workspace_uncommitted_diff_lines(
 }
 
 impl TeamDaemon {
+    pub(in super::super) fn check_github_verification_feedback(&mut self) -> Result<()> {
+        let board_dir = self
+            .config
+            .project_root
+            .join(".batty")
+            .join("team_config")
+            .join("board");
+        let tasks_dir = board_dir.join("tasks");
+        if !tasks_dir.is_dir() {
+            return Ok(());
+        }
+
+        let tasks = crate::task::load_tasks_from_dir(&tasks_dir)?;
+        let snapshot = crate::team::github_feedback::summarize_github_feedback_for_tasks(
+            &self.config.project_root,
+            &tasks,
+        )?;
+
+        for warning in snapshot.warnings {
+            let key = format!(
+                "github-feedback-warning::{}::{}::{}",
+                warning.task_id, warning.check_name, warning.reason
+            );
+            if self.intervention_on_cooldown(&key) {
+                continue;
+            }
+            self.emit_event(crate::team::events::TeamEvent::github_verification_warning(
+                &warning.task_id.to_string(),
+                &warning.reason,
+                Some(&warning.check_name),
+            ));
+            self.record_orchestrator_action(format!(
+                "github-verification: warning for task #{}: {}",
+                warning.task_id, warning.reason
+            ));
+            self.intervention_cooldowns.insert(key, Instant::now());
+        }
+
+        for feedback in snapshot.failed.values().chain(snapshot.passed.values()) {
+            let key = format!(
+                "github-feedback::{}::{}::{}::{}",
+                feedback.task_id,
+                feedback.check_name,
+                feedback.status,
+                feedback.commit.as_deref().unwrap_or("unknown")
+            );
+            if self.intervention_on_cooldown(&key) {
+                continue;
+            }
+            self.emit_event(
+                crate::team::events::TeamEvent::github_verification_feedback(
+                    &crate::team::events::GithubVerificationFeedbackInfo {
+                        task: &feedback.task_id.to_string(),
+                        branch: feedback.branch.as_deref(),
+                        commit: feedback.commit.as_deref(),
+                        check_name: &feedback.check_name,
+                        success: Some(feedback.is_success()),
+                        reason: &feedback.status,
+                        next_action: feedback.next_action.as_deref(),
+                        details: feedback.details.as_deref(),
+                    },
+                ),
+            );
+            self.record_orchestrator_action(format!(
+                "github-verification: {}",
+                feedback.blocked_on_summary()
+            ));
+            self.intervention_cooldowns.insert(key, Instant::now());
+        }
+
+        Ok(())
+    }
+
     pub(in super::super) fn maybe_cleanup_shared_cargo_target(&mut self) -> Result<()> {
         if self.last_shared_target_cleanup.elapsed() < SHARED_TARGET_CLEANUP_INTERVAL {
             return Ok(());
@@ -1015,6 +1088,68 @@ mod tests {
 
         daemon.check_backend_health().unwrap();
         assert!(daemon.backend_health.contains_key("architect"));
+    }
+
+    #[test]
+    fn check_github_verification_feedback_emits_failure_and_warning_events() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = tmp
+            .path()
+            .join(".batty")
+            .join("team_config")
+            .join("board")
+            .join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+        std::fs::write(
+            tasks_dir.join("042-review.md"),
+            "---\nid: 42\ntitle: Review task\nstatus: review\npriority: high\nclaimed_by: eng-1\nbranch: eng-1/42\ncommit: abcdef1\nclass: standard\n---\n",
+        )
+        .unwrap();
+        for record in [
+            crate::team::github_feedback::GithubVerificationRecord {
+                task_id: 42,
+                branch: Some("eng-1/42".to_string()),
+                commit: Some("abcdef1".to_string()),
+                check_name: "ci/test".to_string(),
+                status: "failure".to_string(),
+                next_action: Some("fix CI".to_string()),
+                details: Some("unit test failed".to_string()),
+                ts: Some(1),
+            },
+            crate::team::github_feedback::GithubVerificationRecord {
+                task_id: 99,
+                branch: Some("eng-1/99".to_string()),
+                commit: Some("abcdef1".to_string()),
+                check_name: "ci/test".to_string(),
+                status: "failure".to_string(),
+                next_action: None,
+                details: None,
+                ts: Some(2),
+            },
+        ] {
+            crate::team::github_feedback::write_github_feedback_record(tmp.path(), &record)
+                .unwrap();
+        }
+        let mut daemon = make_test_daemon(tmp.path(), vec![manager_member("lead", None)]);
+
+        daemon.check_github_verification_feedback().unwrap();
+
+        let events =
+            crate::team::events::read_events(&crate::team::team_events_path(tmp.path())).unwrap();
+        assert!(events.iter().any(|event| {
+            event.event == "github_verification_feedback"
+                && event.task.as_deref() == Some("42")
+                && event.success == Some(false)
+                && event.git_ref.as_deref() == Some("abcdef1")
+        }));
+        assert!(events.iter().any(|event| {
+            event.event == "github_verification_warning"
+                && event.task.as_deref() == Some("99")
+                && event
+                    .reason
+                    .as_deref()
+                    .is_some_and(|reason| reason.contains("unknown task #99"))
+        }));
     }
 
     #[test]
