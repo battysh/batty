@@ -478,9 +478,12 @@ impl TeamDaemon {
         }
 
         if let Some(task_id) = task_id {
-            if let Err(error) =
-                task_cmd::block_task_with_reason(&self.board_dir(), task_id, &reason)
-            {
+            if let Err(error) = task_cmd::block_task_with_reason_and_attribution(
+                &self.board_dir(),
+                task_id,
+                &reason,
+                task_cmd::StatusTransitionAttribution::daemon("daemon.preserve_failure"),
+            ) {
                 warn!(
                     member = member_name,
                     task_id,
@@ -1623,9 +1626,12 @@ impl TeamDaemon {
                 let reason = format!(
                     "stall-retry cap: SDK stalled mid-turn {attempt}x on {member_name}; needs human triage",
                 );
-                if let Err(error) =
-                    super::task_cmd::block_task_with_reason(&board_dir, task_id, &reason)
-                {
+                if let Err(error) = super::task_cmd::block_task_with_reason_and_attribution(
+                    &board_dir,
+                    task_id,
+                    &reason,
+                    super::task_cmd::StatusTransitionAttribution::daemon("daemon.health.stall_cap"),
+                ) {
                     warn!(error = %error, task_id, "failed to block task after stall cap");
                 }
                 if let Err(error) =

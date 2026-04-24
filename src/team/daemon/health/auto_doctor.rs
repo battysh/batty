@@ -104,10 +104,13 @@ impl TeamDaemon {
                     task.id, engineer
                 )
             };
-            crate::team::task_cmd::reclaim_task_claim(
+            crate::team::task_cmd::reclaim_task_claim_with_attribution(
                 &self.board_dir(),
                 task.id,
                 "Reset by auto-doctor after daemon lost active ownership.",
+                crate::team::task_cmd::StatusTransitionAttribution::daemon(
+                    "daemon.health.auto_doctor.orphaned_in_progress",
+                ),
             )?;
             self.clear_active_task(lookup_name);
             // #684 / #686: same exponential-backoff dispatch-cooldown pattern
@@ -160,10 +163,13 @@ impl TeamDaemon {
                 lookup_name,
                 expires_at.to_rfc3339()
             );
-            crate::team::task_cmd::reclaim_task_claim(
+            crate::team::task_cmd::reclaim_task_claim_with_attribution(
                 &self.board_dir(),
                 task.id,
                 "Reclaimed by auto-doctor after claim TTL expired with no progress.",
+                crate::team::task_cmd::StatusTransitionAttribution::daemon(
+                    "daemon.health.auto_doctor.stale_claim",
+                ),
             )?;
             self.clear_active_task(lookup_name);
             self.log_auto_doctor_action(

@@ -381,7 +381,14 @@ impl TeamDaemon {
                 Some(&report.name),
                 None,
             )?;
-            crate::team::task_cmd::transition_task(board_dir, task.id, "in-progress")?;
+            crate::team::task_cmd::transition_task_with_attribution(
+                board_dir,
+                task.id,
+                "in-progress",
+                crate::team::task_cmd::StatusTransitionAttribution::daemon(
+                    "daemon.interventions.dispatch.fallback",
+                ),
+            )?;
 
             match self.assign_task_with_task_id_as(
                 "daemon",
@@ -394,7 +401,14 @@ impl TeamDaemon {
                     dispatched += 1;
                 }
                 Err(error) => {
-                    let _ = crate::team::task_cmd::transition_task(board_dir, task.id, "todo");
+                    let _ = crate::team::task_cmd::transition_task_with_attribution(
+                        board_dir,
+                        task.id,
+                        "todo",
+                        crate::team::task_cmd::StatusTransitionAttribution::daemon(
+                            "daemon.interventions.dispatch.rollback",
+                        ),
+                    );
                     let _ = crate::team::task_cmd::unclaim_task(board_dir, task.id);
                     warn!(
                         manager = %manager_name,

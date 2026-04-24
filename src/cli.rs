@@ -193,6 +193,13 @@ pub enum Command {
         command: TaskCommand,
     },
 
+    /// Internal activity-log maintenance commands
+    #[command(hide = true)]
+    Activity {
+        #[command(subcommand)]
+        command: ActivityCommand,
+    },
+
     /// Record a structured review disposition for a task
     Review {
         /// Task id
@@ -697,6 +704,18 @@ pub enum BoardCommand {
     },
     /// Show board health dashboard
     Health,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ActivityCommand {
+    /// Add actor/source fields to the latest matching status activity entry
+    AnnotateStatus {
+        /// Task id
+        task_id: u32,
+        /// Source command/module path
+        #[arg(long)]
+        source: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]

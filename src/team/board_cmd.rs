@@ -41,6 +41,13 @@ pub fn move_task(
         args.push(claim.to_string());
     }
     run_board_owned(board_dir, &args)?;
+    if let Ok(parsed_id) = task_id.parse::<u32>() {
+        let _ = super::task_cmd::annotate_latest_status_activity(
+            board_dir,
+            parsed_id,
+            &super::task_cmd::StatusTransitionAttribution::current_cli("kanban-md.move"),
+        );
+    }
 
     // Restore scheduling fields that kanban-md stripped
     restore_scheduling_fields(board_dir, task_id, &saved_fields);
@@ -87,6 +94,15 @@ pub fn pick_task(
             if let Some(ref id) = task_id {
                 if let Some(fields) = saved.get(id.as_str()) {
                     restore_scheduling_fields(board_dir, id, fields);
+                }
+                if let Ok(parsed_id) = id.parse::<u32>() {
+                    let _ = super::task_cmd::annotate_latest_status_activity(
+                        board_dir,
+                        parsed_id,
+                        &super::task_cmd::StatusTransitionAttribution::current_cli(
+                            "kanban-md.pick",
+                        ),
+                    );
                 }
             }
             Ok(task_id)

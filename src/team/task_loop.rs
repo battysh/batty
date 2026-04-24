@@ -1650,7 +1650,10 @@ pub(crate) fn recycle_cron_tasks(board_dir: &Path) -> Result<Vec<(u32, String)>>
     use serde_yaml::Value;
     use std::str::FromStr;
 
-    use super::task_cmd::{find_task_path, set_optional_string, update_task_frontmatter, yaml_key};
+    use super::task_cmd::{
+        StatusTransitionAttribution, find_task_path, record_status_transition_activity,
+        set_optional_string, update_task_frontmatter, yaml_key,
+    };
 
     let tasks_dir = board_dir.join("tasks");
     let tasks = crate::task::load_tasks_from_dir(&tasks_dir)
@@ -1731,6 +1734,13 @@ pub(crate) fn recycle_cron_tasks(board_dir: &Path) -> Result<Vec<(u32, String)>>
             mapping.remove(yaml_key("blocked_on"));
             mapping.remove(yaml_key("worktree_path"));
         })?;
+        record_status_transition_activity(
+            board_dir,
+            task_id,
+            &task.status,
+            "todo",
+            &StatusTransitionAttribution::daemon("daemon.task_loop.cron_recycle"),
+        )?;
 
         info!(task_id, cron = %cron_expr, "recycled cron task back to todo");
         recycled.push((task_id, cron_expr));

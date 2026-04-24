@@ -1339,7 +1339,14 @@ impl TeamDaemon {
                             self.assign_task_with_task_id_as(&msg.from, name, &msg.body, task_id)
                             .map(|launch| {
                                 if let Some(tid) = task_id {
-                                    if let Err(e) = crate::team::task_cmd::transition_task(&board_dir, tid, "in-progress") {
+                                    if let Err(e) = crate::team::task_cmd::transition_task_with_attribution(
+                                        &board_dir,
+                                        tid,
+                                        "in-progress",
+                                        crate::team::task_cmd::StatusTransitionAttribution::daemon(
+                                            "daemon.delivery.routing.assign",
+                                        ),
+                                    ) {
                                         debug!(task_id = tid, error = %e, "could not transition task to in-progress on assign");
                                     }
                                 }
