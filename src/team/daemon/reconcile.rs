@@ -449,19 +449,23 @@ impl TeamDaemon {
             .with_context(|| format!("failed to create pane for {}", member.name))?;
 
         // Label the pane with @batty_role
-        let _ = std::process::Command::new("tmux")
-            .args(["select-pane", "-t", &pane_id, "-T", &member.name])
-            .output();
-        let _ = std::process::Command::new("tmux")
-            .args([
+        let _ = tmux::run_tmux_with_timeout(
+            ["select-pane", "-t", &pane_id, "-T", &member.name],
+            "select-pane -T",
+            Some(&pane_id),
+        );
+        let _ = tmux::run_tmux_with_timeout(
+            [
                 "set-option",
                 "-p",
                 "-t",
                 &pane_id,
                 "@batty_role",
                 &member.name,
-            ])
-            .output();
+            ],
+            "set-option @batty_role",
+            Some(&pane_id),
+        );
 
         info!(
             member = member.name.as_str(),

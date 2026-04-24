@@ -251,16 +251,18 @@ pub(crate) struct TeamStatusJsonReport {
 pub(crate) fn list_runtime_member_statuses(
     session: &str,
 ) -> Result<HashMap<String, RuntimeMemberStatus>> {
-    let output = Command::new("tmux")
-        .args([
+    let output = crate::tmux::run_tmux_with_timeout(
+        [
             "list-panes",
             "-t",
             session,
             "-F",
             "#{pane_id}\t#{@batty_role}\t#{@batty_status}\t#{pane_dead}",
-        ])
-        .output()
-        .with_context(|| format!("failed to list panes for session '{session}'"))?;
+        ],
+        "list-panes runtime status",
+        Some(session),
+    )
+    .with_context(|| format!("failed to list panes for session '{session}'"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -2574,9 +2576,11 @@ where
             })
         };
 
-        let _ = Command::new("tmux")
-            .args(["set-option", "-p", "-t", pane_id, "@batty_status", &label])
-            .output();
+        let _ = crate::tmux::run_tmux_with_timeout(
+            ["set-option", "-p", "-t", pane_id, "@batty_status", &label],
+            "set-option @batty_status",
+            Some(pane_id),
+        );
     }
 }
 
