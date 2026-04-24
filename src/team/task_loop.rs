@@ -303,6 +303,22 @@ pub(crate) fn setup_engineer_worktree(
     branch_name: &str,
     team_config_dir: &Path,
 ) -> Result<PathBuf> {
+    setup_engineer_worktree_from_trunk(
+        project_root,
+        worktree_dir,
+        branch_name,
+        team_config_dir,
+        "main",
+    )
+}
+
+pub(crate) fn setup_engineer_worktree_from_trunk(
+    project_root: &Path,
+    worktree_dir: &Path,
+    branch_name: &str,
+    team_config_dir: &Path,
+    trunk_branch: &str,
+) -> Result<PathBuf> {
     if let Some(parent) = worktree_dir.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("failed to create {}", parent.display()))?;
@@ -310,7 +326,9 @@ pub(crate) fn setup_engineer_worktree(
 
     if !worktree_dir.exists() {
         let path = worktree_dir.to_string_lossy().to_string();
-        match retry_git(|| git_cmd::worktree_add(project_root, worktree_dir, branch_name, "main")) {
+        match retry_git(|| {
+            git_cmd::worktree_add(project_root, worktree_dir, branch_name, trunk_branch)
+        }) {
             Ok(_) => {}
             Err(git_cmd::GitError::Permanent { stderr, .. })
                 if stderr.contains("already exists") =>
@@ -337,6 +355,7 @@ pub(crate) fn setup_engineer_worktree(
     Ok(worktree_dir.to_path_buf())
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn prepare_engineer_assignment_worktree(
     project_root: &Path,
     worktree_dir: &Path,
@@ -344,14 +363,39 @@ pub(crate) fn prepare_engineer_assignment_worktree(
     task_branch: &str,
     team_config_dir: &Path,
 ) -> Result<PathBuf> {
+    prepare_engineer_assignment_worktree_from_trunk(
+        project_root,
+        worktree_dir,
+        engineer_name,
+        task_branch,
+        team_config_dir,
+        "main",
+    )
+}
+
+pub(crate) fn prepare_engineer_assignment_worktree_from_trunk(
+    project_root: &Path,
+    worktree_dir: &Path,
+    engineer_name: &str,
+    task_branch: &str,
+    team_config_dir: &Path,
+    trunk_branch: &str,
+) -> Result<PathBuf> {
     let base_branch = engineer_base_branch_name(engineer_name);
     ensure_engineer_worktree_health(project_root, worktree_dir, &base_branch)?;
-    setup_engineer_worktree(project_root, worktree_dir, &base_branch, team_config_dir)?;
+    setup_engineer_worktree_from_trunk(
+        project_root,
+        worktree_dir,
+        &base_branch,
+        team_config_dir,
+        trunk_branch,
+    )?;
     maybe_migrate_legacy_engineer_worktree(
         project_root,
         worktree_dir,
         engineer_name,
         &base_branch,
+        trunk_branch,
     )?;
     ensure_task_branch_namespace_available(project_root, engineer_name)?;
 
@@ -365,7 +409,7 @@ pub(crate) fn prepare_engineer_assignment_worktree(
     if previous_branch != base_branch
         && previous_branch != task_branch
         && !previous_branch_is_engineer_owned
-        && !branch_is_merged_into(project_root, &previous_branch, "main")?
+        && !branch_is_merged_into(project_root, &previous_branch, trunk_branch)?
     {
         bail!(
             "engineer worktree '{}' is on unmerged branch '{}'",
@@ -374,15 +418,15 @@ pub(crate) fn prepare_engineer_assignment_worktree(
         );
     }
 
-    checkout_worktree_branch_from_main(worktree_dir, &base_branch)?;
+    checkout_worktree_branch_from_trunk(worktree_dir, &base_branch, trunk_branch)?;
 
-    checkout_worktree_branch_from_main(worktree_dir, task_branch)?;
+    checkout_worktree_branch_from_trunk(worktree_dir, task_branch, trunk_branch)?;
     ensure_engineer_worktree_links(worktree_dir, team_config_dir)?;
 
     if previous_branch != base_branch
         && previous_branch != task_branch
         && previous_branch_is_engineer_owned
-        && branch_is_merged_into(project_root, &previous_branch, "main")?
+        && branch_is_merged_into(project_root, &previous_branch, trunk_branch)?
     {
         delete_branch(project_root, &previous_branch)?;
     }
@@ -394,6 +438,7 @@ pub(crate) fn prepare_engineer_assignment_worktree(
 
 /// Set up worktrees for a multi-repo project. Creates one git worktree per
 /// sub-repo inside `worktree_dir`, mirroring the original directory layout.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn setup_multi_repo_worktree(
     project_root: &Path,
     worktree_dir: &Path,
@@ -401,13 +446,37 @@ pub(crate) fn setup_multi_repo_worktree(
     team_config_dir: &Path,
     sub_repo_names: &[String],
 ) -> Result<PathBuf> {
+    setup_multi_repo_worktree_from_trunk(
+        project_root,
+        worktree_dir,
+        branch_name,
+        team_config_dir,
+        sub_repo_names,
+        "main",
+    )
+}
+
+pub(crate) fn setup_multi_repo_worktree_from_trunk(
+    project_root: &Path,
+    worktree_dir: &Path,
+    branch_name: &str,
+    team_config_dir: &Path,
+    sub_repo_names: &[String],
+    trunk_branch: &str,
+) -> Result<PathBuf> {
     std::fs::create_dir_all(worktree_dir)
         .with_context(|| format!("failed to create {}", worktree_dir.display()))?;
 
     for repo_name in sub_repo_names {
         let repo_root = project_root.join(repo_name);
         let sub_wt = worktree_dir.join(repo_name);
-        setup_engineer_worktree(&repo_root, &sub_wt, branch_name, team_config_dir)?;
+        setup_engineer_worktree_from_trunk(
+            &repo_root,
+            &sub_wt,
+            branch_name,
+            team_config_dir,
+            trunk_branch,
+        )?;
     }
 
     ensure_engineer_worktree_links(worktree_dir, team_config_dir)?;
@@ -416,6 +485,7 @@ pub(crate) fn setup_multi_repo_worktree(
 
 /// Prepare worktrees for a multi-repo task assignment. Creates task branches
 /// in every sub-repo so the engineer can work across all of them.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn prepare_multi_repo_assignment_worktree(
     project_root: &Path,
     worktree_dir: &Path,
@@ -424,18 +494,39 @@ pub(crate) fn prepare_multi_repo_assignment_worktree(
     team_config_dir: &Path,
     sub_repo_names: &[String],
 ) -> Result<PathBuf> {
+    prepare_multi_repo_assignment_worktree_from_trunk(
+        project_root,
+        worktree_dir,
+        engineer_name,
+        task_branch,
+        team_config_dir,
+        sub_repo_names,
+        "main",
+    )
+}
+
+pub(crate) fn prepare_multi_repo_assignment_worktree_from_trunk(
+    project_root: &Path,
+    worktree_dir: &Path,
+    engineer_name: &str,
+    task_branch: &str,
+    team_config_dir: &Path,
+    sub_repo_names: &[String],
+    trunk_branch: &str,
+) -> Result<PathBuf> {
     std::fs::create_dir_all(worktree_dir)
         .with_context(|| format!("failed to create {}", worktree_dir.display()))?;
 
     for repo_name in sub_repo_names {
         let repo_root = project_root.join(repo_name);
         let sub_wt = worktree_dir.join(repo_name);
-        prepare_engineer_assignment_worktree(
+        prepare_engineer_assignment_worktree_from_trunk(
             &repo_root,
             &sub_wt,
             engineer_name,
             task_branch,
             team_config_dir,
+            trunk_branch,
         )?;
     }
 
@@ -444,18 +535,44 @@ pub(crate) fn prepare_multi_repo_assignment_worktree(
 }
 
 pub(crate) fn worktree_commits_behind_main(worktree_dir: &Path) -> Result<u32> {
+    worktree_commits_behind_trunk(worktree_dir, "main")
+}
+
+pub(crate) fn worktree_commits_behind_trunk(
+    worktree_dir: &Path,
+    trunk_branch: &str,
+) -> Result<u32> {
     map_git_error(
-        retry_git(|| git_cmd::rev_list_count(worktree_dir, "HEAD..main")),
-        "failed to measure worktree staleness against main",
+        retry_git(|| git_cmd::rev_list_count(worktree_dir, &format!("HEAD..{trunk_branch}"))),
+        &format!("failed to measure worktree staleness against {trunk_branch}"),
     )
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn refresh_engineer_worktree_if_stale(
     project_root: &Path,
     worktree_dir: &Path,
     branch_name: &str,
     team_config_dir: &Path,
     stale_threshold: u32,
+) -> Result<WorktreeRefreshOutcome> {
+    refresh_engineer_worktree_if_stale_from_trunk(
+        project_root,
+        worktree_dir,
+        branch_name,
+        team_config_dir,
+        stale_threshold,
+        "main",
+    )
+}
+
+pub(crate) fn refresh_engineer_worktree_if_stale_from_trunk(
+    project_root: &Path,
+    worktree_dir: &Path,
+    branch_name: &str,
+    team_config_dir: &Path,
+    stale_threshold: u32,
+    trunk_branch: &str,
 ) -> Result<WorktreeRefreshOutcome> {
     if !worktree_dir.exists() {
         return Ok(WorktreeRefreshOutcome {
@@ -464,7 +581,7 @@ pub(crate) fn refresh_engineer_worktree_if_stale(
         });
     }
 
-    let behind_main = Some(worktree_commits_behind_main(worktree_dir)?);
+    let behind_main = Some(worktree_commits_behind_trunk(worktree_dir, trunk_branch)?);
     if behind_main.is_none_or(|count| count <= stale_threshold) {
         return Ok(WorktreeRefreshOutcome {
             action: WorktreeRefreshAction::Unchanged,
@@ -472,8 +589,13 @@ pub(crate) fn refresh_engineer_worktree_if_stale(
         });
     }
 
-    let action =
-        refresh_engineer_worktree(project_root, worktree_dir, branch_name, team_config_dir)?;
+    let action = refresh_engineer_worktree_from_trunk(
+        project_root,
+        worktree_dir,
+        branch_name,
+        team_config_dir,
+        trunk_branch,
+    )?;
     Ok(WorktreeRefreshOutcome {
         action,
         behind_main,
@@ -506,6 +628,22 @@ pub(crate) fn refresh_engineer_worktree(
     branch_name: &str,
     team_config_dir: &Path,
 ) -> Result<WorktreeRefreshAction> {
+    refresh_engineer_worktree_from_trunk(
+        project_root,
+        worktree_dir,
+        branch_name,
+        team_config_dir,
+        "main",
+    )
+}
+
+pub(crate) fn refresh_engineer_worktree_from_trunk(
+    project_root: &Path,
+    worktree_dir: &Path,
+    branch_name: &str,
+    team_config_dir: &Path,
+    trunk_branch: &str,
+) -> Result<WorktreeRefreshAction> {
     if !worktree_dir.exists() {
         return Ok(WorktreeRefreshAction::Unchanged);
     }
@@ -520,13 +658,13 @@ pub(crate) fn refresh_engineer_worktree(
     }
 
     if map_git_error(
-        retry_git(|| git_cmd::merge_base_is_ancestor(project_root, "main", branch_name)),
-        "failed to compare worktree branch with main",
+        retry_git(|| git_cmd::merge_base_is_ancestor(project_root, trunk_branch, branch_name)),
+        &format!("failed to compare worktree branch with {trunk_branch}"),
     )? {
         return Ok(WorktreeRefreshAction::Unchanged);
     }
 
-    let rebase_result = retry_git(|| git_cmd::rebase(worktree_dir, "main"));
+    let rebase_result = retry_git(|| git_cmd::rebase(worktree_dir, trunk_branch));
     if rebase_result.is_ok() {
         info!(
             worktree = %worktree_dir.display(),
@@ -571,7 +709,13 @@ pub(crate) fn refresh_engineer_worktree(
         rebase_error = %stderr,
         "recreating engineer worktree after rebase conflict"
     );
-    setup_engineer_worktree(project_root, worktree_dir, branch_name, team_config_dir)?;
+    setup_engineer_worktree_from_trunk(
+        project_root,
+        worktree_dir,
+        branch_name,
+        team_config_dir,
+        trunk_branch,
+    )?;
     Ok(WorktreeRefreshAction::Reset)
 }
 
@@ -584,6 +728,7 @@ fn maybe_migrate_legacy_engineer_worktree(
     worktree_dir: &Path,
     engineer_name: &str,
     base_branch: &str,
+    trunk_branch: &str,
 ) -> Result<()> {
     if !worktree_dir.exists() {
         return Ok(());
@@ -602,8 +747,8 @@ fn maybe_migrate_legacy_engineer_worktree(
         );
     }
 
-    checkout_worktree_branch_from_main(worktree_dir, base_branch)?;
-    if branch_is_merged_into(project_root, engineer_name, "main")? {
+    checkout_worktree_branch_from_trunk(worktree_dir, base_branch, trunk_branch)?;
+    if branch_is_merged_into(project_root, engineer_name, trunk_branch)? {
         delete_branch(project_root, engineer_name)?;
         info!(
             branch = engineer_name,
@@ -1496,12 +1641,21 @@ pub(crate) fn current_worktree_branch(worktree_dir: &Path) -> Result<String> {
     )
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn checkout_worktree_branch_from_main(
     worktree_dir: &Path,
     branch_name: &str,
 ) -> Result<()> {
+    checkout_worktree_branch_from_trunk(worktree_dir, branch_name, "main")
+}
+
+pub(crate) fn checkout_worktree_branch_from_trunk(
+    worktree_dir: &Path,
+    branch_name: &str,
+    trunk_branch: &str,
+) -> Result<()> {
     map_git_error(
-        retry_git(|| git_cmd::checkout_new_branch(worktree_dir, branch_name, "main")),
+        retry_git(|| git_cmd::checkout_new_branch(worktree_dir, branch_name, trunk_branch)),
         &format!("failed to switch worktree to branch '{branch_name}'"),
     )
 }
@@ -1556,10 +1710,25 @@ pub(crate) fn branch_is_merged_into(
     )
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn engineer_worktree_ready_for_dispatch(
     project_root: &Path,
     worktree_dir: &Path,
     engineer_name: &str,
+) -> Result<()> {
+    engineer_worktree_ready_for_dispatch_from_trunk(
+        project_root,
+        worktree_dir,
+        engineer_name,
+        "main",
+    )
+}
+
+pub(crate) fn engineer_worktree_ready_for_dispatch_from_trunk(
+    project_root: &Path,
+    worktree_dir: &Path,
+    engineer_name: &str,
+    trunk_branch: &str,
 ) -> Result<()> {
     if !worktree_dir.exists() {
         return Ok(());
@@ -1591,17 +1760,18 @@ pub(crate) fn engineer_worktree_ready_for_dispatch(
     }
 
     let ahead_of_main = map_git_error(
-        retry_git(|| git_cmd::rev_list_count(worktree_dir, "main..HEAD")),
-        "failed to compare worktree against main",
+        retry_git(|| git_cmd::rev_list_count(worktree_dir, &format!("{trunk_branch}..HEAD"))),
+        &format!("failed to compare worktree against {trunk_branch}"),
     )?;
     let behind_main = map_git_error(
-        retry_git(|| git_cmd::rev_list_count(worktree_dir, "HEAD..main")),
-        "failed to compare worktree against main",
+        retry_git(|| git_cmd::rev_list_count(worktree_dir, &format!("HEAD..{trunk_branch}"))),
+        &format!("failed to compare worktree against {trunk_branch}"),
     )?;
     if ahead_of_main != 0 || behind_main != 0 {
         bail!(
-            "engineer worktree '{}' is not based on current main (ahead {}, behind {})",
+            "engineer worktree '{}' is not based on current {} (ahead {}, behind {})",
             engineer_name,
+            trunk_branch,
             ahead_of_main,
             behind_main
         );

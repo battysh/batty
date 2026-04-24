@@ -935,6 +935,7 @@ mod tests {
         let team_config = TeamConfig {
             name: "test".to_string(),
             workspace_type: crate::team::config::WorkspaceType::Generic,
+            trunk_branch: crate::team::config::default_trunk_branch(),
             agent: None,
             workflow_mode: WorkflowMode::Legacy,
             workflow_policy: WorkflowPolicy::default(),
@@ -1018,6 +1019,7 @@ mod tests {
         let team_config = TeamConfig {
             name: "test".to_string(),
             workspace_type: crate::team::config::WorkspaceType::Generic,
+            trunk_branch: crate::team::config::default_trunk_branch(),
             agent: None,
             workflow_mode: WorkflowMode::Legacy,
             workflow_policy: WorkflowPolicy::default(),
@@ -1131,6 +1133,7 @@ mod tests {
         let team_config = TeamConfig {
             name: "test".to_string(),
             workspace_type: crate::team::config::WorkspaceType::Generic,
+            trunk_branch: crate::team::config::default_trunk_branch(),
             agent: None,
             workflow_mode: WorkflowMode::Legacy,
             workflow_policy: WorkflowPolicy::default(),
@@ -1514,6 +1517,7 @@ last_verified: 2026-04-05
         let team_config = TeamConfig {
             name: "test".to_string(),
             workspace_type: crate::team::config::WorkspaceType::Generic,
+            trunk_branch: crate::team::config::default_trunk_branch(),
             agent: None,
             workflow_mode: WorkflowMode::Legacy,
             workflow_policy: WorkflowPolicy::default(),
@@ -1581,6 +1585,7 @@ last_verified: 2026-04-05
         let team_config = TeamConfig {
             name: "test".to_string(),
             workspace_type: crate::team::config::WorkspaceType::Generic,
+            trunk_branch: crate::team::config::default_trunk_branch(),
             agent: None,
             workflow_mode: WorkflowMode::Legacy,
             workflow_policy: WorkflowPolicy::default(),
@@ -1640,6 +1645,7 @@ last_verified: 2026-04-05
         let team_config = TeamConfig {
             name: "test".to_string(),
             workspace_type: crate::team::config::WorkspaceType::Generic,
+            trunk_branch: crate::team::config::default_trunk_branch(),
             agent: None,
             workflow_mode: WorkflowMode::Legacy,
             workflow_policy: WorkflowPolicy::default(),
@@ -1699,6 +1705,7 @@ last_verified: 2026-04-05
         let team_config = TeamConfig {
             name: "test".to_string(),
             workspace_type: crate::team::config::WorkspaceType::Generic,
+            trunk_branch: crate::team::config::default_trunk_branch(),
             agent: None,
             workflow_mode: WorkflowMode::Legacy,
             workflow_policy: WorkflowPolicy::default(),
@@ -1735,6 +1742,7 @@ last_verified: 2026-04-05
         let team_config = TeamConfig {
             name: "test".to_string(),
             workspace_type: crate::team::config::WorkspaceType::Generic,
+            trunk_branch: crate::team::config::default_trunk_branch(),
             agent: None,
             workflow_mode: WorkflowMode::Legacy,
             workflow_policy: WorkflowPolicy::default(),
@@ -1791,6 +1799,7 @@ last_verified: 2026-04-05
         let team_config = TeamConfig {
             name: "test".to_string(),
             workspace_type: crate::team::config::WorkspaceType::Generic,
+            trunk_branch: crate::team::config::default_trunk_branch(),
             agent: None,
             workflow_mode: WorkflowMode::Legacy,
             workflow_policy: WorkflowPolicy::default(),
@@ -1888,6 +1897,7 @@ last_verified: 2026-04-05
         let team_config = TeamConfig {
             name: "test".to_string(),
             workspace_type: crate::team::config::WorkspaceType::Generic,
+            trunk_branch: crate::team::config::default_trunk_branch(),
             agent: None,
             workflow_mode: WorkflowMode::Legacy,
             workflow_policy: WorkflowPolicy::default(),
@@ -1986,6 +1996,7 @@ last_verified: 2026-04-05
         let team_config = TeamConfig {
             name: "test".to_string(),
             workspace_type: crate::team::config::WorkspaceType::Generic,
+            trunk_branch: crate::team::config::default_trunk_branch(),
             agent: None,
             workflow_mode: WorkflowMode::Legacy,
             workflow_policy: WorkflowPolicy::default(),

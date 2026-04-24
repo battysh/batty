@@ -812,51 +812,76 @@ fn merge_base_is_ancestor(path: &Path, older: &str, newer: &str) -> Result<bool>
     }
 }
 
-fn preferred_main_start_ref(path: &Path) -> Result<MainStartRefSelection> {
-    if !ref_exists(path, "refs/remotes/origin/main")? {
+fn preferred_trunk_start_ref(path: &Path, trunk_branch: &str) -> Result<MainStartRefSelection> {
+    let local_ref = format!("refs/heads/{trunk_branch}");
+    let remote_ref = format!("refs/remotes/origin/{trunk_branch}");
+    let local_branch = trunk_branch.to_string();
+    let remote_branch = format!("origin/{trunk_branch}");
+
+    let has_local = ref_exists(path, &local_ref)?;
+    let has_remote = ref_exists(path, &remote_ref)?;
+    if !has_remote {
         return Ok(MainStartRefSelection {
-            ref_name: "main".to_string(),
+            ref_name: local_branch,
             fallback_reason: Some("stale_origin_fallback ahead=0 origin_unreachable".to_string()),
         });
     }
-
-    let local_main = current_commit(path, "refs/heads/main")?;
-    let remote_main = current_commit(path, "refs/remotes/origin/main")?;
-    if local_main == remote_main {
+    if !has_local {
         return Ok(MainStartRefSelection {
-            ref_name: "origin/main".to_string(),
+            ref_name: remote_branch,
             fallback_reason: None,
         });
     }
 
-    if merge_base_is_ancestor(path, "refs/remotes/origin/main", "refs/heads/main")? {
-        let ahead = rev_list_count(path, "origin/main..main")?;
+    let local_main = current_commit(path, &local_ref)?;
+    let remote_main = current_commit(path, &remote_ref)?;
+    if local_main == remote_main {
         return Ok(MainStartRefSelection {
-            ref_name: "main".to_string(),
+            ref_name: remote_branch,
+            fallback_reason: None,
+        });
+    }
+
+    if merge_base_is_ancestor(path, &remote_ref, &local_ref)? {
+        let ahead = rev_list_count(path, &format!("origin/{trunk_branch}..{trunk_branch}"))?;
+        return Ok(MainStartRefSelection {
+            ref_name: local_branch,
             fallback_reason: Some(format!("stale_origin_fallback ahead={ahead}")),
         });
     }
 
-    if merge_base_is_ancestor(path, "refs/heads/main", "refs/remotes/origin/main")? {
+    if merge_base_is_ancestor(path, &local_ref, &remote_ref)? {
         return Ok(MainStartRefSelection {
-            ref_name: "origin/main".to_string(),
+            ref_name: remote_branch,
             fallback_reason: None,
         });
     }
 
-    let ahead = rev_list_count(path, "origin/main..main")?;
-    let origin_ahead = rev_list_count(path, "main..origin/main")?;
+    let ahead = rev_list_count(path, &format!("origin/{trunk_branch}..{trunk_branch}"))?;
+    let origin_ahead = rev_list_count(path, &format!("{trunk_branch}..origin/{trunk_branch}"))?;
     Ok(MainStartRefSelection {
-        ref_name: "main".to_string(),
+        ref_name: local_branch,
         fallback_reason: Some(format!(
             "stale_origin_fallback ahead={ahead} divergent origin_ahead={origin_ahead}"
         )),
     })
 }
 
+fn preferred_main_start_ref(path: &Path) -> Result<MainStartRefSelection> {
+    preferred_trunk_start_ref(path, "main")
+}
+
 pub fn ensure_worktree_branch_for_dispatch(
     worktree_path: &Path,
     expected_branch: &str,
+) -> Result<DispatchBranchReset> {
+    ensure_worktree_branch_for_dispatch_from_trunk(worktree_path, expected_branch, "main")
+}
+
+pub fn ensure_worktree_branch_for_dispatch_from_trunk(
+    worktree_path: &Path,
+    expected_branch: &str,
+    trunk_branch: &str,
 ) -> Result<DispatchBranchReset> {
     let current_branch = git_current_branch(worktree_path)?;
     if current_branch == expected_branch {
@@ -868,7 +893,7 @@ pub fn ensure_worktree_branch_for_dispatch(
         });
     }
 
-    let selection = preferred_main_start_ref(worktree_path)?;
+    let selection = preferred_trunk_start_ref(worktree_path, trunk_branch)?;
     let commit_message = format!("wip: auto-save before worktree reset [{current_branch}]");
     let reason = prepare_worktree_for_reset(
         worktree_path,
@@ -975,6 +1000,26 @@ pub fn reset_worktree_to_base_with_options_for(
     preserve_failure_mode: PreserveFailureMode,
     subsystem: &str,
 ) -> Result<WorktreeResetReason> {
+    reset_worktree_to_base_with_options_for_trunk(
+        worktree_path,
+        base_branch,
+        commit_message,
+        timeout,
+        preserve_failure_mode,
+        subsystem,
+        "main",
+    )
+}
+
+pub fn reset_worktree_to_base_with_options_for_trunk(
+    worktree_path: &Path,
+    base_branch: &str,
+    commit_message: &str,
+    timeout: Duration,
+    preserve_failure_mode: PreserveFailureMode,
+    subsystem: &str,
+    trunk_branch: &str,
+) -> Result<WorktreeResetReason> {
     let current_branch =
         git_current_branch(worktree_path).unwrap_or_else(|_| base_branch.to_string());
     let reason = prepare_worktree_for_reset(
@@ -998,12 +1043,13 @@ pub fn reset_worktree_to_base_with_options_for(
             "archived preserved base-branch work before reset"
         );
     } else {
-        // #659: guard destructive `checkout -B <base_branch> main` by archiving
-        // any commits already on `base_branch` that are ahead of main. This
+        // #659: guard destructive `checkout -B <base_branch> <trunk>` by archiving
+        // any commits already on `base_branch` that are ahead of trunk. This
         // covers the case where `base_branch` already had unmerged commits from
         // a prior session (e.g. completed task work that hasn't been merged
-        // yet) and the branch ref is about to be rewritten to `main`.
-        let _ = archive_branch_if_commits_ahead(worktree_path, base_branch, "main", subsystem);
+        // yet) and the branch ref is about to be rewritten to trunk.
+        let _ =
+            archive_branch_if_commits_ahead(worktree_path, base_branch, trunk_branch, subsystem);
     }
 
     crate::team::task_loop::log_worktree_mutation_audit(
@@ -1013,11 +1059,12 @@ pub fn reset_worktree_to_base_with_options_for(
         &crate::team::task_loop::current_worktree_user_change_paths(worktree_path)
             .unwrap_or_default(),
     );
-    let checkout = run_git(worktree_path, ["checkout", "-B", base_branch, "main"])?;
+    let checkout = run_git(worktree_path, ["checkout", "-B", base_branch, trunk_branch])?;
     if !checkout.status.success() {
         bail!(
-            "failed to recreate '{}' from 'main' in {}: {}",
+            "failed to recreate '{}' from '{}' in {}: {}",
             base_branch,
+            trunk_branch,
             worktree_path.display(),
             String::from_utf8_lossy(&checkout.stderr).trim()
         );
@@ -1098,6 +1145,15 @@ pub fn reset_worktree_to_base_if_clean(
     base_branch: &str,
     subsystem: &str,
 ) -> Result<WorktreeResetReason> {
+    reset_worktree_to_base_if_clean_from_trunk(worktree_path, base_branch, subsystem, "main")
+}
+
+pub fn reset_worktree_to_base_if_clean_from_trunk(
+    worktree_path: &Path,
+    base_branch: &str,
+    subsystem: &str,
+    trunk_branch: &str,
+) -> Result<WorktreeResetReason> {
     let dirty_paths = crate::team::task_loop::current_worktree_user_change_paths(worktree_path)
         .unwrap_or_default();
     if !dirty_paths.is_empty() {
@@ -1112,20 +1168,21 @@ pub fn reset_worktree_to_base_if_clean(
     }
 
     let _ = run_git(worktree_path, ["merge", "--abort"]);
-    // #659: archive commits ahead of main on `base_branch` before the
-    // destructive `checkout -B base_branch main` below.
-    let _ = archive_branch_if_commits_ahead(worktree_path, base_branch, "main", subsystem);
+    // #659: archive commits ahead of trunk on `base_branch` before the
+    // destructive `checkout -B base_branch <trunk>` below.
+    let _ = archive_branch_if_commits_ahead(worktree_path, base_branch, trunk_branch, subsystem);
     crate::team::task_loop::log_worktree_mutation_audit(
         worktree_path,
         subsystem,
         "git checkout -B",
         &dirty_paths,
     );
-    let checkout = run_git(worktree_path, ["checkout", "-B", base_branch, "main"])?;
+    let checkout = run_git(worktree_path, ["checkout", "-B", base_branch, trunk_branch])?;
     if !checkout.status.success() {
         bail!(
-            "failed to recreate '{}' from 'main' in {}: {}",
+            "failed to recreate '{}' from '{}' in {}: {}",
             base_branch,
+            trunk_branch,
             worktree_path.display(),
             String::from_utf8_lossy(&checkout.stderr).trim()
         );

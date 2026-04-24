@@ -21,7 +21,7 @@ use crate::team::board::{read_workflow_metadata, write_workflow_metadata};
 use crate::team::daemon::verification::{inspect_scope_fence, run_automatic_verification};
 use crate::team::daemon::{MergeRequest, TeamDaemon};
 use crate::team::task_loop::{
-    checkout_worktree_branch_from_main, current_worktree_branch, engineer_base_branch_name,
+    checkout_worktree_branch_from_trunk, current_worktree_branch, engineer_base_branch_name,
     read_task_title,
 };
 use crate::team::telemetry_db;
@@ -29,13 +29,13 @@ use crate::team::test_results::{TestResults, TestRunOutput};
 use crate::team::verification::{EvidenceKind, VerificationPhase, VerificationState};
 
 use super::git_ops::{
-    code_files_changed_from_main, commits_ahead_of_main, diff_stat_from_main,
-    files_changed_from_main, now_unix, run_git_with_context,
+    code_files_changed_from_trunk, commits_ahead_of_trunk, diff_stat_from_trunk,
+    files_changed_from_trunk, now_unix, run_git_with_context,
 };
 use super::lock::{
     MergeLock, MergeMode, MergeOutcome, MergeSuccess, infer_merge_mode_from_failure,
 };
-use super::operations::merge_engineer_branch;
+use super::operations::merge_engineer_branch_into_trunk;
 
 fn transition_verification_phase(
     daemon: &mut TeamDaemon,
@@ -353,24 +353,29 @@ fn move_task_to_review(
     engineer: &str,
 ) -> Result<bool> {
     let worktree_dir = daemon.worktree_dir(engineer);
+    let trunk_branch = daemon.config.team_config.trunk_branch().to_string();
     let commits_ahead = if daemon.is_multi_repo {
-        multi_repo_commits_ahead_of_main(&worktree_dir, &daemon.sub_repo_names)?
+        multi_repo_commits_ahead_of_trunk(&worktree_dir, &daemon.sub_repo_names, &trunk_branch)?
     } else {
-        commits_ahead_of_main(&worktree_dir)?
+        commits_ahead_of_trunk(&worktree_dir, &trunk_branch)?
     };
 
     if commits_ahead == 0 {
         warn!(
             engineer,
-            task_id, "refusing to move task to review because branch has no commits ahead of main"
+            task_id,
+            trunk_branch,
+            "refusing to move task to review because branch has no commits ahead of trunk"
         );
-        let msg = "Review blocked: your branch has no commits ahead of main, so Batty kept the task in progress instead of moving it to review.\n\
+        let msg = format!(
+            "Review blocked: your branch has no commits ahead of {trunk_branch}, so Batty kept the task in progress instead of moving it to review.\n\
                    Commit the work first:\n\
                    ```\n\
                    git add -A\n\
                    git commit -m \"your task description\"\n\
-                   ```";
-        daemon.queue_message("batty", engineer, msg)?;
+                   ```"
+        );
+        daemon.queue_message("batty", engineer, &msg)?;
         return Ok(false);
     }
 
@@ -439,29 +444,34 @@ pub(crate) fn handle_engineer_completion(daemon: &mut TeamDaemon, engineer: &str
     }
 
     let worktree_dir = daemon.worktree_dir(engineer);
+    let trunk_branch = daemon.config.team_config.trunk_branch().to_string();
     let board_dir = daemon.board_dir();
     let board_dir_str = board_dir.to_string_lossy().to_string();
     let manager_name = daemon.manager_name(engineer);
 
     let total_commits = if daemon.is_multi_repo {
-        multi_repo_commits_ahead_of_main(&worktree_dir, &daemon.sub_repo_names)?
+        multi_repo_commits_ahead_of_trunk(&worktree_dir, &daemon.sub_repo_names, &trunk_branch)?
     } else {
-        commits_ahead_of_main(&worktree_dir)?
+        commits_ahead_of_trunk(&worktree_dir, &trunk_branch)?
     };
     let diff_stat = if daemon.is_multi_repo {
-        multi_repo_diff_stat_from_main(&worktree_dir, &daemon.sub_repo_names)?
+        multi_repo_diff_stat_from_trunk(&worktree_dir, &daemon.sub_repo_names, &trunk_branch)?
     } else {
-        diff_stat_from_main(&worktree_dir)?
+        diff_stat_from_trunk(&worktree_dir, &trunk_branch)?
     };
     let files_changed = if daemon.is_multi_repo {
-        multi_repo_files_changed_from_main(&worktree_dir, &daemon.sub_repo_names)?
+        multi_repo_files_changed_from_trunk(&worktree_dir, &daemon.sub_repo_names, &trunk_branch)?
     } else {
-        files_changed_from_main(&worktree_dir)?
+        files_changed_from_trunk(&worktree_dir, &trunk_branch)?
     };
     let code_files_changed = if daemon.is_multi_repo {
-        multi_repo_code_files_changed_from_main(&worktree_dir, &daemon.sub_repo_names)?
+        multi_repo_code_files_changed_from_trunk(
+            &worktree_dir,
+            &daemon.sub_repo_names,
+            &trunk_branch,
+        )?
     } else {
-        code_files_changed_from_main(&worktree_dir)?
+        code_files_changed_from_trunk(&worktree_dir, &trunk_branch)?
     };
     let verification_policy = daemon
         .config
@@ -507,7 +517,11 @@ pub(crate) fn handle_engineer_completion(daemon: &mut TeamDaemon, engineer: &str
         daemon.record_orchestrator_action(format!(
             "scope violation: {engineer} modified fenced files outside declared scope: {violation_list} — reverting out-of-scope changes"
         ));
-        revert_out_of_scope_files(&worktree_dir, &scope_fence.out_of_scope_files)?;
+        revert_out_of_scope_files(
+            &worktree_dir,
+            &scope_fence.out_of_scope_files,
+            &trunk_branch,
+        )?;
         daemon.emit_event(crate::team::events::TeamEvent::scope_fence_violation(
             engineer,
             task_id,
@@ -756,7 +770,7 @@ pub(crate) fn handle_engineer_completion(daemon: &mut TeamDaemon, engineer: &str
         let headline = if !has_required_evidence {
             if total_commits == 0 {
                 format!(
-                    "Verification rejected this completion because there are no commits ahead of main. Run `git add -A`, create a real commit, and inspect `git diff --stat main..HEAD` before reporting completion again. Commits ahead of main: {total_commits}. Files changed: {files_changed}. Code files changed: {code_files_changed}. Diff stat: {}",
+                    "Verification rejected this completion because there are no commits ahead of {trunk_branch}. Run `git add -A`, create a real commit, and inspect `git diff --stat {trunk_branch}..HEAD` before reporting completion again. Commits ahead of {trunk_branch}: {total_commits}. Files changed: {files_changed}. Code files changed: {code_files_changed}. Diff stat: {}",
                     if diff_stat.is_empty() {
                         "(empty)".to_string()
                     } else {
@@ -770,7 +784,7 @@ pub(crate) fn handle_engineer_completion(daemon: &mut TeamDaemon, engineer: &str
                     "Verification found no code changes in this completion."
                 };
                 format!(
-                    "{narration_prefix} Inspect `git diff --stat main..HEAD` and make an actual code change before reporting completion again. Commits ahead of main: {total_commits}. Files changed: {files_changed}. Code files changed: {code_files_changed}. Diff stat: {}",
+                    "{narration_prefix} Inspect `git diff --stat {trunk_branch}..HEAD` and make an actual code change before reporting completion again. Commits ahead of {trunk_branch}: {total_commits}. Files changed: {files_changed}. Code files changed: {code_files_changed}. Diff stat: {}",
                     if diff_stat.is_empty() {
                         "(empty)".to_string()
                     } else {
@@ -926,7 +940,7 @@ pub(crate) fn handle_engineer_completion(daemon: &mut TeamDaemon, engineer: &str
     daemon.verification_states.remove(engineer);
 
     let task_branch = if daemon.is_multi_repo {
-        multi_repo_task_branch(&worktree_dir, &daemon.sub_repo_names)?
+        multi_repo_task_branch(&worktree_dir, &daemon.sub_repo_names, &trunk_branch)?
     } else {
         current_worktree_branch(&worktree_dir)?
     };
@@ -959,7 +973,8 @@ pub(crate) fn handle_engineer_completion(daemon: &mut TeamDaemon, engineer: &str
         let auto_merge_override = daemon.auto_merge_override(task_id);
 
         // Analyze diff and emit confidence score for every completed task
-        let diff_analysis = auto_merge::analyze_diff(daemon.project_root(), "main", &task_branch);
+        let diff_analysis =
+            auto_merge::analyze_diff(daemon.project_root(), &trunk_branch, &task_branch);
         if let Ok(ref summary) = diff_analysis {
             let confidence = auto_merge::score_auto_merge_candidate(summary, &policy);
             let task_str = task_id.to_string();
@@ -1139,9 +1154,14 @@ pub(crate) fn handle_engineer_completion(daemon: &mut TeamDaemon, engineer: &str
                 daemon.project_root(),
                 engineer,
                 &daemon.sub_repo_names,
+                &trunk_branch,
             )?
         } else {
-            merge_engineer_branch(daemon.project_root(), engineer)?
+            merge_engineer_branch_into_trunk(
+                daemon.project_root(),
+                engineer,
+                daemon.config.team_config.trunk_branch(),
+            )?
         } {
             MergeOutcome::Success(success) => {
                 drop(lock);
@@ -1407,21 +1427,21 @@ fn load_previous_test_results(board_dir: &Path, task_id: u32) -> Result<Option<T
     Ok(metadata.test_results)
 }
 
-fn path_exists_on_main(worktree_dir: &Path, file: &str) -> Result<bool> {
+fn path_exists_on_trunk(worktree_dir: &Path, trunk_branch: &str, file: &str) -> Result<bool> {
     let output = std::process::Command::new("git")
-        .args(["ls-tree", "-r", "--name-only", "main", "--", file])
+        .args(["ls-tree", "-r", "--name-only", trunk_branch, "--", file])
         .current_dir(worktree_dir)
         .output()
         .with_context(|| {
             format!(
-                "failed to inspect whether {file} exists on main in {}",
+                "failed to inspect whether {file} exists on {trunk_branch} in {}",
                 worktree_dir.display()
             )
         })?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         bail!(
-            "failed to inspect whether {file} exists on main in {}: {}",
+            "failed to inspect whether {file} exists on {trunk_branch} in {}: {}",
             worktree_dir.display(),
             stderr.trim()
         );
@@ -1429,16 +1449,20 @@ fn path_exists_on_main(worktree_dir: &Path, file: &str) -> Result<bool> {
     Ok(!String::from_utf8_lossy(&output.stdout).trim().is_empty())
 }
 
-fn revert_out_of_scope_files(worktree_dir: &Path, out_of_scope: &[String]) -> Result<bool> {
+fn revert_out_of_scope_files(
+    worktree_dir: &Path,
+    out_of_scope: &[String],
+    trunk_branch: &str,
+) -> Result<bool> {
     if out_of_scope.is_empty() {
         return Ok(false);
     }
 
     for file in out_of_scope {
-        if path_exists_on_main(worktree_dir, file)? {
+        if path_exists_on_trunk(worktree_dir, trunk_branch, file)? {
             run_git_with_context(
                 worktree_dir,
-                &["checkout", "main", "--", file],
+                &["checkout", trunk_branch, "--", file],
                 "failed to revert out-of-scope file",
             )?;
         } else {
@@ -1497,6 +1521,7 @@ pub(crate) fn merge_multi_repo_engineer_branch(
     project_root: &Path,
     engineer_name: &str,
     sub_repo_names: &[String],
+    trunk_branch: &str,
 ) -> Result<MergeOutcome> {
     for repo_name in sub_repo_names {
         let repo_root = project_root.join(repo_name);
@@ -1509,10 +1534,10 @@ pub(crate) fn merge_multi_repo_engineer_branch(
             continue;
         }
         // Check if there are commits to merge in this sub-repo
-        if commits_ahead_of_main(&sub_wt).unwrap_or(0) == 0 {
+        if commits_ahead_of_trunk(&sub_wt, trunk_branch).unwrap_or(0) == 0 {
             continue;
         }
-        match merge_engineer_branch_in_repo(&repo_root, &sub_wt, engineer_name)? {
+        match merge_engineer_branch_in_repo(&repo_root, &sub_wt, engineer_name, trunk_branch)? {
             MergeOutcome::Success(_) => {}
             other => return Ok(other),
         }
@@ -1521,7 +1546,9 @@ pub(crate) fn merge_multi_repo_engineer_branch(
     // Reset all sub-repo worktrees after successful merge
     for repo_name in sub_repo_names {
         let repo_root = project_root.join(repo_name);
-        if let Err(e) = reset_engineer_worktree_in_repo(&repo_root, engineer_name, repo_name) {
+        if let Err(e) =
+            reset_engineer_worktree_in_repo(&repo_root, engineer_name, repo_name, trunk_branch)
+        {
             warn!(
                 engineer = engineer_name,
                 repo = repo_name,
@@ -1537,26 +1564,27 @@ pub(crate) fn merge_multi_repo_engineer_branch(
     }))
 }
 
-/// Merge a single sub-repo's engineer worktree branch into main.
+/// Merge a single sub-repo's engineer worktree branch into trunk.
 fn merge_engineer_branch_in_repo(
     repo_root: &Path,
     worktree_dir: &Path,
     engineer_name: &str,
+    trunk_branch: &str,
 ) -> Result<MergeOutcome> {
     let branch = current_worktree_branch(worktree_dir)?;
     info!(engineer = engineer_name, branch = %branch, repo = %repo_root.display(), "merging sub-repo worktree branch");
 
-    let main_branch = current_worktree_branch(repo_root)?;
-    if main_branch != "main" {
+    let current_trunk = current_worktree_branch(repo_root)?;
+    if current_trunk != trunk_branch {
         let checkout = run_git_with_context(
             repo_root,
-            &["checkout", "main"],
-            "checkout main in sub-repo before merge",
+            &["checkout", trunk_branch],
+            &format!("checkout {trunk_branch} in sub-repo before merge"),
         )?;
         if !checkout.status.success() {
             let stderr = String::from_utf8_lossy(&checkout.stderr).trim().to_string();
             return Ok(MergeOutcome::MergeFailure(format!(
-                "sub-repo {} on '{main_branch}', checkout main failed: {stderr}",
+                "sub-repo {} on '{current_trunk}', checkout {trunk_branch} failed: {stderr}",
                 repo_root.display()
             )));
         }
@@ -1564,8 +1592,11 @@ fn merge_engineer_branch_in_repo(
 
     let rebase = run_git_with_context(
         worktree_dir,
-        &["rebase", "main"],
-        &format!("rebase '{branch}' onto main in {}", repo_root.display()),
+        &["rebase", trunk_branch],
+        &format!(
+            "rebase '{branch}' onto {trunk_branch} in {}",
+            repo_root.display()
+        ),
     )?;
     if !rebase.status.success() {
         let stderr = String::from_utf8_lossy(&rebase.stderr).trim().to_string();
@@ -1579,7 +1610,10 @@ fn merge_engineer_branch_in_repo(
     let output = run_git_with_context(
         repo_root,
         &["merge", &branch, "--no-edit"],
-        &format!("merge '{branch}' into main in {}", repo_root.display()),
+        &format!(
+            "merge '{branch}' into {trunk_branch} in {}",
+            repo_root.display()
+        ),
     )?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -1603,6 +1637,7 @@ fn reset_engineer_worktree_in_repo(
     repo_root: &Path,
     engineer_name: &str,
     repo_name: &str,
+    trunk_branch: &str,
 ) -> Result<()> {
     let worktree_dir = repo_root
         .parent()
@@ -1615,7 +1650,7 @@ fn reset_engineer_worktree_in_repo(
         return Ok(());
     }
     let base_branch = engineer_base_branch_name(engineer_name);
-    checkout_worktree_branch_from_main(&worktree_dir, &base_branch)?;
+    checkout_worktree_branch_from_trunk(&worktree_dir, &base_branch, trunk_branch)?;
     Ok(())
 }
 
@@ -1661,22 +1696,30 @@ pub(crate) fn record_merge_test_timing(
 }
 
 /// For multi-repo: sum commits ahead of main across all sub-repo worktrees.
-fn multi_repo_commits_ahead_of_main(worktree_dir: &Path, sub_repo_names: &[String]) -> Result<u32> {
+fn multi_repo_commits_ahead_of_trunk(
+    worktree_dir: &Path,
+    sub_repo_names: &[String],
+    trunk_branch: &str,
+) -> Result<u32> {
     let mut total = 0u32;
     for name in sub_repo_names {
         let sub_wt = worktree_dir.join(name);
         if sub_wt.exists() {
-            total += commits_ahead_of_main(&sub_wt).unwrap_or(0);
+            total += commits_ahead_of_trunk(&sub_wt, trunk_branch).unwrap_or(0);
         }
     }
     Ok(total)
 }
 
 /// For multi-repo: get the task branch from the first sub-repo that has commits.
-fn multi_repo_task_branch(worktree_dir: &Path, sub_repo_names: &[String]) -> Result<String> {
+fn multi_repo_task_branch(
+    worktree_dir: &Path,
+    sub_repo_names: &[String],
+    trunk_branch: &str,
+) -> Result<String> {
     for name in sub_repo_names {
         let sub_wt = worktree_dir.join(name);
-        if sub_wt.exists() && commits_ahead_of_main(&sub_wt).unwrap_or(0) > 0 {
+        if sub_wt.exists() && commits_ahead_of_trunk(&sub_wt, trunk_branch).unwrap_or(0) > 0 {
             return current_worktree_branch(&sub_wt);
         }
     }
@@ -1691,37 +1734,40 @@ fn multi_repo_task_branch(worktree_dir: &Path, sub_repo_names: &[String]) -> Res
 }
 
 /// For multi-repo: sum files changed from main across all sub-repo worktrees.
-fn multi_repo_files_changed_from_main(
+fn multi_repo_files_changed_from_trunk(
     worktree_dir: &Path,
     sub_repo_names: &[String],
+    trunk_branch: &str,
 ) -> Result<u32> {
     let mut total = 0u32;
     for name in sub_repo_names {
         let sub_wt = worktree_dir.join(name);
         if sub_wt.exists() {
-            total += files_changed_from_main(&sub_wt).unwrap_or(0);
+            total += files_changed_from_trunk(&sub_wt, trunk_branch).unwrap_or(0);
         }
     }
     Ok(total)
 }
 
-fn multi_repo_code_files_changed_from_main(
+fn multi_repo_code_files_changed_from_trunk(
     worktree_dir: &Path,
     sub_repo_names: &[String],
+    trunk_branch: &str,
 ) -> Result<u32> {
     let mut total = 0u32;
     for name in sub_repo_names {
         let sub_wt = worktree_dir.join(name);
         if sub_wt.exists() {
-            total += code_files_changed_from_main(&sub_wt).unwrap_or(0);
+            total += code_files_changed_from_trunk(&sub_wt, trunk_branch).unwrap_or(0);
         }
     }
     Ok(total)
 }
 
-fn multi_repo_diff_stat_from_main(
+fn multi_repo_diff_stat_from_trunk(
     worktree_dir: &Path,
     sub_repo_names: &[String],
+    trunk_branch: &str,
 ) -> Result<String> {
     let mut stats = Vec::new();
     for name in sub_repo_names {
@@ -1729,7 +1775,7 @@ fn multi_repo_diff_stat_from_main(
         if !sub_wt.exists() {
             continue;
         }
-        let diff_stat = diff_stat_from_main(&sub_wt).unwrap_or_default();
+        let diff_stat = diff_stat_from_trunk(&sub_wt, trunk_branch).unwrap_or_default();
         if !diff_stat.is_empty() {
             stats.push(format!("[{name}]\n{diff_stat}"));
         }

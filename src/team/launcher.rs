@@ -1,4 +1,5 @@
 use super::*;
+use crate::team::task_loop::setup_engineer_worktree_from_trunk;
 use crate::team::config::{ClaudeAuth, ClaudeAuthMode};
 use crate::team::watcher::{SessionTrackerConfig, discover_claude_session_file};
 use crate::team::workspace::setup_workspace_worktree;
@@ -64,13 +65,15 @@ impl TeamDaemon {
                 &branch_name,
                 &team_config_dir,
                 &self.sub_repo_names,
+                self.config.team_config.trunk_branch(),
             )
         } else {
-            setup_engineer_worktree(
+            setup_engineer_worktree_from_trunk(
                 &self.config.project_root,
                 &wt_dir,
                 &branch_name,
                 &team_config_dir,
+                self.config.team_config.trunk_branch(),
             )
         };
 

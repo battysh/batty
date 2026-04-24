@@ -45,6 +45,10 @@ pub struct ValidationCheck {
 }
 
 impl TeamConfig {
+    pub fn trunk_branch(&self) -> &str {
+        self.trunk_branch.as_str()
+    }
+
     pub fn resolve_claude_auth(&self, role: &RoleDef) -> ClaudeAuth {
         ClaudeAuth {
             mode: role.auth_mode.unwrap_or_default(),
@@ -144,6 +148,17 @@ impl TeamConfig {
     pub fn validate(&self) -> Result<()> {
         if self.name.is_empty() {
             bail!("team name cannot be empty");
+        }
+
+        if self.trunk_branch.trim().is_empty() {
+            bail!("trunk_branch cannot be empty");
+        }
+
+        if self.trunk_branch.chars().any(char::is_whitespace) {
+            bail!(
+                "trunk_branch '{}' is invalid: branch names cannot contain whitespace",
+                self.trunk_branch
+            );
         }
 
         if self.roles.is_empty() {
@@ -320,6 +335,10 @@ impl TeamConfig {
         }
 
         Ok(())
+    }
+
+    pub fn validate_project_refs(&self, project_root: &Path) -> Result<()> {
+        validate_trunk_branch_exists(project_root, self.trunk_branch())
     }
 
     /// Run all validation checks, collecting results for each check.
@@ -541,6 +560,30 @@ impl TeamConfig {
             })
             .collect()
     }
+}
+
+pub fn validate_trunk_branch_exists(project_root: &Path, trunk_branch: &str) -> Result<()> {
+    if !crate::team::git_cmd::is_git_repo(project_root) {
+        return Ok(());
+    }
+
+    let local_ref = format!("refs/heads/{trunk_branch}");
+    let remote_ref = format!("refs/remotes/origin/{trunk_branch}");
+    let local_exists = crate::team::git_cmd::show_ref_exists(project_root, &local_ref)
+        .with_context(|| format!("failed to inspect configured trunk branch `{trunk_branch}`"))?;
+    let remote_exists = crate::team::git_cmd::show_ref_exists(project_root, &remote_ref)
+        .with_context(|| format!("failed to inspect configured trunk branch `{trunk_branch}`"))?;
+
+    if !local_exists && !remote_exists {
+        bail!(
+            "configured trunk_branch `{trunk_branch}` does not exist in {} (expected `{}` or `{}`)",
+            project_root.display(),
+            local_ref,
+            remote_ref
+        );
+    }
+
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

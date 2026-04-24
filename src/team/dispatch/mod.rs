@@ -18,8 +18,8 @@ mod tests;
 
 use super::super::events::TeamEvent;
 use super::super::task_loop::engineer_base_branch_name;
-use super::super::task_loop::prepare_engineer_assignment_worktree;
-use super::super::task_loop::refresh_engineer_worktree_if_stale;
+use super::super::task_loop::prepare_engineer_assignment_worktree_from_trunk;
+use super::super::task_loop::refresh_engineer_worktree_if_stale_from_trunk;
 use super::super::task_loop::{WorktreeRefreshAction, WorktreeRefreshOutcome};
 use super::super::workspace::prepare_workspace_assignment_worktree;
 use super::helpers::describe_command_failure;
@@ -99,12 +99,13 @@ impl TeamDaemon {
             .team_config
             .board
             .worktree_stale_rebase_threshold;
-        let outcome = refresh_engineer_worktree_if_stale(
+        let outcome = refresh_engineer_worktree_if_stale_from_trunk(
             project_root,
             worktree_dir,
             base_branch,
             team_config_dir,
             threshold,
+            self.config.team_config.trunk_branch(),
         )?;
         self.record_worktree_refresh(engineer, worktree_dir, repo_label, threshold, &outcome);
         Ok(())
@@ -228,6 +229,7 @@ impl TeamDaemon {
                     task_branch,
                     &team_config_dir,
                     &sub_repo_names,
+                    self.config.team_config.trunk_branch(),
                 )?
             } else if work_dir.exists() {
                 self.maybe_refresh_assignment_worktree(
@@ -238,8 +240,11 @@ impl TeamDaemon {
                     &team_config_dir,
                     None,
                 )?;
-                let reset =
-                    crate::worktree::ensure_worktree_branch_for_dispatch(&work_dir, task_branch)?;
+                let reset = crate::worktree::ensure_worktree_branch_for_dispatch_from_trunk(
+                    &work_dir,
+                    task_branch,
+                    self.config.team_config.trunk_branch(),
+                )?;
                 if let Some(reason) = reset.fallback_reason.as_deref() {
                     self.emit_event(TeamEvent::worktree_refreshed(
                         engineer,
@@ -256,12 +261,13 @@ impl TeamDaemon {
                     &team_config_dir,
                     None,
                 )?;
-                prepare_engineer_assignment_worktree(
+                prepare_engineer_assignment_worktree_from_trunk(
                     &project_root,
                     &work_dir,
                     engineer,
                     task_branch,
                     &team_config_dir,
+                    self.config.team_config.trunk_branch(),
                 )?
             }
         } else {

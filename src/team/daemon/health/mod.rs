@@ -354,6 +354,7 @@ exit 1
         TeamConfig {
             name: name.to_string(),
             workspace_type: crate::team::config::WorkspaceType::Generic,
+            trunk_branch: crate::team::config::default_trunk_branch(),
             agent: None,
             workflow_mode: WorkflowMode::Legacy,
             workflow_policy: WorkflowPolicy::default(),
