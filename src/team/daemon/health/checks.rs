@@ -5,9 +5,10 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use serde_json::Value;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use super::super::*;
+use crate::team::inbox;
 use crate::team::prompt_compose::{render_member_prompt, resolve_prompt_context};
 use crate::team::task_loop::git_has_unresolved_conflicts;
 use crate::team::workspace::workspace_repo_targets;
@@ -98,6 +99,99 @@ fn workspace_uncommitted_diff_lines(
         })?;
     }
     Ok(total)
+}
+
+fn uncommitted_warning_worktree_path(
+    configured_worktree_path: &Path,
+    live_work_dir: Option<&Path>,
+    is_multi_repo: bool,
+) -> PathBuf {
+    let Some(live_work_dir) = live_work_dir else {
+        return configured_worktree_path.to_path_buf();
+    };
+
+    if is_multi_repo {
+        return if path_is_within(live_work_dir, configured_worktree_path) {
+            configured_worktree_path.to_path_buf()
+        } else {
+            live_work_dir.to_path_buf()
+        };
+    }
+
+    git_worktree_root(live_work_dir).unwrap_or_else(|| live_work_dir.to_path_buf())
+}
+
+fn git_worktree_root(path: &Path) -> Option<PathBuf> {
+    let output = std::process::Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .current_dir(path)
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let root = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if root.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(root))
+    }
+}
+
+fn path_is_within(path: &Path, root: &Path) -> bool {
+    let normalized_path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let normalized_root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    normalized_path.starts_with(normalized_root)
+}
+
+fn is_commit_reminder_body(body: &str) -> bool {
+    body.trim_start()
+        .to_ascii_lowercase()
+        .starts_with("commit reminder:")
+}
+
+fn pending_commit_reminder_exists(project_root: &Path, member: &str) -> bool {
+    let inboxes_root = inbox::inboxes_root(project_root);
+    crate::team::inbox_tiered::pending_messages_union(&inboxes_root, member)
+        .map(|messages| {
+            messages
+                .iter()
+                .any(|message| is_commit_reminder_body(&message.body))
+        })
+        .unwrap_or(false)
+}
+
+fn clear_pending_commit_reminders(project_root: &Path, member: &str) -> Result<usize> {
+    let inboxes_root = inbox::inboxes_root(project_root);
+    let mut cleared = 0usize;
+
+    for message in inbox::pending_messages(&inboxes_root, member)? {
+        if is_commit_reminder_body(&message.body) {
+            inbox::mark_delivered(&inboxes_root, member, &message.id)?;
+            cleared += 1;
+        }
+    }
+
+    for tier in crate::team::inbox_tiered::QueueTier::ALL {
+        for message in
+            crate::team::inbox_tiered::pending_messages_for_tier(&inboxes_root, member, tier)?
+        {
+            if is_commit_reminder_body(&message.body) {
+                crate::team::inbox_tiered::mark_tiered_delivered(
+                    &inboxes_root,
+                    member,
+                    tier,
+                    &message.id,
+                )?;
+                cleared += 1;
+            }
+        }
+    }
+
+    Ok(cleared)
 }
 
 impl TeamDaemon {
@@ -609,20 +703,39 @@ impl TeamDaemon {
             .collect();
 
         for name in &engineers {
-            // Rate-limit: skip if we warned this engineer recently.
-            if let Some(last) = self.last_uncommitted_warn.get(name) {
-                if last.elapsed() < cooldown {
-                    continue;
-                }
-            }
-
             let worktree_path = self.worktree_dir(name);
             if !worktree_path.exists() {
                 continue;
             }
 
-            let lines = match workspace_uncommitted_diff_lines(
+            let live_work_dir = self
+                .shim_handles
+                .get(name)
+                .map(|handle| handle.work_dir.clone())
+                .or_else(|| {
+                    self.config
+                        .pane_map
+                        .get(name)
+                        .and_then(|pane_id| crate::tmux::pane_current_path(pane_id).ok())
+                        .map(PathBuf::from)
+                });
+            let inspection_path = uncommitted_warning_worktree_path(
                 &worktree_path,
+                live_work_dir.as_deref(),
+                self.is_multi_repo,
+            );
+            if !inspection_path.exists() {
+                warn!(
+                    engineer = %name,
+                    worktree = %inspection_path.display(),
+                    configured_worktree = %worktree_path.display(),
+                    "skipping uncommitted work warning because the inspected worktree path is missing"
+                );
+                continue;
+            }
+
+            let lines = match workspace_uncommitted_diff_lines(
+                &inspection_path,
                 self.is_multi_repo,
                 &self.sub_repo_names,
             ) {
@@ -634,6 +747,39 @@ impl TeamDaemon {
             };
 
             if lines < threshold {
+                let had_warning_state = self.last_uncommitted_warn.remove(name).is_some();
+                let cleared = clear_pending_commit_reminders(&self.config.project_root, name)
+                    .unwrap_or_else(|error| {
+                        warn!(
+                            engineer = %name,
+                            error = %error,
+                            "failed to clear stale commit reminders after clean verification"
+                        );
+                        0
+                    });
+                if had_warning_state || cleared > 0 {
+                    self.record_orchestrator_action(format!(
+                        "uncommitted-warn-clear: {name} verified clean with {lines} uncommitted lines; cleared {cleared} pending reminder(s)"
+                    ));
+                }
+                continue;
+            }
+
+            // Rate-limit only after measuring the current worktree so clean
+            // verification can clear stale reminder state immediately.
+            if let Some(last) = self.last_uncommitted_warn.get(name) {
+                if last.elapsed() < cooldown {
+                    continue;
+                }
+            }
+
+            if pending_commit_reminder_exists(&self.config.project_root, name) {
+                debug!(
+                    engineer = %name,
+                    uncommitted_lines = lines,
+                    threshold,
+                    "skipping duplicate pending uncommitted work warning"
+                );
                 continue;
             }
 
@@ -641,6 +787,7 @@ impl TeamDaemon {
                 engineer = %name,
                 uncommitted_lines = lines,
                 threshold,
+                worktree = %inspection_path.display(),
                 "sending uncommitted work warning"
             );
 
@@ -1679,6 +1826,51 @@ mod tests {
         daemon
     }
 
+    fn setup_uncommitted_warn_worktree(
+        tmp: &tempfile::TempDir,
+        package_name: &str,
+        engineer: &str,
+        threshold: usize,
+    ) -> (PathBuf, PathBuf, TeamDaemon) {
+        let repo = init_git_repo(tmp, package_name);
+        let worktree_dir = repo.join(".batty").join("worktrees").join(engineer);
+        let team_config_dir = repo.join(".batty").join("team_config");
+        setup_engineer_worktree(
+            &repo,
+            &worktree_dir,
+            &engineer_base_branch_name(engineer),
+            &team_config_dir,
+        )
+        .unwrap();
+
+        let mut daemon = TestDaemonBuilder::new(&repo)
+            .members(vec![
+                manager_member("manager", None),
+                engineer_member(engineer, Some("manager"), true),
+            ])
+            .build();
+        daemon
+            .config
+            .team_config
+            .workflow_policy
+            .uncommitted_warn_threshold = threshold;
+        (repo, worktree_dir, daemon)
+    }
+
+    fn install_test_shim_work_dir(daemon: &mut TeamDaemon, member: &str, work_dir: PathBuf) {
+        let (parent, _child) = crate::shim::protocol::socketpair().unwrap();
+        let mut handle = crate::team::daemon::agent_handle::AgentHandle::new(
+            member.to_string(),
+            crate::shim::protocol::Channel::new(parent),
+            999,
+            "codex".to_string(),
+            "codex".to_string(),
+            work_dir,
+        );
+        handle.apply_state_change(crate::shim::protocol::ShimState::Idle);
+        daemon.shim_handles.insert(member.to_string(), handle);
+    }
+
     fn setup_clean_review_branch_worktree(
         tmp: &tempfile::TempDir,
         engineer: &str,
@@ -1793,6 +1985,147 @@ mod tests {
         let msgs = inbox::pending_messages(&inbox_root, "eng-1").unwrap();
         assert_eq!(msgs.len(), 1);
         assert!(msgs[0].body.contains("COMMIT REMINDER"));
+    }
+
+    #[test]
+    fn maybe_warn_uncommitted_work_clean_worktree_noops_and_clears_stale_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (repo, _worktree_dir, mut daemon) =
+            setup_uncommitted_warn_worktree(&tmp, "uncommitted-clean-noop", "eng-clean", 1);
+        let inbox_root = inbox::inboxes_root(&repo);
+        inbox::init_inbox(&inbox_root, "eng-clean").unwrap();
+        let stale = inbox::InboxMessage::new_send(
+            "daemon",
+            "eng-clean",
+            "COMMIT REMINDER: You have 324 uncommitted lines in your worktree.",
+        );
+        inbox::deliver_to_inbox(&inbox_root, &stale).unwrap();
+        daemon
+            .last_uncommitted_warn
+            .insert("eng-clean".to_string(), Instant::now());
+
+        daemon.maybe_warn_uncommitted_work().unwrap();
+
+        let msgs = inbox::pending_messages(&inbox_root, "eng-clean").unwrap();
+        assert!(
+            msgs.is_empty(),
+            "clean verification should clear stale pending commit reminders"
+        );
+        assert!(
+            !daemon.last_uncommitted_warn.contains_key("eng-clean"),
+            "clean verification should clear the warning cooldown state"
+        );
+    }
+
+    #[test]
+    fn maybe_warn_uncommitted_work_counts_dirty_tracked_changes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (repo, worktree_dir, mut daemon) =
+            setup_uncommitted_warn_worktree(&tmp, "uncommitted-dirty-tracked", "eng-dirty", 1);
+        std::fs::write(
+            worktree_dir.join("src").join("lib.rs"),
+            "pub fn smoke() -> bool {\n    false\n}\n",
+        )
+        .unwrap();
+        let inbox_root = inbox::inboxes_root(&repo);
+        inbox::init_inbox(&inbox_root, "eng-dirty").unwrap();
+
+        daemon.maybe_warn_uncommitted_work().unwrap();
+
+        let msgs = inbox::pending_messages(&inbox_root, "eng-dirty").unwrap();
+        assert_eq!(msgs.len(), 1);
+        assert!(msgs[0].body.contains("COMMIT REMINDER"));
+    }
+
+    #[test]
+    fn maybe_warn_uncommitted_work_counts_staged_changes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (repo, worktree_dir, mut daemon) =
+            setup_uncommitted_warn_worktree(&tmp, "uncommitted-staged", "eng-staged", 1);
+        std::fs::write(
+            worktree_dir.join("src").join("lib.rs"),
+            "pub fn smoke() -> bool {\n    false\n}\n",
+        )
+        .unwrap();
+        git_ok(&worktree_dir, &["add", "src/lib.rs"]);
+        let inbox_root = inbox::inboxes_root(&repo);
+        inbox::init_inbox(&inbox_root, "eng-staged").unwrap();
+
+        daemon.maybe_warn_uncommitted_work().unwrap();
+
+        let msgs = inbox::pending_messages(&inbox_root, "eng-staged").unwrap();
+        assert_eq!(msgs.len(), 1);
+        assert!(msgs[0].body.contains("COMMIT REMINDER"));
+    }
+
+    #[test]
+    fn maybe_warn_uncommitted_work_counts_untracked_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (repo, worktree_dir, mut daemon) =
+            setup_uncommitted_warn_worktree(&tmp, "uncommitted-untracked", "eng-untracked", 1);
+        std::fs::write(worktree_dir.join("notes.txt"), "one\ntwo\nthree\n").unwrap();
+        let inbox_root = inbox::inboxes_root(&repo);
+        inbox::init_inbox(&inbox_root, "eng-untracked").unwrap();
+
+        daemon.maybe_warn_uncommitted_work().unwrap();
+
+        let msgs = inbox::pending_messages(&inbox_root, "eng-untracked").unwrap();
+        assert_eq!(msgs.len(), 1);
+        assert!(msgs[0].body.contains("COMMIT REMINDER"));
+    }
+
+    #[test]
+    fn maybe_warn_uncommitted_work_uses_live_shim_worktree_over_configured_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "uncommitted-root-mismatch");
+        let team_config_dir = repo.join(".batty").join("team_config");
+        let configured = repo.join(".batty").join("worktrees").join("eng-mismatch");
+        let live = repo
+            .join(".batty")
+            .join("worktrees")
+            .join("eng-mismatch-live");
+        setup_engineer_worktree(
+            &repo,
+            &configured,
+            "eng-main/eng-mismatch",
+            &team_config_dir,
+        )
+        .unwrap();
+        setup_engineer_worktree(&repo, &live, "eng-main/eng-mismatch-live", &team_config_dir)
+            .unwrap();
+        std::fs::write(
+            configured.join("src").join("lib.rs"),
+            "pub fn smoke() -> bool {\n    false\n}\n",
+        )
+        .unwrap();
+
+        let codex_context = live
+            .join(".batty")
+            .join("codex-context")
+            .join("eng-mismatch");
+        std::fs::create_dir_all(&codex_context).unwrap();
+        let mut daemon = TestDaemonBuilder::new(&repo)
+            .members(vec![
+                manager_member("manager", None),
+                engineer_member("eng-mismatch", Some("manager"), true),
+            ])
+            .build();
+        daemon
+            .config
+            .team_config
+            .workflow_policy
+            .uncommitted_warn_threshold = 1;
+        install_test_shim_work_dir(&mut daemon, "eng-mismatch", codex_context);
+        let inbox_root = inbox::inboxes_root(&repo);
+        inbox::init_inbox(&inbox_root, "eng-mismatch").unwrap();
+
+        daemon.maybe_warn_uncommitted_work().unwrap();
+
+        let msgs = inbox::pending_messages(&inbox_root, "eng-mismatch").unwrap();
+        assert!(
+            msgs.is_empty(),
+            "clean live shim worktree should not inherit dirty line counts from the configured root"
+        );
     }
 
     #[test]
