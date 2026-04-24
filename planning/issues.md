@@ -158,6 +158,10 @@ fatal: Not a valid object name eng-main/<eng>
 
 **Fix direction:** Reproduce first. Likely candidates: tmux session state drift, stalled kiro-cli subprocess, or shim waiting on a marker that never arrives (overlap with P0-4/P0-5).
 
+**Status 2026-04-24:** Bounded reproducer added in `tmux::tests::command_timeout_reproducer_bounds_stalled_subprocess`: a stuck child process is killed at the instrumentation timeout instead of wedging the harness. Initial isolation points at blocking `tmux` subprocess calls in marker verification (`capture-pane` / `send-keys`) rather than tmux state drift or shim state transitions.
+
+**Follow-up task:** Broaden the same timeout wrapper to the remaining supervision-critical `tmux` command sites (`pane_id`, pane metadata, paste-buffer/load-buffer, layout probes) and include command/target/elapsed telemetry in daemon logs so future hangs identify the exact blocking operation.
+
 ---
 
 ## P1-6 — AIM package eventId-* dirs bleed across DevSpace launches
