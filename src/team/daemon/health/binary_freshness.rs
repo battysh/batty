@@ -30,6 +30,7 @@ use anyhow::{Context, Result};
 /// as "fresh enough" — avoids false alarms for a just-rebuilt binary
 /// racing a freshly-pushed commit.
 pub const DEFAULT_STALE_THRESHOLD_SECS: i64 = 600; // 10 minutes
+pub const STALE_RECOVERY_COMMAND: &str = "cargo build --release && cp target/release/batty ~/.cargo/bin/batty && codesign --force --sign - ~/.cargo/bin/batty && batty stop && batty start --resume";
 
 /// Result of a binary-vs-HEAD freshness check.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -48,6 +49,9 @@ pub struct BinaryFreshness {
     pub binary_mtime: i64,
     /// Unix timestamp of the HEAD commit (author date).
     pub head_ts: i64,
+    /// Whether the source worktree has uncommitted changes. Dirty trees
+    /// are not safe for daemon-owned rebuild/restart automation.
+    pub worktree_dirty: bool,
 }
 
 impl BinaryFreshness {
@@ -59,6 +63,18 @@ impl BinaryFreshness {
             last_hash: String::new(),
             binary_mtime,
             head_ts,
+            worktree_dirty: false,
+        }
+    }
+
+    pub fn recovery_action(&self) -> String {
+        if self.worktree_dirty {
+            format!(
+                "auto-rebuild refused: worktree has uncommitted changes; next: inspect `git status --short`, commit/stash/clear the dirty worktree, then run `{}`",
+                STALE_RECOVERY_COMMAND
+            )
+        } else {
+            format!("next: run `{}`", STALE_RECOVERY_COMMAND)
         }
     }
 
@@ -68,13 +84,16 @@ impl BinaryFreshness {
             "Daemon Binary: fresh".to_string()
         } else if self.commits_behind == 1 {
             format!(
-                "Daemon Binary: STALE — 1 commit behind main (last: {})",
-                self.last_subject
+                "Daemon Binary: STALE — 1 commit behind main (last: {}); {}",
+                self.last_subject,
+                self.recovery_action()
             )
         } else {
             format!(
-                "Daemon Binary: STALE — {} commits behind main (last: {})",
-                self.commits_behind, self.last_subject
+                "Daemon Binary: STALE — {} commits behind main (last: {}); {}",
+                self.commits_behind,
+                self.last_subject,
+                self.recovery_action()
             )
         }
     }
@@ -127,6 +146,7 @@ pub fn evaluate_with_stamps(
         // fresh from a runtime-behavior perspective.
         return Ok(BinaryFreshness::fresh_with_stamps(binary_mtime, head_ts));
     }
+    let worktree_dirty = worktree_has_uncommitted_changes(repo_root)?;
 
     Ok(BinaryFreshness {
         fresh: false,
@@ -135,6 +155,7 @@ pub fn evaluate_with_stamps(
         last_hash,
         binary_mtime,
         head_ts,
+        worktree_dirty,
     })
 }
 
@@ -240,6 +261,28 @@ fn commits_touching_src_since(repo_root: &Path, since_ts: i64) -> Result<(u32, S
     Ok((count, subject, hash))
 }
 
+fn worktree_has_uncommitted_changes(repo_root: &Path) -> Result<bool> {
+    let output = Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(repo_root)
+        .output()
+        .with_context(|| {
+            format!(
+                "failed to invoke git status while checking dirty state in {}",
+                repo_root.display()
+            )
+        })?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        anyhow::bail!(
+            "git status failed while checking dirty state in {}: {}",
+            repo_root.display(),
+            stderr
+        );
+    }
+    Ok(!String::from_utf8_lossy(&output.stdout).trim().is_empty())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -305,10 +348,16 @@ mod tests {
         let report = evaluate_with_stamps(repo, 1_700_000_000, 1_700_001_800, 600).unwrap();
         assert!(!report.fresh);
         assert_eq!(report.commits_behind, 1);
+        assert!(!report.worktree_dirty);
         assert!(report.last_subject.contains("src/bar.rs"));
         assert!(
             report.status_line().contains("STALE"),
             "expected STALE in status line, got {:?}",
+            report.status_line()
+        );
+        assert!(
+            report.status_line().contains(STALE_RECOVERY_COMMAND),
+            "stale status should include the recovery command, got {:?}",
             report.status_line()
         );
     }
@@ -361,10 +410,30 @@ mod tests {
             last_hash: "abc1234".to_string(),
             binary_mtime: 0,
             head_ts: 0,
+            worktree_dirty: false,
         };
         assert!(
             report.status_line().contains("1 commit behind"),
             "expected singular 'commit', got {:?}",
+            report.status_line()
+        );
+    }
+
+    #[test]
+    fn stale_status_refuses_auto_rebuild_when_worktree_is_dirty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path();
+        init_repo(repo);
+        commit_file_with_time(repo, "src/foo.rs", "fn a() {}", 1_700_000_000);
+        commit_file_with_time(repo, "src/bar.rs", "fn b() {}", 1_700_001_000);
+        fs::write(repo.join("scratch.txt"), "dirty\n").unwrap();
+
+        let report = evaluate_with_stamps(repo, 1_700_000_000, 1_700_001_800, 600).unwrap();
+        assert!(!report.fresh);
+        assert!(report.worktree_dirty);
+        assert!(
+            report.status_line().contains("auto-rebuild refused"),
+            "dirty stale report should refuse daemon-owned rebuild, got {:?}",
             report.status_line()
         );
     }
