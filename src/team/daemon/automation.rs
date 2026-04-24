@@ -80,6 +80,64 @@ fn planning_prompt_context(project_root: &std::path::Path) -> (Vec<String>, Vec<
     (roadmap, goals)
 }
 
+fn planning_priority_rank(priority: &str) -> u8 {
+    match priority {
+        "critical" => 0,
+        "high" => 1,
+        "medium" => 2,
+        "low" => 3,
+        _ => 4,
+    }
+}
+
+fn task_blocker_reason(task: &crate::task::Task, tasks: &[crate::task::Task]) -> Option<String> {
+    task.blocked_on
+        .as_deref()
+        .or(task.blocked.as_deref())
+        .map(str::trim)
+        .filter(|reason| !reason.is_empty())
+        .map(str::to_string)
+        .or_else(|| crate::team::resolver::dispatch_blocking_reason(task, tasks))
+}
+
+fn top_blocked_task_summaries(tasks: &[crate::task::Task], limit: usize) -> Vec<String> {
+    let mut blocked = tasks
+        .iter()
+        .filter(|task| task.status == "blocked" || task.blocked.is_some())
+        .collect::<Vec<_>>();
+    blocked.sort_by_key(|task| (planning_priority_rank(&task.priority), task.id));
+    blocked
+        .into_iter()
+        .take(limit)
+        .map(|task| {
+            let reason = task_blocker_reason(task, tasks).unwrap_or_else(|| "blocked".to_string());
+            format!("#{} {}: {}", task.id, task.title, reason)
+        })
+        .collect()
+}
+
+fn planning_board_state_label(
+    tasks: &[crate::task::Task],
+    dispatchable_task_count: usize,
+    actionable_review_count: usize,
+    blocked_count: usize,
+) -> &'static str {
+    if tasks
+        .iter()
+        .all(|task| matches!(task.status.as_str(), "done" | "archived"))
+    {
+        "empty-board"
+    } else if dispatchable_task_count > 0 {
+        "runnable-board"
+    } else if actionable_review_count > 0 {
+        "review-backlog-gated"
+    } else if blocked_count > 0 {
+        "blocked-only-board"
+    } else {
+        "active-board"
+    }
+}
+
 fn orphan_branch_mismatch_max_attempts() -> u32 {
     std::env::var("BATTY_ORPHAN_BRANCH_MISMATCH_MAX_ATTEMPTS")
         .ok()
@@ -2372,12 +2430,27 @@ impl TeamDaemon {
             .filter(|task| task.status == "review")
             .filter(|task| !crate::team::status::is_review_task_explicitly_blocked(task))
             .count();
+        let blocked_count = board_tasks
+            .iter()
+            .filter(|task| task.status == "blocked" || task.blocked.is_some())
+            .count();
+        let blocked_task_summaries = if dispatchable_task_count == 0 {
+            top_blocked_task_summaries(&board_tasks, 5)
+        } else {
+            Vec::new()
+        };
+        let planning_state = planning_board_state_label(
+            &board_tasks,
+            dispatchable_task_count,
+            actionable_review_count,
+            blocked_count,
+        );
         let implementation_work_summary = crate::team::tact::parser::implementation_work_summary(
             dispatchable_task_count,
             actionable_review_count,
         );
         let board_summary = format!(
-            "todo={}, backlog={}, in-progress={}, review={}, actionable_review={}, done={}, idle_engineers={}, dispatchable_tasks={}, implementation_work={}",
+            "todo={}, backlog={}, in-progress={}, review={}, actionable_review={}, blocked={}, done={}, idle_engineers={}, dispatchable_tasks={}, planning_state={}, implementation_work={}",
             board_tasks
                 .iter()
                 .filter(|task| task.status == "todo")
@@ -2395,12 +2468,14 @@ impl TeamDaemon {
                 .filter(|task| task.status == "review")
                 .count(),
             actionable_review_count,
+            blocked_count,
             board_tasks
                 .iter()
                 .filter(|task| task.status == "done")
                 .count(),
             idle_engineer_count,
             dispatchable_task_count,
+            planning_state,
             implementation_work_summary
         );
         let recent_completions = crate::team::events::read_events(&crate::team::team_events_path(
@@ -2424,13 +2499,14 @@ impl TeamDaemon {
             idle_count: idle_engineer_count,
             dispatchable_count: dispatchable_task_count,
         };
-        let prompt = crate::team::tact::compose_planning_prompt(
+        let prompt = crate::team::tact::compose_planning_prompt_with_blockers(
             idle_engineer_count,
             &board_summary,
             &recent_completions,
             &roadmap_context,
             &project_goals,
             &self.config.team_config.name,
+            &blocked_task_summaries,
         );
         let body = format!(
             "HIGH PRIORITY: planning cycle triggered because idle engineers outnumber dispatchable tasks.\n\n{prompt}"
@@ -3520,6 +3596,69 @@ thread 'tmux::tests::split_window_horizontal_creates_new_pane' panicked at src/t
         assert!(messages[0].body.contains("dispatchable_tasks=0"));
         assert!(messages[0].body.contains("Propose exactly 3 task(s)."));
         assert!(daemon.planning_cycle_active);
+    }
+
+    #[test]
+    fn planning_cycle_blocked_only_prompt_requests_executable_unblock_work() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = planning_test_daemon(&tmp, 300);
+        write_board_task_file(
+            tmp.path(),
+            737,
+            "blocked-only-cycle",
+            "blocked",
+            None,
+            &[],
+            Some("waiting on concrete unblock plan"),
+        );
+
+        daemon.maybe_trigger_planning_cycle().unwrap();
+
+        let messages = planning_inbox_messages(&tmp);
+        assert_eq!(messages.len(), 1);
+        assert!(
+            messages[0]
+                .body
+                .contains("planning_state=blocked-only-board")
+        );
+        assert!(
+            messages[0]
+                .body
+                .contains("#737 blocked-only-cycle: waiting on concrete unblock plan")
+        );
+        assert!(
+            messages[0]
+                .body
+                .contains("Propose exactly 3 executable unblock task(s).")
+        );
+        assert!(
+            messages[0]
+                .body
+                .contains("Each proposed task must name the blocked task id")
+        );
+    }
+
+    #[test]
+    fn planning_cycle_mixed_blocked_and_runnable_board_does_not_trigger() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = planning_test_daemon(&tmp, 300);
+        write_board_task_file(
+            tmp.path(),
+            738,
+            "blocked",
+            "blocked",
+            None,
+            &[],
+            Some("waiting"),
+        );
+        write_board_task_file(tmp.path(), 739, "ready-a", "todo", None, &[], None);
+        write_board_task_file(tmp.path(), 740, "ready-b", "todo", None, &[], None);
+        write_board_task_file(tmp.path(), 741, "ready-c", "todo", None, &[], None);
+
+        daemon.maybe_trigger_planning_cycle().unwrap();
+
+        assert!(planning_inbox_messages(&tmp).is_empty());
+        assert!(!daemon.planning_cycle_active);
     }
 
     #[test]
