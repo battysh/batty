@@ -341,6 +341,7 @@ mod tests {
             generated_lines_removed: 0,
             modules_touched: modules.iter().map(|s| s.to_string()).collect(),
             sensitive_files: vec![],
+            generated_report_artifacts: vec![],
             has_unsafe: false,
             has_conflicts: false,
             rename_count: 0,
