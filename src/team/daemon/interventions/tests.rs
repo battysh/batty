@@ -602,7 +602,8 @@ fn maybe_intervene_review_backlog_queues_for_idle_manager() {
     assert_eq!(pending[0].from, "architect");
     assert!(pending[0].body.contains("Review backlog detected"));
     assert!(pending[0].body.contains("#191 by eng-1"));
-    assert!(pending[0].body.contains("batty merge eng-1"));
+    assert!(pending[0].body.contains("MERGE SUPPRESSED"));
+    assert!(pending[0].body.contains("task branch metadata missing"));
     assert!(daemon.owned_task_interventions.contains_key("review::lead"));
 }
 

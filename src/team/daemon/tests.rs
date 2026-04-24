@@ -10,7 +10,7 @@ use crate::team::test_helpers::make_test_daemon;
 use crate::team::test_support::{
     EnvVarGuard, PATH_LOCK, TestDaemonBuilder, architect_member, backdate_idle_grace,
     engineer_member, git_ok, init_git_repo, manager_member, write_board_task_file,
-    write_open_task_file, write_owned_task_file,
+    write_open_task_file, write_owned_task_file, write_owned_task_file_with_context,
 };
 use std::time::UNIX_EPOCH;
 
@@ -2308,8 +2308,21 @@ fn maybe_intervene_review_backlog_queues_for_idle_manager_with_branch_and_worktr
     let repo = init_git_repo(&tmp, "batty-daemon-test");
     let team_config_dir = repo.join(".batty").join("team_config");
     let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
-    setup_engineer_worktree(&repo, &worktree_dir, "eng-1", &team_config_dir).unwrap();
-    write_owned_task_file(&repo, 191, "review-task", "review", "eng-1");
+    let base_branch = crate::team::task_loop::engineer_base_branch_name("eng-1");
+    setup_engineer_worktree(&repo, &worktree_dir, &base_branch, &team_config_dir).unwrap();
+    crate::team::task_loop::checkout_worktree_branch_from_main(&worktree_dir, "eng-1/191").unwrap();
+    std::fs::write(worktree_dir.join("review-191.txt"), "review lane\n").unwrap();
+    git_ok(&worktree_dir, &["add", "review-191.txt"]);
+    git_ok(&worktree_dir, &["commit", "-m", "review lane commit"]);
+    write_owned_task_file_with_context(
+        &repo,
+        191,
+        "review-task",
+        "review",
+        "eng-1",
+        "eng-1/191",
+        &worktree_dir.display().to_string(),
+    );
 
     let mut daemon = TestDaemonBuilder::new(&repo)
         .members(vec![
@@ -2347,7 +2360,12 @@ fn maybe_intervene_review_backlog_queues_for_idle_manager_with_branch_and_worktr
             .body
             .contains(worktree_dir.to_string_lossy().as_ref())
     );
-    assert!(pending[0].body.contains("branch: eng-1"));
+    assert!(pending[0].body.contains("branch: eng-1/191"));
+    assert!(
+        pending[0]
+            .body
+            .contains("expected branch `eng-1/191`, actual branch `eng-1/191`")
+    );
     assert_eq!(
         daemon
             .owned_task_interventions
@@ -2362,14 +2380,45 @@ fn maybe_intervene_review_backlog_distinguishes_stale_review_from_live_review() 
     let tmp = tempfile::tempdir().unwrap();
     let repo = init_git_repo(&tmp, "batty-review-normalization");
     let team_config_dir = repo.join(".batty").join("team_config");
-    let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
-    let base_branch = crate::team::task_loop::engineer_base_branch_name("eng-1");
-    setup_engineer_worktree(&repo, &worktree_dir, &base_branch, &team_config_dir).unwrap();
-    crate::team::task_loop::checkout_worktree_branch_from_main(&worktree_dir, "eng-1/192").unwrap();
-    std::fs::write(worktree_dir.join("active-192.txt"), "active branch\n").unwrap();
-    git_ok(&worktree_dir, &["add", "active-192.txt"]);
-    git_ok(&worktree_dir, &["commit", "-m", "active review branch"]);
-    write_owned_task_file(&repo, 191, "stale-review-task", "review", "eng-1");
+    let eng1_worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
+    let eng1_base_branch = crate::team::task_loop::engineer_base_branch_name("eng-1");
+    setup_engineer_worktree(
+        &repo,
+        &eng1_worktree_dir,
+        &eng1_base_branch,
+        &team_config_dir,
+    )
+    .unwrap();
+    crate::team::task_loop::checkout_worktree_branch_from_main(&eng1_worktree_dir, "eng-1/191")
+        .unwrap();
+    std::fs::write(
+        eng1_worktree_dir.join("completed-191.txt"),
+        "completed branch\n",
+    )
+    .unwrap();
+    git_ok(&eng1_worktree_dir, &["add", "completed-191.txt"]);
+    git_ok(
+        &eng1_worktree_dir,
+        &["commit", "-m", "completed review branch"],
+    );
+    git_ok(&repo, &["merge", "eng-1/191"]);
+    crate::team::task_loop::checkout_worktree_branch_from_main(&eng1_worktree_dir, "eng-1/192")
+        .unwrap();
+    std::fs::write(eng1_worktree_dir.join("active-192.txt"), "active branch\n").unwrap();
+    git_ok(&eng1_worktree_dir, &["add", "active-192.txt"]);
+    git_ok(
+        &eng1_worktree_dir,
+        &["commit", "-m", "active review branch"],
+    );
+    write_owned_task_file_with_context(
+        &repo,
+        191,
+        "stale-review-task",
+        "review",
+        "eng-1",
+        "eng-1/191",
+        &eng1_worktree_dir.display().to_string(),
+    );
     std::fs::write(
         repo.join(".batty")
             .join("team_config")
@@ -2379,13 +2428,35 @@ fn maybe_intervene_review_backlog_distinguishes_stale_review_from_live_review() 
         "---\nid: 192\ntitle: active-task\nstatus: in-progress\npriority: high\nclaimed_by: eng-1\nbranch: eng-1/192\nclass: standard\n---\n\nTask description.\n",
     )
     .unwrap();
-    write_owned_task_file(&repo, 193, "live-review-task", "review", "eng-2");
+    let eng2_worktree_dir = repo.join(".batty").join("worktrees").join("eng-2");
+    let eng2_base_branch = crate::team::task_loop::engineer_base_branch_name("eng-2");
+    setup_engineer_worktree(
+        &repo,
+        &eng2_worktree_dir,
+        &eng2_base_branch,
+        &team_config_dir,
+    )
+    .unwrap();
+    crate::team::task_loop::checkout_worktree_branch_from_main(&eng2_worktree_dir, "eng-2/193")
+        .unwrap();
+    std::fs::write(eng2_worktree_dir.join("live-193.txt"), "live review\n").unwrap();
+    git_ok(&eng2_worktree_dir, &["add", "live-193.txt"]);
+    git_ok(&eng2_worktree_dir, &["commit", "-m", "live review branch"]);
+    write_owned_task_file_with_context(
+        &repo,
+        193,
+        "live-review-task",
+        "review",
+        "eng-2",
+        "eng-2/193",
+        &eng2_worktree_dir.display().to_string(),
+    );
 
     let mut daemon = TestDaemonBuilder::new(&repo)
         .members(vec![
             manager_member("lead", Some("architect")),
             engineer_member("eng-1", Some("lead"), true),
-            engineer_member("eng-2", Some("lead"), false),
+            engineer_member("eng-2", Some("lead"), true),
         ])
         .pane_map(HashMap::from([("lead".to_string(), "%999".to_string())]))
         .states(HashMap::from([("lead".to_string(), MemberState::Idle)]))
@@ -2401,11 +2472,86 @@ fn maybe_intervene_review_backlog_distinguishes_stale_review_from_live_review() 
 
     let pending = inbox::pending_messages(&root, "lead").unwrap();
     assert_eq!(pending.len(), 1);
-    assert!(pending[0].body.contains("current live review lanes"));
+    assert!(pending[0].body.contains("verified live review lanes"));
     assert!(pending[0].body.contains("193 done"));
     assert!(pending[0].body.contains("STALE REVIEW NORMALIZATION"));
-    assert!(pending[0].body.contains("#191 by eng-1 -> merge"));
-    assert!(pending[0].body.contains("eng-1 already moved to task #192"));
+    assert!(
+        pending[0]
+            .body
+            .contains("#191 by eng-1 -> normalize review")
+    );
+    assert!(
+        pending[0]
+            .body
+            .contains("expected branch `eng-1/191`, actual branch `eng-1/192`")
+    );
+    assert!(pending[0].body.contains("batty review 191 approve"));
+    assert!(!pending[0].body.contains("batty merge eng-1"));
+}
+
+#[test]
+fn maybe_intervene_review_backlog_suppresses_merge_when_branch_rotated_without_active_claim() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = init_git_repo(&tmp, "batty-review-branch-mismatch");
+    let team_config_dir = repo.join(".batty").join("team_config");
+    let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
+    let base_branch = crate::team::task_loop::engineer_base_branch_name("eng-1");
+    setup_engineer_worktree(&repo, &worktree_dir, &base_branch, &team_config_dir).unwrap();
+    crate::team::task_loop::checkout_worktree_branch_from_main(&worktree_dir, "eng-1/191").unwrap();
+    std::fs::write(worktree_dir.join("review-191.txt"), "review lane\n").unwrap();
+    git_ok(&worktree_dir, &["add", "review-191.txt"]);
+    git_ok(&worktree_dir, &["commit", "-m", "review branch"]);
+    crate::team::task_loop::checkout_worktree_branch_from_main(&worktree_dir, "eng-1/follow-up")
+        .unwrap();
+    std::fs::write(worktree_dir.join("follow-up.txt"), "follow-up branch\n").unwrap();
+    git_ok(&worktree_dir, &["add", "follow-up.txt"]);
+    git_ok(&worktree_dir, &["commit", "-m", "follow-up branch"]);
+    write_owned_task_file_with_context(
+        &repo,
+        191,
+        "review-task",
+        "review",
+        "eng-1",
+        "eng-1/191",
+        &worktree_dir.display().to_string(),
+    );
+
+    let mut daemon = TestDaemonBuilder::new(&repo)
+        .members(vec![
+            manager_member("lead", Some("architect")),
+            engineer_member("eng-1", Some("lead"), true),
+        ])
+        .pane_map(HashMap::from([("lead".to_string(), "%999".to_string())]))
+        .states(HashMap::from([("lead".to_string(), MemberState::Idle)]))
+        .build();
+
+    let root = inbox::inboxes_root(&repo);
+    inbox::init_inbox(&root, "lead").unwrap();
+
+    daemon.update_automation_timers_for_state("lead", MemberState::Working);
+    daemon.update_automation_timers_for_state("lead", MemberState::Idle);
+    backdate_idle_grace(&mut daemon, "lead");
+    daemon.maybe_intervene_review_backlog().unwrap();
+
+    let pending = inbox::pending_messages(&root, "lead").unwrap();
+    assert_eq!(pending.len(), 1);
+    assert!(pending[0].body.contains("MERGE SUPPRESSED"));
+    assert!(
+        pending[0]
+            .body
+            .contains("#191 by eng-1 -> merge suppressed")
+    );
+    assert!(
+        pending[0]
+            .body
+            .contains("expected branch `eng-1/191`, actual branch `eng-1/follow-up`")
+    );
+    assert!(
+        pending[0]
+            .body
+            .contains("Inspect `git log --oneline main..eng-1/191` before taking action.")
+    );
+    assert!(!pending[0].body.contains("batty merge eng-1"));
 }
 
 #[test]

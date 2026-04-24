@@ -4,6 +4,7 @@
 
 use std::collections::BTreeSet;
 use std::path::Path;
+use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use regex::Regex;
@@ -80,6 +81,22 @@ impl StaleReviewState {
 pub(crate) enum ReviewQueueState {
     Current,
     Stale(StaleReviewState),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReviewMergeRemediationKind {
+    Merge,
+    Normalize,
+    Suppress,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ReviewMergeRemediation {
+    pub(crate) kind: ReviewMergeRemediationKind,
+    pub(crate) reason: String,
+    pub(crate) expected_branch: Option<String>,
+    pub(crate) actual_branch: Option<String>,
+    pub(crate) commits_ahead: Option<u32>,
 }
 
 pub fn apply_review(
@@ -275,6 +292,114 @@ pub(crate) fn classify_review_task(
     ReviewQueueState::Current
 }
 
+pub(crate) fn assess_review_merge_remediation(
+    project_root: &Path,
+    task: &Task,
+) -> ReviewMergeRemediation {
+    let expected_branch = task
+        .branch
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let actual_branch = task
+        .claimed_by
+        .as_deref()
+        .and_then(|engineer| review_worktree_branch(project_root, engineer));
+    let commits_ahead = expected_branch
+        .as_deref()
+        .and_then(|branch| branch_commits_ahead_of_main(project_root, branch));
+    let merged_reason = match review_eligibility_for_task(project_root, task) {
+        Some(ReviewEligibility::AlreadyMerged { reason }) => Some(reason),
+        _ => None,
+    };
+
+    if let Some(reason) = merged_reason {
+        return ReviewMergeRemediation {
+            kind: ReviewMergeRemediationKind::Normalize,
+            reason,
+            expected_branch,
+            actual_branch,
+            commits_ahead,
+        };
+    }
+
+    if matches!(commits_ahead, Some(0)) {
+        let branch = expected_branch.as_deref().unwrap_or("unknown");
+        return ReviewMergeRemediation {
+            kind: ReviewMergeRemediationKind::Normalize,
+            reason: format!("recorded branch `{branch}` has no commits ahead of main"),
+            expected_branch,
+            actual_branch,
+            commits_ahead,
+        };
+    }
+
+    let Some(expected_branch_name) = expected_branch.as_deref() else {
+        return ReviewMergeRemediation {
+            kind: ReviewMergeRemediationKind::Suppress,
+            reason: "task branch metadata missing".to_string(),
+            expected_branch,
+            actual_branch,
+            commits_ahead,
+        };
+    };
+
+    let Some(actual_branch_name) = actual_branch.as_deref() else {
+        return ReviewMergeRemediation {
+            kind: ReviewMergeRemediationKind::Suppress,
+            reason: format!(
+                "could not read the live worktree branch to verify `{expected_branch_name}`"
+            ),
+            expected_branch,
+            actual_branch,
+            commits_ahead,
+        };
+    };
+
+    if actual_branch_name != expected_branch_name {
+        return ReviewMergeRemediation {
+            kind: ReviewMergeRemediationKind::Suppress,
+            reason: format!(
+                "recorded branch `{expected_branch_name}` does not match live worktree branch `{actual_branch_name}`"
+            ),
+            expected_branch,
+            actual_branch,
+            commits_ahead,
+        };
+    }
+
+    match commits_ahead {
+        Some(ahead) if ahead > 0 => ReviewMergeRemediation {
+            kind: ReviewMergeRemediationKind::Merge,
+            reason: format!(
+                "recorded branch `{expected_branch_name}` still has {ahead} commit(s) ahead of main"
+            ),
+            expected_branch,
+            actual_branch,
+            commits_ahead,
+        },
+        Some(_) => ReviewMergeRemediation {
+            kind: ReviewMergeRemediationKind::Normalize,
+            reason: format!(
+                "recorded branch `{expected_branch_name}` has no commits ahead of main"
+            ),
+            expected_branch,
+            actual_branch,
+            commits_ahead,
+        },
+        None => ReviewMergeRemediation {
+            kind: ReviewMergeRemediationKind::Suppress,
+            reason: format!(
+                "could not inspect `main..{expected_branch_name}` to verify merge safety"
+            ),
+            expected_branch,
+            actual_branch,
+            commits_ahead,
+        },
+    }
+}
+
 fn review_eligibility_for_task(project_root: &Path, task: &Task) -> Option<ReviewEligibility> {
     let meta = WorkflowMeta {
         state: TaskState::Review,
@@ -361,6 +486,22 @@ fn review_worktree_commit(project_root: &Path, engineer: &str) -> Option<String>
 
     let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
     (!value.is_empty()).then_some(value)
+}
+
+fn branch_commits_ahead_of_main(project_root: &Path, branch: &str) -> Option<u32> {
+    let output = Command::new("git")
+        .args(["rev-list", "--count", &format!("main..{branch}")])
+        .current_dir(project_root)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse::<u32>()
+        .ok()
 }
 
 fn review_worktree_dir(project_root: &Path, engineer: &str) -> std::path::PathBuf {
@@ -812,6 +953,77 @@ mod tests {
                     .to_string(),
                 next_step: ReviewNormalizationStep::Rework,
             })
+        );
+    }
+
+    #[test]
+    fn assess_review_merge_remediation_normalizes_when_branch_is_already_merged() {
+        let tmp = tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "review-merged-normalize");
+        let team_config_dir = repo.join(".batty").join("team_config");
+        let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
+        let base_branch = engineer_base_branch_name("eng-1");
+        setup_engineer_worktree(&repo, &worktree_dir, &base_branch, &team_config_dir).unwrap();
+        checkout_worktree_branch_from_main(&worktree_dir, "eng-1/42").unwrap();
+        fs::write(worktree_dir.join("merged-review.txt"), "merged review\n").unwrap();
+        git_ok(&worktree_dir, &["add", "merged-review.txt"]);
+        git_ok(&worktree_dir, &["commit", "-m", "merged review branch"]);
+        let merged_commit =
+            crate::team::test_support::git_stdout(&worktree_dir, &["rev-parse", "HEAD"]);
+        git_ok(&repo, &["merge", "eng-1/42"]);
+
+        let review = Task {
+            branch: Some("eng-1/42".to_string()),
+            commit: Some(merged_commit),
+            ..review_task(42, "eng-1")
+        };
+
+        assert_eq!(
+            assess_review_merge_remediation(&repo, &review),
+            ReviewMergeRemediation {
+                kind: ReviewMergeRemediationKind::Normalize,
+                reason: format!(
+                    "commit `{}` is already on main",
+                    review.commit.as_deref().unwrap()
+                ),
+                expected_branch: Some("eng-1/42".to_string()),
+                actual_branch: Some("eng-1/42".to_string()),
+                commits_ahead: Some(0),
+            }
+        );
+    }
+
+    #[test]
+    fn assess_review_merge_remediation_suppresses_branch_mismatch() {
+        let tmp = tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "review-mismatch-suppress");
+        let team_config_dir = repo.join(".batty").join("team_config");
+        let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
+        let base_branch = engineer_base_branch_name("eng-1");
+        setup_engineer_worktree(&repo, &worktree_dir, &base_branch, &team_config_dir).unwrap();
+        checkout_worktree_branch_from_main(&worktree_dir, "eng-1/42").unwrap();
+        fs::write(worktree_dir.join("review-branch.txt"), "review branch\n").unwrap();
+        git_ok(&worktree_dir, &["add", "review-branch.txt"]);
+        git_ok(&worktree_dir, &["commit", "-m", "review branch"]);
+        checkout_worktree_branch_from_main(&worktree_dir, "eng-1/follow-up").unwrap();
+        fs::write(worktree_dir.join("follow-up.txt"), "follow-up\n").unwrap();
+        git_ok(&worktree_dir, &["add", "follow-up.txt"]);
+        git_ok(&worktree_dir, &["commit", "-m", "follow-up branch"]);
+
+        let review = Task {
+            branch: Some("eng-1/42".to_string()),
+            ..review_task(42, "eng-1")
+        };
+
+        assert_eq!(
+            assess_review_merge_remediation(&repo, &review),
+            ReviewMergeRemediation {
+                kind: ReviewMergeRemediationKind::Suppress,
+                reason: "recorded branch `eng-1/42` does not match live worktree branch `eng-1/follow-up`".to_string(),
+                expected_branch: Some("eng-1/42".to_string()),
+                actual_branch: Some("eng-1/follow-up".to_string()),
+                commits_ahead: Some(1),
+            }
         );
     }
 }
