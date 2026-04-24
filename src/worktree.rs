@@ -1987,6 +1987,28 @@ mod tests {
     }
 
     #[test]
+    fn preferred_trunk_start_ref_uses_configured_mainline_origin_when_equal() {
+        let Some(tmp) = init_repo() else {
+            return;
+        };
+        git(tmp.path(), &["checkout", "-b", "mainline"]);
+        let mainline = current_commit(tmp.path(), "mainline").unwrap();
+        git(
+            tmp.path(),
+            &[
+                "update-ref",
+                "refs/remotes/origin/mainline",
+                mainline.as_str(),
+            ],
+        );
+
+        let selection = preferred_trunk_start_ref(tmp.path(), "mainline").unwrap();
+
+        assert_eq!(selection.ref_name, "origin/mainline");
+        assert!(selection.fallback_reason.is_none());
+    }
+
+    #[test]
     fn preferred_main_start_ref_falls_back_to_local_main_when_origin_is_behind() {
         let Some(tmp) = init_repo() else {
             return;
@@ -2049,6 +2071,53 @@ mod tests {
             selection.fallback_reason.as_deref(),
             Some("stale_origin_fallback ahead=0 origin_unreachable")
         );
+    }
+
+    #[test]
+    fn ensure_worktree_branch_for_dispatch_from_trunk_resets_from_mainline() {
+        let Some(tmp) = init_repo() else {
+            return;
+        };
+        git(tmp.path(), &["checkout", "-b", "mainline"]);
+        fs::write(tmp.path().join("mainline.txt"), "configured trunk\n").unwrap();
+        git(tmp.path(), &["add", "mainline.txt"]);
+        git(tmp.path(), &["commit", "-q", "-m", "mainline advance"]);
+
+        let wt_path = tmp.path().join("wt");
+        git(
+            tmp.path(),
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "eng-1-1-500",
+                wt_path.to_str().unwrap(),
+                "main",
+            ],
+        );
+        fs::write(wt_path.join("work.txt"), "old work\n").unwrap();
+        git(&wt_path, &["add", "work.txt"]);
+        git(&wt_path, &["commit", "-q", "-m", "old task"]);
+
+        let reset =
+            ensure_worktree_branch_for_dispatch_from_trunk(&wt_path, "eng-1-1-502", "mainline")
+                .unwrap();
+        let head = run_git(&wt_path, ["rev-parse", "HEAD"]).unwrap().stdout;
+        let mainline = run_git(tmp.path(), ["rev-parse", "mainline"])
+            .unwrap()
+            .stdout;
+
+        assert!(reset.changed);
+        assert_eq!(reset.reset_reason, Some(WorktreeResetReason::CleanReset));
+        assert_eq!(git_current_branch(&wt_path).unwrap(), "eng-1-1-502");
+        assert_eq!(head, mainline);
+
+        let _ = run_git(
+            tmp.path(),
+            ["worktree", "remove", "--force", wt_path.to_str().unwrap()],
+        );
+        let _ = run_git(tmp.path(), ["branch", "-D", "eng-1-1-500"]);
+        let _ = run_git(tmp.path(), ["branch", "-D", "eng-1-1-502"]);
     }
 
     #[test]

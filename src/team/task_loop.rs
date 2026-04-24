@@ -438,7 +438,7 @@ pub(crate) fn prepare_engineer_assignment_worktree_from_trunk(
 
 /// Set up worktrees for a multi-repo project. Creates one git worktree per
 /// sub-repo inside `worktree_dir`, mirroring the original directory layout.
-#[cfg_attr(not(test), allow(dead_code))]
+#[allow(dead_code)]
 pub(crate) fn setup_multi_repo_worktree(
     project_root: &Path,
     worktree_dir: &Path,
@@ -485,7 +485,7 @@ pub(crate) fn setup_multi_repo_worktree_from_trunk(
 
 /// Prepare worktrees for a multi-repo task assignment. Creates task branches
 /// in every sub-repo so the engineer can work across all of them.
-#[cfg_attr(not(test), allow(dead_code))]
+#[allow(dead_code)]
 pub(crate) fn prepare_multi_repo_assignment_worktree(
     project_root: &Path,
     worktree_dir: &Path,
@@ -548,7 +548,7 @@ pub(crate) fn worktree_commits_behind_trunk(
     )
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
+#[allow(dead_code)]
 pub(crate) fn refresh_engineer_worktree_if_stale(
     project_root: &Path,
     worktree_dir: &Path,
@@ -1710,7 +1710,7 @@ pub(crate) fn branch_is_merged_into(
     )
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
+#[allow(dead_code)]
 pub(crate) fn engineer_worktree_ready_for_dispatch(
     project_root: &Path,
     worktree_dir: &Path,
