@@ -4350,6 +4350,37 @@ mod tests {
     }
 
     #[test]
+    fn compute_metrics_keeps_review_backlog_gated_with_review_drain_followup() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_board_task(
+            tmp.path(),
+            "736-review.md",
+            "id: 736\ntitle: Review branch\nstatus: review\npriority: high\nclaimed_by: eng-1\ncommit: abc1234\n",
+        );
+        write_board_task(
+            tmp.path(),
+            "738-held.md",
+            "id: 738\ntitle: Held release\nstatus: blocked\npriority: high\nblocked_on: waiting on #736 review disposition\n",
+        );
+        write_board_task(
+            tmp.path(),
+            "739-review-drain.md",
+            "id: 739\ntitle: Drain #736 review backlog\nstatus: todo\npriority: high\ndepends_on:\n  - 736\n",
+        );
+
+        let metrics = compute_metrics(&board_dir(tmp.path()), &[engineer("eng-1")]).unwrap();
+
+        assert_eq!(metrics.board_state, WorkflowBoardState::ReviewBacklogGated);
+        assert_eq!(metrics.runnable_count, 0);
+        assert_eq!(metrics.actionable_review_count, 1);
+        assert_eq!(metrics.blocked_count, 1);
+        assert!(
+            format_metrics(&metrics)
+                .contains("Implementation Work: review backlog is the bottleneck")
+        );
+    }
+
+    #[test]
     fn compute_metrics_prefers_runnable_state_for_mixed_blocked_and_runnable_board() {
         let tmp = tempfile::tempdir().unwrap();
         write_board_task(
