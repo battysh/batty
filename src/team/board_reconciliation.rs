@@ -188,13 +188,7 @@ pub(crate) fn scan_board_health(
             });
         }
 
-        if task.status == "blocked"
-            && !task.depends_on.is_empty()
-            && task
-                .depends_on
-                .iter()
-                .all(|dependency| done_task_ids.contains(dependency))
-        {
+        if dependency_recovery_candidate(task, &done_task_ids) {
             findings.push(BoardFinding::BlockedTaskResolved {
                 task_id: task.id,
                 title: task.title.clone(),
@@ -272,6 +266,25 @@ pub(crate) fn scan_board_health(
         },
         findings,
     })
+}
+
+fn dependency_recovery_candidate(task: &Task, done_task_ids: &HashSet<u32>) -> bool {
+    if task.depends_on.is_empty()
+        || !task
+            .depends_on
+            .iter()
+            .all(|dependency| done_task_ids.contains(dependency))
+    {
+        return false;
+    }
+
+    match task.status.as_str() {
+        "blocked" => true,
+        "todo" | "backlog" | "runnable" => {
+            task.blocked.is_some() || task.blocked_on.is_some() || task.claimed_by.is_some()
+        }
+        _ => false,
+    }
 }
 
 pub(crate) fn apply_safe_fixes(
@@ -377,6 +390,10 @@ pub(crate) fn apply_safe_fixes(
                         )?;
                     } else {
                         crate::team::task_cmd::clear_blocked_fields(board_dir, *task_id)?;
+                    }
+                    let current_task = crate::task::load_task_by_id(&tasks_dir, *task_id)?;
+                    if current_task.status != "in-progress" {
+                        crate::team::task_cmd::unclaim_task(board_dir, *task_id)?;
                     }
                     fixes.push(AppliedFix::Unblocked {
                         task_id: *task_id,
@@ -698,6 +715,44 @@ mod tests {
         .unwrap();
     }
 
+    fn write_stale_dependency_task(
+        project_root: &Path,
+        id: u32,
+        title: &str,
+        status: &str,
+        claimed_by: Option<&str>,
+        depends_on: &[u32],
+        blocked_on: Option<&str>,
+    ) {
+        let tasks_dir = project_root
+            .join(".batty")
+            .join("team_config")
+            .join("board")
+            .join("tasks");
+        fs::create_dir_all(&tasks_dir).unwrap();
+        let depends = format!(
+            "depends_on:\n{}\n",
+            depends_on
+                .iter()
+                .map(|dep| format!("  - {dep}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+        let claimed_by = claimed_by
+            .map(|owner| format!("claimed_by: {owner}\n"))
+            .unwrap_or_default();
+        let blocked_on = blocked_on
+            .map(|reason| format!("blocked: true\nblock_reason: {reason}\nblocked_on: {reason}\n"))
+            .unwrap_or_default();
+        fs::write(
+            tasks_dir.join(format!("{id:03}-{title}.md")),
+            format!(
+                "---\nid: {id}\ntitle: {title}\nstatus: {status}\npriority: high\n{claimed_by}{depends}{blocked_on}---\n\nTask body.\n"
+            ),
+        )
+        .unwrap();
+    }
+
     #[test]
     fn scan_detects_resolved_blocked_task() {
         let tmp = tempdir().unwrap();
@@ -727,6 +782,99 @@ mod tests {
             finding,
             BoardFinding::BlockedTaskResolved { task_id: 2, .. }
         )));
+    }
+
+    #[test]
+    fn scan_keeps_dependency_task_blocked_when_parent_is_not_done() {
+        let tmp = tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "reconcile_parent_todo");
+        write_task(&repo, 1, "dep", "todo", None, &[], None, None, None, None);
+        write_stale_dependency_task(
+            &repo,
+            2,
+            "child",
+            "todo",
+            Some("eng-1"),
+            &[1],
+            Some("waiting on dependencies"),
+        );
+
+        let report = scan_board_health(
+            &repo,
+            &repo.join(".batty").join("team_config").join("board"),
+            &ReconciliationOptions::default(),
+        )
+        .unwrap();
+
+        assert!(!report.findings.iter().any(|finding| matches!(
+            finding,
+            BoardFinding::BlockedTaskResolved { task_id: 2, .. }
+        )));
+    }
+
+    #[test]
+    fn apply_safe_fixes_clears_stale_todo_dependency_claim_when_parent_done() {
+        let tmp = tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "reconcile_stale_todo_claim");
+        let board_dir = repo.join(".batty").join("team_config").join("board");
+        write_task(&repo, 1, "dep", "done", None, &[], None, None, None, None);
+        write_stale_dependency_task(
+            &repo,
+            2,
+            "child",
+            "todo",
+            Some("eng-1"),
+            &[1],
+            Some("waiting on dependencies"),
+        );
+
+        let report =
+            scan_board_health(&repo, &board_dir, &ReconciliationOptions::default()).unwrap();
+        assert!(report.findings.iter().any(|finding| matches!(
+            finding,
+            BoardFinding::BlockedTaskResolved { task_id: 2, .. }
+        )));
+
+        apply_safe_fixes(&board_dir, &report).unwrap();
+
+        let task = crate::task::load_task_by_id(&board_dir.join("tasks"), 2).unwrap();
+        assert_eq!(task.status, "todo");
+        assert!(task.claimed_by.is_none());
+        assert!(task.blocked.is_none());
+        assert!(task.blocked_on.is_none());
+    }
+
+    #[test]
+    fn apply_safe_fixes_does_not_clear_active_in_progress_claim() {
+        let tmp = tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "reconcile_preserve_active_claim");
+        let board_dir = repo.join(".batty").join("team_config").join("board");
+        write_task(&repo, 1, "dep", "done", None, &[], None, None, None, None);
+        write_stale_dependency_task(
+            &repo,
+            2,
+            "child",
+            "in-progress",
+            Some("eng-1"),
+            &[1],
+            Some("waiting on dependencies"),
+        );
+        let report = ReconciliationReport {
+            findings: vec![BoardFinding::BlockedTaskResolved {
+                task_id: 2,
+                title: "child".to_string(),
+                dependencies: vec![1],
+            }],
+            summary: ReconciliationSummary::default(),
+        };
+
+        apply_safe_fixes(&board_dir, &report).unwrap();
+
+        let task = crate::task::load_task_by_id(&board_dir.join("tasks"), 2).unwrap();
+        assert_eq!(task.status, "in-progress");
+        assert_eq!(task.claimed_by.as_deref(), Some("eng-1"));
+        assert!(task.blocked.is_none());
+        assert!(task.blocked_on.is_none());
     }
 
     #[test]

@@ -187,6 +187,7 @@ pub struct WorkflowMetrics {
     pub stale_review_count: u32,
     pub idle_with_runnable: Vec<String>,
     pub top_runnable_tasks: Vec<String>,
+    pub blocked_dispatch_reasons: Vec<String>,
     pub oldest_review_age_secs: Option<u64>,
     pub oldest_assignment_age_secs: Option<u64>,
     // Review pipeline metrics (computed from event log)
@@ -2021,6 +2022,7 @@ fn compute_metrics_with_telemetry_and_aging(
         stale_review_count: board_metrics.stale_review_count,
         idle_with_runnable: board_metrics.idle_with_runnable,
         top_runnable_tasks: board_metrics.top_runnable_tasks,
+        blocked_dispatch_reasons: board_metrics.blocked_dispatch_reasons,
         oldest_review_age_secs: board_metrics.oldest_review_age_secs,
         oldest_assignment_age_secs: board_metrics.oldest_assignment_age_secs,
         auto_merge_count: review.auto_merge_count,
@@ -2059,6 +2061,7 @@ struct BoardMetrics {
     stale_review_count: u32,
     idle_with_runnable: Vec<String>,
     top_runnable_tasks: Vec<String>,
+    blocked_dispatch_reasons: Vec<String>,
     oldest_review_age_secs: Option<u64>,
     oldest_assignment_age_secs: Option<u64>,
 }
@@ -2082,6 +2085,7 @@ fn compute_board_metrics(
             stale_review_count: 0,
             idle_with_runnable: Vec::new(),
             top_runnable_tasks: Vec::new(),
+            blocked_dispatch_reasons: Vec::new(),
             oldest_review_age_secs: None,
             oldest_assignment_age_secs: None,
         });
@@ -2101,6 +2105,7 @@ fn compute_board_metrics(
             stale_review_count: 0,
             idle_with_runnable: Vec::new(),
             top_runnable_tasks: Vec::new(),
+            blocked_dispatch_reasons: Vec::new(),
             oldest_review_age_secs: None,
             oldest_assignment_age_secs: None,
         });
@@ -2163,6 +2168,8 @@ fn compute_board_metrics(
     let idle_with_runnable =
         compute_idle_with_runnable(board_dir, members, &tasks, engineer_runnable_count);
     let top_runnable_tasks = top_runnable_task_summaries(&dispatchable_tasks, 3);
+    let blocked_dispatch_reasons =
+        blocked_dispatch_reason_summaries(&tasks, &dispatchable_task_ids, 3);
     let aging = project_root_from_board_dir(board_dir)
         .and_then(|project_root| {
             crate::team::board::compute_task_aging(board_dir, project_root, thresholds).ok()
@@ -2181,6 +2188,7 @@ fn compute_board_metrics(
         stale_review_count: aging.stale_review.len() as u32,
         idle_with_runnable,
         top_runnable_tasks,
+        blocked_dispatch_reasons,
         oldest_review_age_secs,
         oldest_assignment_age_secs,
     })
@@ -2364,6 +2372,11 @@ pub fn format_metrics(metrics: &WorkflowMetrics) -> String {
     } else {
         metrics.top_runnable_tasks.join("; ")
     };
+    let blocked_dispatch = if metrics.blocked_dispatch_reasons.is_empty() {
+        "-".to_string()
+    } else {
+        metrics.blocked_dispatch_reasons.join("; ")
+    };
 
     let auto_merge_rate_str = metrics
         .auto_merge_rate
@@ -2394,6 +2407,7 @@ Implementation Work: {}\n\
 Aging Alerts: stale in-progress {} | aged todo {} | stale review {}\n\
 Idle With Runnable: {}\n\
 Top Runnable: {}\n\
+Blocked Dispatch: {}\n\
 Oldest Review Age: {}\n\
 Oldest Assignment Age: {}\n\n\
 Review Pipeline\n\
@@ -2412,6 +2426,7 @@ Merge Modes: direct ok {} / fail {} | isolated ok {} / fail {}",
         metrics.stale_review_count,
         idle,
         top_runnable,
+        blocked_dispatch,
         format_age(metrics.oldest_review_age_secs),
         format_age(metrics.oldest_assignment_age_secs),
         metrics.in_review_count,
@@ -2516,6 +2531,23 @@ fn top_runnable_task_summaries(tasks: &[task::Task], limit: usize) -> Vec<String
         .into_iter()
         .take(limit)
         .map(|task| format!("#{} ({}) {}", task.id, task.priority, task.title))
+        .collect()
+}
+
+fn blocked_dispatch_reason_summaries(
+    tasks: &[task::Task],
+    dispatchable_task_ids: &HashSet<u32>,
+    limit: usize,
+) -> Vec<String> {
+    tasks
+        .iter()
+        .filter(|task| matches!(task.status.as_str(), "todo" | "backlog" | "runnable"))
+        .filter(|task| !dispatchable_task_ids.contains(&task.id))
+        .filter_map(|task| {
+            crate::team::resolver::dispatch_blocking_reason(task, tasks)
+                .map(|reason| format!("#{} {}: {}", task.id, task.title, reason))
+        })
+        .take(limit)
         .collect()
 }
 
@@ -3855,6 +3887,13 @@ mod tests {
         assert_eq!(metrics.actionable_review_count, 1);
         assert_eq!(metrics.in_progress_count, 2);
         assert_eq!(metrics.idle_with_runnable, vec!["eng-4".to_string()]);
+        assert_eq!(
+            metrics.blocked_dispatch_reasons,
+            vec![
+                "#5 Claimed todo: claimed by eng-3".to_string(),
+                "#6 Waiting: unmet dependency #7 (in-progress)".to_string(),
+            ]
+        );
         assert!(metrics.oldest_review_age_secs.is_some());
         assert!(metrics.oldest_assignment_age_secs.is_some());
     }
@@ -3997,7 +4036,40 @@ mod tests {
 
         assert!(formatted.contains("Workflow Metrics"));
         assert!(formatted.contains("Runnable: 1"));
+        assert!(formatted.contains("Blocked Dispatch: -"));
         assert_eq!(metrics.runnable_count, 1);
+    }
+
+    #[test]
+    fn workflow_metrics_explains_todo_dependency_blocker() {
+        let tmp = tempfile::tempdir().unwrap();
+        let team_config_dir = tmp.path().join(".batty").join("team_config");
+        fs::create_dir_all(&team_config_dir).unwrap();
+        fs::write(
+            team_config_dir.join("team.yaml"),
+            "team: test\nworkflow_mode: hybrid\n",
+        )
+        .unwrap();
+        write_board_task(
+            tmp.path(),
+            "001-parent.md",
+            "id: 1\ntitle: Parent\nstatus: blocked\npriority: high\n",
+        );
+        write_board_task(
+            tmp.path(),
+            "002-child.md",
+            "id: 2\ntitle: Child\nstatus: todo\npriority: high\ndepends_on:\n  - 1\n",
+        );
+
+        let (formatted, metrics) =
+            workflow_metrics_section(tmp.path(), &[engineer("eng-1")]).unwrap();
+
+        assert_eq!(metrics.runnable_count, 0);
+        assert_eq!(
+            metrics.blocked_dispatch_reasons,
+            vec!["#2 Child: unmet dependency #1 (blocked)".to_string()]
+        );
+        assert!(formatted.contains("Blocked Dispatch: #2 Child: unmet dependency #1 (blocked)"));
     }
 
     #[test]

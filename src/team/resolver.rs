@@ -2,7 +2,7 @@
 
 //! Resolve board tasks into runnable workflow states.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -117,6 +117,42 @@ pub fn is_dispatchable_task(task: &Task, done: &HashSet<u32>) -> bool {
     }
     let metadata = load_workflow_metadata(task).unwrap_or_default();
     blocking_reason(task, &metadata, done).is_none()
+}
+
+pub fn dispatch_blocking_reason(task: &Task, tasks: &[Task]) -> Option<String> {
+    if !matches!(task.status.as_str(), "todo" | "backlog" | "runnable") {
+        return Some(format!("status {} is not dispatchable", task.status));
+    }
+    if let Some(owner) = task.claimed_by.as_deref() {
+        return Some(format!("claimed by {owner}"));
+    }
+
+    let metadata = load_workflow_metadata(task).unwrap_or_default();
+    if let Some(reason) = task.blocked.as_ref() {
+        return Some(reason.clone());
+    }
+    if let Some(reason) = metadata.blocked_on.as_ref() {
+        return Some(reason.clone());
+    }
+    if task.is_schedule_blocked() {
+        return Some(format!(
+            "scheduled for {}",
+            task.scheduled_for.as_deref().unwrap_or("unknown")
+        ));
+    }
+
+    let status_by_id: HashMap<u32, &str> = tasks
+        .iter()
+        .map(|dependency| (dependency.id, dependency.status.as_str()))
+        .collect();
+    task.depends_on.iter().find_map(|dep_id| {
+        let status = status_by_id.get(dep_id).copied().unwrap_or("missing");
+        if matches!(status, "done" | "archived") {
+            None
+        } else {
+            Some(format!("unmet dependency #{dep_id} ({status})"))
+        }
+    })
 }
 
 /// Subset of `dispatchable_tasks` that excludes tasks already committed to a
@@ -560,6 +596,54 @@ roles:
         assert_eq!(
             task3.blocking_reason.as_deref(),
             Some("unmet dependency #2")
+        );
+    }
+
+    #[test]
+    fn dispatch_blocking_reason_names_dependency_status() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = tmp.path().join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+        write_task(&tasks_dir, 1, "status: blocked\n");
+        write_task(&tasks_dir, 2, "status: todo\ndepends_on:\n  - 1\n");
+
+        let tasks = load_tasks_from_dir(&tasks_dir).unwrap();
+        let child = tasks.iter().find(|task| task.id == 2).unwrap();
+
+        assert_eq!(
+            dispatch_blocking_reason(child, &tasks).as_deref(),
+            Some("unmet dependency #1 (blocked)")
+        );
+    }
+
+    #[test]
+    fn dispatch_blocking_reason_clears_when_parent_done() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = tmp.path().join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+        write_task(&tasks_dir, 1, "status: done\n");
+        write_task(&tasks_dir, 2, "status: todo\ndepends_on:\n  - 1\n");
+
+        let tasks = load_tasks_from_dir(&tasks_dir).unwrap();
+        let child = tasks.iter().find(|task| task.id == 2).unwrap();
+
+        assert!(dispatch_blocking_reason(child, &tasks).is_none());
+    }
+
+    #[test]
+    fn dispatch_blocking_reason_marks_reworked_parent_unmet() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = tmp.path().join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+        write_task(&tasks_dir, 1, "status: rework\n");
+        write_task(&tasks_dir, 2, "status: todo\ndepends_on:\n  - 1\n");
+
+        let tasks = load_tasks_from_dir(&tasks_dir).unwrap();
+        let child = tasks.iter().find(|task| task.id == 2).unwrap();
+
+        assert_eq!(
+            dispatch_blocking_reason(child, &tasks).as_deref(),
+            Some("unmet dependency #1 (rework)")
         );
     }
 
