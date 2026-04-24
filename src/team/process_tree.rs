@@ -113,7 +113,7 @@ fn is_batty_runtime_command(command: &str) -> bool {
     is_batty && args.any(|arg| matches!(arg, "watchdog" | "daemon" | "shim"))
 }
 
-fn read_process_table() -> Result<Vec<ProcessInfo>> {
+pub(crate) fn read_process_table() -> Result<Vec<ProcessInfo>> {
     #[cfg(target_os = "linux")]
     {
         match read_process_table_from_proc() {
@@ -124,6 +124,33 @@ fn read_process_table() -> Result<Vec<ProcessInfo>> {
     }
 
     read_process_table_from_ps()
+}
+
+pub(crate) fn codex_exec_processes() -> Result<Vec<ProcessInfo>> {
+    let processes = read_process_table().context("failed to inspect process table")?;
+    Ok(codex_exec_processes_from_table(&processes))
+}
+
+fn codex_exec_processes_from_table(processes: &[ProcessInfo]) -> Vec<ProcessInfo> {
+    let mut matches = processes
+        .iter()
+        .filter(|process| is_codex_exec_command(&process.command))
+        .cloned()
+        .collect::<Vec<_>>();
+    matches.sort_by_key(|process| process.pid);
+    matches
+}
+
+fn is_codex_exec_command(command: &str) -> bool {
+    let mut args = command.split_whitespace();
+    let Some(first_arg) = args.next() else {
+        return false;
+    };
+    let is_codex = Path::new(first_arg)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name == "codex");
+    is_codex && args.any(|arg| arg == "exec")
 }
 
 #[cfg(target_os = "linux")]
@@ -348,6 +375,31 @@ mod tests {
                 10,
                 "batty daemon --project-root /Users/me/batty_marketing --resume"
             ))
+        );
+    }
+
+    #[test]
+    fn codex_exec_processes_from_table_matches_codex_exec_children_only() {
+        let processes = vec![
+            proc(10, 1, "codex"),
+            proc(11, 1, "codex exec --json -m gpt-5.5 -"),
+            proc(12, 1, "/opt/bin/codex exec resume tid-123 -"),
+            proc(
+                13,
+                1,
+                "batty shim --id eng-1 --agent-type codex --cmd codex --cwd /tmp/repo",
+            ),
+            proc(14, 1, "node /tmp/codex exec helper"),
+        ];
+
+        let matches = codex_exec_processes_from_table(&processes);
+
+        assert_eq!(
+            matches,
+            vec![
+                proc(11, 1, "codex exec --json -m gpt-5.5 -"),
+                proc(12, 1, "/opt/bin/codex exec resume tid-123 -"),
+            ]
         );
     }
 

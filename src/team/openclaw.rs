@@ -1018,6 +1018,7 @@ mod tests {
                 current_backoff_secs: None,
                 last_exit_category: None,
                 last_exit_reason: None,
+                ..status::WatchdogStatus::default()
             },
             health: status::TeamStatusHealth {
                 session_running: true,

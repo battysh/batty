@@ -1022,7 +1022,10 @@ fn resolve_lifecycle_state(
     } else if report.watchdog.state == "restarting" {
         ProjectLifecycleState::Recovering
     } else if report.paused
-        || report.watchdog.state == "circuit-open"
+        || matches!(
+            report.watchdog.state.as_str(),
+            "circuit-open" | "offline" | "degraded"
+        )
         || !report.health.unhealthy_members.is_empty()
     {
         ProjectLifecycleState::Degraded
@@ -1791,6 +1794,7 @@ mod tests {
                 current_backoff_secs: None,
                 last_exit_category: None,
                 last_exit_reason: None,
+                ..crate::team::status::WatchdogStatus::default()
             },
             health: crate::team::status::TeamStatusHealth {
                 session_running: true,
@@ -1827,6 +1831,13 @@ mod tests {
         degraded.health.unhealthy_members.push("eng-1".to_string());
         assert_eq!(
             resolve_lifecycle_state(&degraded),
+            ProjectLifecycleState::Degraded
+        );
+
+        let mut offline_watchdog = base.clone();
+        offline_watchdog.watchdog.state = "offline".to_string();
+        assert_eq!(
+            resolve_lifecycle_state(&offline_watchdog),
             ProjectLifecycleState::Degraded
         );
 

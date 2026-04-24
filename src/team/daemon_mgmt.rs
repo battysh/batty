@@ -39,8 +39,8 @@ pub(crate) const DAEMON_EXIT_CATEGORY_UNKNOWN: &str = "unknown";
 #[cfg(unix)]
 static WATCHDOG_SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
 
-/// Path to the daemon PID file.
-fn daemon_pid_path(project_root: &Path) -> PathBuf {
+/// Path to the watchdog PID file. The filename remains `daemon.pid` for compatibility.
+pub(crate) fn watchdog_pid_path(project_root: &Path) -> PathBuf {
     project_root.join(".batty").join("daemon.pid")
 }
 
@@ -144,7 +144,7 @@ pub(crate) fn watchdog_state_path(project_root: &Path) -> PathBuf {
     project_root.join(".batty").join("watchdog-state.json")
 }
 
-fn daemon_child_pid_path(project_root: &Path) -> PathBuf {
+pub(crate) fn daemon_child_pid_path(project_root: &Path) -> PathBuf {
     project_root.join(".batty").join(DAEMON_CHILD_PID_FILE)
 }
 
@@ -499,7 +499,7 @@ fn spawn_watchdog(project_root: &Path, resume: bool) -> Result<u32> {
     spawn_detached_process(
         project_root,
         &args,
-        &daemon_pid_path(project_root),
+        &watchdog_pid_path(project_root),
         "watchdog",
     )
 }
@@ -704,7 +704,7 @@ fn terminate_daemon_child(child: &mut std::process::Child) {
 
 /// Kill the daemon process if it's running.
 fn read_daemon_pid(project_root: &Path) -> Option<u32> {
-    let pid_path = daemon_pid_path(project_root);
+    let pid_path = watchdog_pid_path(project_root);
     let pid_str = std::fs::read_to_string(pid_path).ok()?;
     pid_str.trim().parse::<u32>().ok()
 }
@@ -730,7 +730,7 @@ fn send_unix_signal(_pid: u32, _signal: i32) -> bool {
 fn daemon_process_exists(pid: u32) -> bool {
     let status = unsafe { libc::kill(pid as libc::pid_t, 0) };
     if status == 0 {
-        true
+        !process_is_zombie(pid).unwrap_or(false)
     } else {
         !matches!(
             std::io::Error::last_os_error().raw_os_error(),
@@ -739,9 +739,26 @@ fn daemon_process_exists(pid: u32) -> bool {
     }
 }
 
+#[cfg(unix)]
+fn process_is_zombie(pid: u32) -> Option<bool> {
+    let output = std::process::Command::new("ps")
+        .args(["-o", "stat=", "-p", &pid.to_string()])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stat = String::from_utf8_lossy(&output.stdout);
+    Some(stat.trim_start().starts_with('Z'))
+}
+
 #[cfg(not(unix))]
 fn daemon_process_exists(_pid: u32) -> bool {
     false
+}
+
+pub(crate) fn process_exists(pid: u32) -> bool {
+    daemon_process_exists(pid)
 }
 
 fn wait_for_graceful_daemon_shutdown(
@@ -754,12 +771,12 @@ fn wait_for_graceful_daemon_shutdown(
     loop {
         let clean_snapshot = daemon_state_indicates_clean_shutdown(project_root, previous_saved_at);
         if clean_snapshot {
-            let _ = std::fs::remove_file(daemon_pid_path(project_root));
+            let _ = std::fs::remove_file(watchdog_pid_path(project_root));
             return true;
         }
         let running = daemon_process_exists(pid);
         if !running {
-            let _ = std::fs::remove_file(daemon_pid_path(project_root));
+            let _ = std::fs::remove_file(watchdog_pid_path(project_root));
             return false;
         }
         if std::time::Instant::now() >= deadline {
@@ -810,7 +827,7 @@ pub(super) fn force_kill_daemon(project_root: &Path) {
         warn!(pid, "cannot force-kill daemon on this platform");
     }
 
-    let _ = std::fs::remove_file(daemon_pid_path(project_root));
+    let _ = std::fs::remove_file(watchdog_pid_path(project_root));
 }
 
 /// Start a team session: load config, resolve hierarchy, create tmux layout,
@@ -996,7 +1013,7 @@ pub fn run_watchdog(project_root: &Path, resume: bool) -> Result<()> {
 
     loop {
         if watchdog_shutdown_requested() {
-            let _ = std::fs::remove_file(daemon_pid_path(project_root));
+            let _ = std::fs::remove_file(watchdog_pid_path(project_root));
             let _ = std::fs::remove_file(daemon_child_pid_path(project_root));
             state.child_pid = None;
             state.current_backoff_secs = None;
@@ -1023,7 +1040,7 @@ pub fn run_watchdog(project_root: &Path, resume: bool) -> Result<()> {
         loop {
             if watchdog_shutdown_requested() {
                 terminate_daemon_child(&mut child);
-                let _ = std::fs::remove_file(daemon_pid_path(project_root));
+                let _ = std::fs::remove_file(watchdog_pid_path(project_root));
                 clear_watchdog_child_pid(project_root, &mut state)?;
                 return Ok(());
             }
@@ -1052,7 +1069,7 @@ pub fn run_watchdog(project_root: &Path, resume: bool) -> Result<()> {
                         window_secs = WATCHDOG_CIRCUIT_BREAKER_WINDOW_SECS,
                         "watchdog circuit breaker tripped; daemon will not be restarted"
                     );
-                    let _ = std::fs::remove_file(daemon_pid_path(project_root));
+                    let _ = std::fs::remove_file(watchdog_pid_path(project_root));
                     return Ok(());
                 }
                 Ok(None) => std::thread::sleep(WATCHDOG_POLL_INTERVAL),
@@ -1076,7 +1093,7 @@ pub fn run_watchdog(project_root: &Path, resume: bool) -> Result<()> {
                         window_secs = WATCHDOG_CIRCUIT_BREAKER_WINDOW_SECS,
                         "watchdog circuit breaker tripped after daemon poll failures"
                     );
-                    let _ = std::fs::remove_file(daemon_pid_path(project_root));
+                    let _ = std::fs::remove_file(watchdog_pid_path(project_root));
                     return Ok(());
                 }
             }
@@ -1370,7 +1387,7 @@ mod tests {
 
         let mut child = std::process::Command::new(&script_path).spawn().unwrap();
         std::fs::create_dir_all(tmp.path().join(".batty")).unwrap();
-        std::fs::write(daemon_pid_path(tmp.path()), child.id().to_string()).unwrap();
+        std::fs::write(watchdog_pid_path(tmp.path()), child.id().to_string()).unwrap();
         std::thread::sleep(Duration::from_millis(200));
 
         assert!(!request_graceful_daemon_shutdown(
@@ -1381,7 +1398,7 @@ mod tests {
 
         force_kill_daemon(tmp.path());
         let _ = child.wait().unwrap();
-        assert!(!daemon_pid_path(tmp.path()).exists());
+        assert!(!watchdog_pid_path(tmp.path()).exists());
     }
 
     #[test]
