@@ -1084,6 +1084,62 @@ fn stalled_manager_dispatch_gap_fallback_dispatches_work() {
 }
 
 #[test]
+fn stalled_manager_dispatch_gap_fallback_dispatches_highest_priority_work_first() {
+    let harness = intervention_team_harness()
+        .with_member_state("lead", MemberState::Working)
+        .with_member_state("eng-1", MemberState::Idle)
+        .with_member_state("eng-2", MemberState::Idle)
+        .with_pane("lead", "%999997");
+    fs::create_dir_all(harness.board_tasks_dir()).unwrap();
+    for (id, title, priority) in [
+        (190, "medium-task", "medium"),
+        (191, "high-task", "high"),
+        (192, "critical-task", "critical"),
+    ] {
+        fs::write(
+            harness.board_tasks_dir().join(format!("{id}-{title}.md")),
+            format!(
+                "---\nid: {id}\ntitle: {title}\nstatus: todo\npriority: {priority}\nclass: standard\n---\n\nTask description.\n"
+            ),
+        )
+        .unwrap();
+    }
+    let mut daemon = harness.build_daemon().unwrap();
+    daemon.config.team_config.use_shim = true;
+    let threshold = daemon
+        .config
+        .team_config
+        .workflow_policy
+        .stall_threshold_secs;
+    insert_working_shim_handle(&mut daemon, "lead", threshold + 10, 1);
+    let _eng1_child = insert_idle_shim_handle(&mut daemon, "eng-1");
+    let _eng2_child = insert_idle_shim_handle(&mut daemon, "eng-2");
+
+    daemon.maybe_intervene_manager_dispatch_gap().unwrap();
+
+    let assigned = [
+        daemon.active_task_id("eng-1"),
+        daemon.active_task_id("eng-2"),
+    ];
+    assert!(
+        assigned.contains(&Some(192)),
+        "critical task should be selected before lower priorities"
+    );
+    assert!(
+        assigned.contains(&Some(191)),
+        "high task should be selected before medium priority"
+    );
+    assert!(
+        !assigned.contains(&Some(190)),
+        "medium task should wait while higher-priority work exists"
+    );
+    let tasks = crate::task::load_tasks_from_dir(&harness.board_tasks_dir()).unwrap();
+    let medium = tasks.iter().find(|task| task.id == 190).unwrap();
+    assert_eq!(medium.status, "todo");
+    assert!(medium.claimed_by.is_none());
+}
+
+#[test]
 fn stalled_manager_dispatch_gap_skips_blocked_manual_work() {
     let harness = intervention_team_harness()
         .with_member_state("lead", MemberState::Working)

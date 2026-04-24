@@ -139,10 +139,12 @@ impl TeamDaemon {
                 .into_iter()
                 .map(|task| task.id)
                 .collect();
-            let unassigned_open_tasks: Vec<&crate::task::Task> = tasks
+            let mut unassigned_open_tasks: Vec<&crate::task::Task> = tasks
                 .iter()
                 .filter(|task| dispatchable_task_ids.contains(&task.id))
                 .collect();
+            unassigned_open_tasks
+                .sort_by_key(|task| (manager_dispatch_priority_rank(&task.priority), task.id));
 
             if idle_active_reports.is_empty() && unassigned_open_tasks.is_empty() {
                 continue;
@@ -551,6 +553,16 @@ pub(super) fn manager_dispatch_intervention_key(member_name: &str) -> String {
     format!("dispatch::{member_name}")
 }
 
+fn manager_dispatch_priority_rank(priority: &str) -> u32 {
+    match priority {
+        "critical" => 0,
+        "high" => 1,
+        "medium" => 2,
+        "low" => 3,
+        _ => 4,
+    }
+}
+
 pub(super) fn manager_dispatch_intervention_signature(
     idle_active_reports: &[&ReportDispatchSnapshot],
     idle_unassigned_reports: &[&ReportDispatchSnapshot],
@@ -712,5 +724,14 @@ mod tests {
         let sig = manager_dispatch_intervention_signature(&[&a1, &a2], &[], &[]);
         // Should sort: active:eng-1:10,20 before active:eng-2:30
         assert_eq!(sig, "active:eng-1:10,20|active:eng-2:30");
+    }
+
+    #[test]
+    fn dispatch_priority_rank_orders_named_priorities() {
+        assert_eq!(manager_dispatch_priority_rank("critical"), 0);
+        assert_eq!(manager_dispatch_priority_rank("high"), 1);
+        assert_eq!(manager_dispatch_priority_rank("medium"), 2);
+        assert_eq!(manager_dispatch_priority_rank("low"), 3);
+        assert_eq!(manager_dispatch_priority_rank("unknown"), 4);
     }
 }
