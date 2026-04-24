@@ -2793,7 +2793,17 @@ fn binary_freshness_status_line(project_root: &Path) -> String {
         project_root,
     );
     match result {
-        Ok(Some(report)) => report.status_line(),
+        Ok(Some(report)) => {
+            if report.fresh {
+                return report.status_line();
+            }
+            match crate::team::daemon::health::binary_freshness::load_binary_refresh_state(
+                project_root,
+            ) {
+                Ok(Some(state)) if state.matches_report(&report) => state.status_line(),
+                _ => report.status_line(),
+            }
+        }
         Ok(None) => "Daemon Binary: n/a".to_string(),
         Err(_) => "Daemon Binary: unknown (check failed)".to_string(),
     }

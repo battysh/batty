@@ -178,6 +178,8 @@ pub enum StaleDaemonRestartStatus {
     DryRunReady,
     Restarted,
     RefusedDirty,
+    RefusedActiveMerge,
+    RefusedMissingReleaseBinary,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -233,6 +235,48 @@ pub(crate) fn restart_daemon_if_stale_with_binary_path(
     binary_path: &Path,
     dry_run: bool,
 ) -> Result<StaleDaemonRestartReport> {
+    let decision = safe_daemon_restart_decision_with_binary_path(project_root, binary_path)?;
+    if dry_run || decision.status != StaleDaemonRestartStatus::DryRunReady {
+        return Ok(decision);
+    }
+
+    let Some(freshness) = decision.freshness.clone() else {
+        return Ok(decision);
+    };
+    let commands = decision.commands.clone();
+
+    rebuild_reinstall_and_resign_batty(project_root)?;
+    if !request_graceful_daemon_shutdown(project_root, DAEMON_SHUTDOWN_GRACE_PERIOD) {
+        bail!(
+            "daemon did not stop gracefully; refusing to force restart after reinstall. Manual fallback: {}",
+            STALE_MANUAL_RECOVERY_COMMAND
+        );
+    }
+    let pid = spawn_watchdog(project_root, true)?;
+
+    Ok(StaleDaemonRestartReport {
+        status: StaleDaemonRestartStatus::Restarted,
+        message: format!(
+            "Daemon binary was stale by {} source commit(s); rebuilt, reinstalled, and restarted watchdog pid {pid}.",
+            freshness.commits_behind
+        ),
+        commands,
+        dirty_paths: Vec::new(),
+        freshness: Some(freshness),
+    })
+}
+
+pub(crate) fn safe_daemon_restart_decision(
+    project_root: &Path,
+) -> Result<StaleDaemonRestartReport> {
+    let binary_path = std::env::current_exe().context("failed to resolve current executable")?;
+    safe_daemon_restart_decision_with_binary_path(project_root, &binary_path)
+}
+
+pub(crate) fn safe_daemon_restart_decision_with_binary_path(
+    project_root: &Path,
+    binary_path: &Path,
+) -> Result<StaleDaemonRestartReport> {
     let freshness = evaluate_binary_freshness(binary_path, project_root)?;
     let Some(freshness) = freshness else {
         return Ok(StaleDaemonRestartReport {
@@ -257,38 +301,40 @@ pub(crate) fn restart_daemon_if_stale_with_binary_path(
         });
     }
 
-    let root_dirty = inspect_root_dirty_state(project_root)?;
-    if !root_dirty.source_paths.is_empty() {
-        return Ok(refused_dirty_restart_report(freshness, &root_dirty));
-    }
-
-    let commands = stale_daemon_restart_commands();
-    if dry_run {
+    if merge_lock_path(project_root).exists() {
         return Ok(StaleDaemonRestartReport {
-            status: StaleDaemonRestartStatus::DryRunReady,
-            message: format!(
-                "Daemon binary is stale by {} source commit(s); safe restart path is ready. Runtime-only dirty paths are tolerated.",
-                freshness.commits_behind
-            ),
-            commands,
+            status: StaleDaemonRestartStatus::RefusedActiveMerge,
+            message: "Refusing stale-daemon restart because a merge is active.".to_string(),
+            commands: Vec::new(),
             dirty_paths: Vec::new(),
             freshness: Some(freshness),
         });
     }
 
-    rebuild_reinstall_and_resign_batty(project_root)?;
-    if !request_graceful_daemon_shutdown(project_root, DAEMON_SHUTDOWN_GRACE_PERIOD) {
-        bail!(
-            "daemon did not stop gracefully; refusing to force restart after reinstall. Manual fallback: {}",
-            STALE_MANUAL_RECOVERY_COMMAND
-        );
+    let root_dirty = inspect_root_dirty_state(project_root)?;
+    if !root_dirty.source_paths.is_empty() {
+        return Ok(refused_dirty_restart_report(freshness, &root_dirty));
     }
-    let pid = spawn_watchdog(project_root, true)?;
 
+    let release_binary = release_batty_path(project_root);
+    if !release_binary.is_file() {
+        return Ok(StaleDaemonRestartReport {
+            status: StaleDaemonRestartStatus::RefusedMissingReleaseBinary,
+            message: format!(
+                "Refusing stale-daemon restart because release binary is missing at {}. Run `cargo build --release` before retrying.",
+                release_binary.display()
+            ),
+            commands: Vec::new(),
+            dirty_paths: Vec::new(),
+            freshness: Some(freshness),
+        });
+    }
+
+    let commands = stale_daemon_restart_commands();
     Ok(StaleDaemonRestartReport {
-        status: StaleDaemonRestartStatus::Restarted,
+        status: StaleDaemonRestartStatus::DryRunReady,
         message: format!(
-            "Daemon binary was stale by {} source commit(s); rebuilt, reinstalled, and restarted watchdog pid {pid}.",
+            "Daemon binary is stale by {} source commit(s); safe restart path is ready. Runtime-only dirty paths are tolerated.",
             freshness.commits_behind
         ),
         commands,
@@ -325,13 +371,21 @@ fn stale_daemon_restart_commands() -> Vec<String> {
     commands
 }
 
+fn release_batty_path(project_root: &Path) -> PathBuf {
+    project_root.join("target").join("release").join("batty")
+}
+
+fn merge_lock_path(project_root: &Path) -> PathBuf {
+    project_root.join(".batty").join("merge.lock")
+}
+
 fn installed_batty_path() -> Result<PathBuf> {
     let home =
         std::env::var_os("HOME").context("HOME is not set; cannot resolve ~/.cargo/bin/batty")?;
     Ok(PathBuf::from(home).join(".cargo").join("bin").join("batty"))
 }
 
-fn rebuild_reinstall_and_resign_batty(project_root: &Path) -> Result<()> {
+pub(crate) fn rebuild_reinstall_and_resign_batty(project_root: &Path) -> Result<()> {
     run_command(project_root, "cargo", &["build", "--release"])?;
 
     let source = project_root.join("target").join("release").join("batty");
@@ -1230,6 +1284,13 @@ mod tests {
         binary
     }
 
+    fn fake_release_binary(dir: &Path) -> PathBuf {
+        let binary = release_batty_path(dir);
+        std::fs::create_dir_all(binary.parent().unwrap()).unwrap();
+        std::fs::write(&binary, "fake release batty binary").unwrap();
+        binary
+    }
+
     #[test]
     fn daemon_state_probe_requests_resume_after_unclean_shutdown() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1251,7 +1312,7 @@ mod tests {
     }
 
     #[test]
-    fn restart_if_stale_fresh_binary_is_noop() {
+    fn daemon_restart_if_stale_fresh_binary_is_noop() {
         let tmp = tempfile::tempdir().unwrap();
         let repo = tmp.path();
         init_repo(repo);
@@ -1266,13 +1327,14 @@ mod tests {
     }
 
     #[test]
-    fn restart_if_stale_clean_root_dry_run_reports_safe_plan() {
+    fn daemon_restart_if_stale_clean_root_dry_run_reports_safe_plan() {
         let tmp = tempfile::tempdir().unwrap();
         let repo = tmp.path();
         init_repo(repo);
         commit_file_with_time(repo, "src/lib.rs", "pub fn one() {}\n", 1_700_000_000);
         commit_file_with_time(repo, "src/main.rs", "pub fn two() {}\n", 1_700_001_000);
         let binary = fake_binary(repo, 1_700_000_000);
+        fake_release_binary(repo);
 
         let report = restart_daemon_if_stale_with_binary_path(repo, &binary, true).unwrap();
 
@@ -1294,7 +1356,7 @@ mod tests {
     }
 
     #[test]
-    fn restart_if_stale_refuses_dirty_source_paths() {
+    fn daemon_restart_if_stale_refuses_dirty_source_paths() {
         let tmp = tempfile::tempdir().unwrap();
         let repo = tmp.path();
         init_repo(repo);
@@ -1302,6 +1364,7 @@ mod tests {
         commit_file_with_time(repo, "src/main.rs", "pub fn two() {}\n", 1_700_001_000);
         std::fs::write(repo.join("src").join("dirty.rs"), "pub fn dirty() {}\n").unwrap();
         let binary = fake_binary(repo, 1_700_000_000);
+        fake_release_binary(repo);
 
         let report = restart_daemon_if_stale_with_binary_path(repo, &binary, true).unwrap();
 
@@ -1312,7 +1375,7 @@ mod tests {
     }
 
     #[test]
-    fn restart_if_stale_allows_runtime_only_dirty_paths() {
+    fn daemon_restart_if_stale_allows_runtime_only_dirty_paths() {
         let tmp = tempfile::tempdir().unwrap();
         let repo = tmp.path();
         init_repo(repo);
@@ -1322,6 +1385,7 @@ mod tests {
         std::fs::create_dir_all(telemetry.parent().unwrap()).unwrap();
         std::fs::write(&telemetry, "runtime noise\n").unwrap();
         let binary = fake_binary(repo, 1_700_000_000);
+        fake_release_binary(repo);
 
         let report = restart_daemon_if_stale_with_binary_path(repo, &binary, true).unwrap();
 
@@ -1332,6 +1396,43 @@ mod tests {
                 .render()
                 .contains("Runtime-only dirty paths are tolerated")
         );
+    }
+
+    #[test]
+    fn daemon_restart_if_stale_refuses_active_merge_lock() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path();
+        init_repo(repo);
+        commit_file_with_time(repo, "src/lib.rs", "pub fn one() {}\n", 1_700_000_000);
+        commit_file_with_time(repo, "src/main.rs", "pub fn two() {}\n", 1_700_001_000);
+        let binary = fake_binary(repo, 1_700_000_000);
+        fake_release_binary(repo);
+        let lock = repo.join(".batty").join("merge.lock");
+        std::fs::create_dir_all(lock.parent().unwrap()).unwrap();
+        std::fs::write(lock, "active merge\n").unwrap();
+
+        let report = restart_daemon_if_stale_with_binary_path(repo, &binary, true).unwrap();
+
+        assert_eq!(report.status, StaleDaemonRestartStatus::RefusedActiveMerge);
+        assert!(report.render().contains("merge is active"));
+    }
+
+    #[test]
+    fn daemon_restart_if_stale_refuses_missing_release_binary() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path();
+        init_repo(repo);
+        commit_file_with_time(repo, "src/lib.rs", "pub fn one() {}\n", 1_700_000_000);
+        commit_file_with_time(repo, "src/main.rs", "pub fn two() {}\n", 1_700_001_000);
+        let binary = fake_binary(repo, 1_700_000_000);
+
+        let report = restart_daemon_if_stale_with_binary_path(repo, &binary, true).unwrap();
+
+        assert_eq!(
+            report.status,
+            StaleDaemonRestartStatus::RefusedMissingReleaseBinary
+        );
+        assert!(report.render().contains("release binary is missing"));
     }
 
     #[cfg(unix)]

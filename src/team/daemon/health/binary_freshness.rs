@@ -10,21 +10,24 @@
 //! commits that actually touched `src/**` (docs-only commits don't make
 //! the binary stale).
 //!
-//! The goal is *detection and loud surfacing*, not auto-restart. The
-//! operator decides when to cycle the daemon.
+//! The goal is safe refresh orchestration: detect stale binaries, record
+//! daemon-owned refresh state, and surface exact blockers when automatic
+//! refresh is not safe.
 //!
 //! Public surface:
 //! - [`BinaryFreshness`] — the result type rendered by status.
+//! - [`DaemonBinaryRefreshState`] — persisted refresh pending/scheduled/blocked state.
 //! - [`evaluate_binary_freshness`] — pure entry point: takes binary path
 //!   and repo root, returns freshness report.
 //! - [`DEFAULT_STALE_THRESHOLD_SECS`] — 10 minute tolerance.
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::UNIX_EPOCH;
 
 use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
 
 use crate::team::merge::inspect_root_dirty_state;
 
@@ -35,6 +38,7 @@ pub const DEFAULT_STALE_THRESHOLD_SECS: i64 = 600; // 10 minutes
 pub const STALE_RECOVERY_COMMAND: &str = "batty daemon-restart-if-stale";
 pub const STALE_RECOVERY_DRY_RUN_COMMAND: &str = "batty daemon-restart-if-stale --dry-run";
 pub const STALE_MANUAL_RECOVERY_COMMAND: &str = "cargo build --release && cp target/release/batty ~/.cargo/bin/batty && codesign --force --sign - ~/.cargo/bin/batty && batty stop && batty start";
+pub const BINARY_REFRESH_STATE_FILE: &str = "daemon-binary-refresh.json";
 
 /// Result of a binary-vs-HEAD freshness check.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -104,6 +108,137 @@ impl BinaryFreshness {
             )
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DaemonBinaryRefreshPhase {
+    Pending,
+    Scheduled,
+    Blocked,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DaemonBinaryRefreshState {
+    pub phase: DaemonBinaryRefreshPhase,
+    pub commits_behind: u32,
+    pub last_subject: String,
+    pub last_hash: String,
+    pub binary_mtime: i64,
+    pub head_ts: i64,
+    pub updated_at: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked_reason: Option<String>,
+}
+
+impl DaemonBinaryRefreshState {
+    pub fn pending(report: &BinaryFreshness, updated_at: u64) -> Self {
+        Self::from_report(DaemonBinaryRefreshPhase::Pending, report, updated_at, None)
+    }
+
+    pub fn scheduled(report: &BinaryFreshness, updated_at: u64) -> Self {
+        Self::from_report(
+            DaemonBinaryRefreshPhase::Scheduled,
+            report,
+            updated_at,
+            None,
+        )
+    }
+
+    pub fn blocked(report: &BinaryFreshness, updated_at: u64, reason: impl Into<String>) -> Self {
+        Self::from_report(
+            DaemonBinaryRefreshPhase::Blocked,
+            report,
+            updated_at,
+            Some(reason.into()),
+        )
+    }
+
+    fn from_report(
+        phase: DaemonBinaryRefreshPhase,
+        report: &BinaryFreshness,
+        updated_at: u64,
+        blocked_reason: Option<String>,
+    ) -> Self {
+        Self {
+            phase,
+            commits_behind: report.commits_behind,
+            last_subject: report.last_subject.clone(),
+            last_hash: report.last_hash.clone(),
+            binary_mtime: report.binary_mtime,
+            head_ts: report.head_ts,
+            updated_at,
+            blocked_reason,
+        }
+    }
+
+    pub fn matches_report(&self, report: &BinaryFreshness) -> bool {
+        self.commits_behind == report.commits_behind
+            && self.last_hash == report.last_hash
+            && self.binary_mtime == report.binary_mtime
+            && self.head_ts == report.head_ts
+    }
+
+    pub fn status_line(&self) -> String {
+        let count = if self.commits_behind == 1 {
+            "1 commit".to_string()
+        } else {
+            format!("{} commits", self.commits_behind)
+        };
+        match self.phase {
+            DaemonBinaryRefreshPhase::Pending => format!(
+                "Daemon Binary: restart pending — {count} behind main (last: {})",
+                self.last_subject
+            ),
+            DaemonBinaryRefreshPhase::Scheduled => format!(
+                "Daemon Binary: restart scheduled — {count} behind main (last: {})",
+                self.last_subject
+            ),
+            DaemonBinaryRefreshPhase::Blocked => format!(
+                "Daemon Binary: restart blocked: {} — {count} behind main (last: {})",
+                self.blocked_reason.as_deref().unwrap_or("unknown blocker"),
+                self.last_subject
+            ),
+        }
+    }
+}
+
+pub fn binary_refresh_state_path(project_root: &Path) -> PathBuf {
+    project_root.join(".batty").join(BINARY_REFRESH_STATE_FILE)
+}
+
+pub fn load_binary_refresh_state(project_root: &Path) -> Result<Option<DaemonBinaryRefreshState>> {
+    let path = binary_refresh_state_path(project_root);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let content =
+        fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
+    let state = serde_json::from_str::<DaemonBinaryRefreshState>(&content)
+        .with_context(|| format!("failed to parse {}", path.display()))?;
+    Ok(Some(state))
+}
+
+pub fn save_binary_refresh_state(
+    project_root: &Path,
+    state: &DaemonBinaryRefreshState,
+) -> Result<()> {
+    let path = binary_refresh_state_path(project_root);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    let content =
+        serde_json::to_string_pretty(state).context("failed to serialize binary refresh state")?;
+    fs::write(&path, content).with_context(|| format!("failed to write {}", path.display()))
+}
+
+pub fn clear_binary_refresh_state(project_root: &Path) -> Result<()> {
+    let path = binary_refresh_state_path(project_root);
+    if !path.exists() {
+        return Ok(());
+    }
+    fs::remove_file(&path).with_context(|| format!("failed to remove {}", path.display()))
 }
 
 /// Compute binary freshness against the given repo root.
@@ -403,6 +538,58 @@ mod tests {
             "expected singular 'commit', got {:?}",
             report.status_line()
         );
+    }
+
+    #[test]
+    fn binary_refresh_state_status_lines_report_schedule_and_blockers() {
+        let report = BinaryFreshness {
+            fresh: false,
+            commits_behind: 2,
+            last_subject: "merge task".to_string(),
+            last_hash: "abc1234".to_string(),
+            binary_mtime: 100,
+            head_ts: 200,
+            worktree_dirty: false,
+        };
+
+        let scheduled = DaemonBinaryRefreshState::scheduled(&report, 300);
+        assert!(
+            scheduled.status_line().contains("restart scheduled"),
+            "scheduled status should be explicit: {:?}",
+            scheduled.status_line()
+        );
+
+        let blocked = DaemonBinaryRefreshState::blocked(&report, 300, "dirty main");
+        assert!(
+            blocked
+                .status_line()
+                .contains("restart blocked: dirty main"),
+            "blocked status should include reason: {:?}",
+            blocked.status_line()
+        );
+    }
+
+    #[test]
+    fn binary_refresh_state_round_trips() {
+        let tmp = tempfile::tempdir().unwrap();
+        let report = BinaryFreshness {
+            fresh: false,
+            commits_behind: 1,
+            last_subject: "src update".to_string(),
+            last_hash: "def5678".to_string(),
+            binary_mtime: 100,
+            head_ts: 200,
+            worktree_dirty: false,
+        };
+        let state = DaemonBinaryRefreshState::pending(&report, 300);
+
+        save_binary_refresh_state(tmp.path(), &state).unwrap();
+        let loaded = load_binary_refresh_state(tmp.path()).unwrap().unwrap();
+
+        assert_eq!(loaded, state);
+        assert!(loaded.matches_report(&report));
+        clear_binary_refresh_state(tmp.path()).unwrap();
+        assert!(load_binary_refresh_state(tmp.path()).unwrap().is_none());
     }
 
     #[test]
