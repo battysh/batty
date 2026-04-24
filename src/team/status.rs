@@ -1304,9 +1304,7 @@ fn supervisory_status_token(reason: &str, role_label: Option<&str>) -> String {
     };
     let detail_token = if reason.ends_with("inbox_batching") {
         "inbox"
-    } else if reason.ends_with("review_waiting") {
-        "review"
-    } else if reason.ends_with("review_backlog") {
+    } else if reason.ends_with("review_waiting") || reason.ends_with("review_backlog") {
         "review"
     } else if reason.ends_with("direct_report_packets") {
         "triage"

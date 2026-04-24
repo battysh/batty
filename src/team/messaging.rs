@@ -320,9 +320,13 @@ fn format_inbox_digest(
         let cat_label = match entry.category {
             inbox::MessageCategory::Escalation => "ESCALATION",
             inbox::MessageCategory::ReviewRequest => "REVIEW",
+            inbox::MessageCategory::DispatchAction => "DISPATCH",
+            inbox::MessageCategory::CompletionAction => "COMPLETION",
             inbox::MessageCategory::Blocker => "BLOCKER",
             inbox::MessageCategory::Status => "status",
             inbox::MessageCategory::Nudge => "nudge",
+            inbox::MessageCategory::Reminder => "reminder",
+            inbox::MessageCategory::Acknowledgement => "ack",
         };
         let status = if entry.delivered {
             "delivered"
@@ -1179,5 +1183,77 @@ roles:
         assert!(rendered.contains("REVIEW"));
         assert!(rendered.contains("requires manual review"));
         assert!(!rendered.contains("Status update: triage queue is unchanged."));
+    }
+
+    #[test]
+    fn format_inbox_digest_prioritizes_action_labels_over_low_signal_chatter() {
+        let messages: Vec<_> = vec![
+            (
+                inbox::InboxMessage {
+                    id: "msg1".to_string(),
+                    from: "daemon".to_string(),
+                    to: "manager".to_string(),
+                    body: "COMMIT REMINDER: You have uncommitted work.".to_string(),
+                    msg_type: inbox::MessageType::Send,
+                    timestamp: 100,
+                },
+                true,
+            ),
+            (
+                inbox::InboxMessage {
+                    id: "msg2".to_string(),
+                    from: "manager".to_string(),
+                    to: "eng-1".to_string(),
+                    body: "REVIEW PASSED #696: merged to main and moved to done.".to_string(),
+                    msg_type: inbox::MessageType::Send,
+                    timestamp: 200,
+                },
+                true,
+            ),
+            (
+                inbox::InboxMessage {
+                    id: "msg3".to_string(),
+                    from: "eng-1".to_string(),
+                    to: "manager".to_string(),
+                    body: r#"{"task_id":708,"branch":"eng-1-3/708","tests_passed":true,"outcome":"ready_for_review"}"#.to_string(),
+                    msg_type: inbox::MessageType::Send,
+                    timestamp: 300,
+                },
+                false,
+            ),
+            (
+                inbox::InboxMessage {
+                    id: "msg4".to_string(),
+                    from: "daemon".to_string(),
+                    to: "manager".to_string(),
+                    body: "Dispatch recovery needed: idle engineer(s), top task #708.".to_string(),
+                    msg_type: inbox::MessageType::Send,
+                    timestamp: 400,
+                },
+                false,
+            ),
+            (
+                inbox::InboxMessage {
+                    id: "msg5".to_string(),
+                    from: "eng-2".to_string(),
+                    to: "manager".to_string(),
+                    body: "Task #709 ready for review".to_string(),
+                    msg_type: inbox::MessageType::Send,
+                    timestamp: 500,
+                },
+                false,
+            ),
+        ];
+
+        let rendered = format_inbox_digest("manager", &messages, Some(3), None);
+        assert!(rendered.contains("REVIEW"));
+        assert!(rendered.contains("DISPATCH"));
+        assert!(rendered.contains("COMPLETION"));
+        assert!(!rendered.contains("COMMIT REMINDER"));
+        assert!(!rendered.contains("REVIEW PASSED"));
+
+        let raw = format_inbox_listing("manager", &messages, None);
+        assert!(raw.contains("COMMIT REMINDER"));
+        assert!(raw.contains("REVIEW PASSED"));
     }
 }

@@ -415,12 +415,20 @@ pub enum MessageCategory {
     Escalation = 0,
     /// Review request or review-related message.
     ReviewRequest = 1,
+    /// Dispatch or utilization recovery action for a manager.
+    DispatchAction = 2,
+    /// Completion evidence ready for manager review.
+    CompletionAction = 3,
     /// Blocker report from an engineer.
-    Blocker = 2,
+    Blocker = 4,
     /// Status update for a task.
-    Status = 3,
+    Status = 5,
     /// Idle or review nudge — lowest priority.
-    Nudge = 4,
+    Nudge = 6,
+    /// Repeated stale reminders, commit reminders, and claim warnings.
+    Reminder = 7,
+    /// Review/completion acknowledgements that do not require action.
+    Acknowledgement = 8,
 }
 
 impl MessageCategory {
@@ -430,9 +438,9 @@ impl MessageCategory {
     pub fn queue_tier(&self) -> &'static str {
         match self {
             Self::Escalation | Self::Blocker => "priority",
-            Self::ReviewRequest => "work",
+            Self::ReviewRequest | Self::DispatchAction | Self::CompletionAction => "work",
             Self::Status => "content",
-            Self::Nudge => "telemetry",
+            Self::Nudge | Self::Reminder | Self::Acknowledgement => "telemetry",
         }
     }
 }
@@ -440,6 +448,14 @@ impl MessageCategory {
 /// Classify a message body into a category.
 pub fn classify_message(msg: &InboxMessage) -> MessageCategory {
     let body = normalized_body(&msg.body);
+
+    if is_acknowledgement_message(&body) {
+        return MessageCategory::Acknowledgement;
+    }
+
+    if is_stale_reminder_message(&body) {
+        return MessageCategory::Reminder;
+    }
 
     // Escalation detection
     if body.contains("escalat")
@@ -458,11 +474,19 @@ pub fn classify_message(msg: &InboxMessage) -> MessageCategory {
             SupervisoryPressure::TriageBacklog
             | SupervisoryPressure::IdleActiveRecovery
             | SupervisoryPressure::DispatchGap
-            | SupervisoryPressure::PlanningBacklog => return MessageCategory::Blocker,
+            | SupervisoryPressure::PlanningBacklog => return MessageCategory::DispatchAction,
             SupervisoryPressure::RecoveryUpdate
             | SupervisoryPressure::ResolvedUpdate
             | SupervisoryPressure::StatusUpdate => return MessageCategory::Status,
         }
+    }
+
+    if is_dispatch_action_message(&body) {
+        return MessageCategory::DispatchAction;
+    }
+
+    if is_completion_action_message(&body) {
+        return MessageCategory::CompletionAction;
     }
 
     // Blocker detection
@@ -495,6 +519,53 @@ pub fn classify_message(msg: &InboxMessage) -> MessageCategory {
     MessageCategory::Status
 }
 
+fn is_completion_action_message(body: &str) -> bool {
+    let mentions_task = body.contains("\"task_id\":") || body.contains("task_id:");
+    let tests_passed = body.contains("\"tests_passed\":true")
+        || body.contains("\"tests_passed\": true")
+        || body.contains("tests_passed: true");
+    let ready_for_review = body.contains("\"outcome\":\"ready_for_review\"")
+        || body.contains("\"outcome\": \"ready_for_review\"")
+        || body.contains("outcome: ready_for_review");
+
+    body.contains("completion packet")
+        || (mentions_task && tests_passed && ready_for_review)
+        || (body.contains("task #")
+            && body.contains("tests: passed")
+            && body.contains("merge: success"))
+}
+
+fn is_dispatch_action_message(body: &str) -> bool {
+    body.starts_with("manager dispatch nudge:")
+        || body.starts_with("dispatch nudge:")
+        || body.starts_with("dispatch recovery needed:")
+        || body.starts_with("utilization gap detected:")
+        || body.contains("utilization recovery")
+        || body.contains("dispatch queue")
+        || body.contains("dispatch fallback")
+}
+
+fn is_stale_reminder_message(body: &str) -> bool {
+    body.starts_with("commit reminder:")
+        || body.contains("claim on task")
+        || body.contains("claim expires")
+        || body.contains("expires in")
+        || body.contains("stale reminder")
+        || body.contains("stale review")
+}
+
+fn is_acknowledgement_message(body: &str) -> bool {
+    body.starts_with("review passed")
+        || body.starts_with("review triaged")
+        || body.starts_with("review approved")
+        || body.starts_with("ack:")
+        || body.starts_with("scope ack")
+        || body.contains("acknowledged")
+        || body.contains("moved to done")
+        || body.contains("already integrated")
+        || body.contains("no further action")
+}
+
 /// A single entry in the digested inbox view.
 #[derive(Debug, Clone)]
 pub struct DigestEntry {
@@ -522,7 +593,8 @@ pub fn digest_messages(messages: &[(InboxMessage, bool)]) -> (Vec<DigestEntry>, 
     }
 
     // Group messages by (category, grouping key).
-    // - Nudges group by sender ("from").
+    // - Nudges/reminders/acknowledgements group by task if available,
+    //   otherwise by sender and low-signal kind.
     // - Status updates group by task ID (if extractable), else by sender.
     // - Everything else stays individual.
     let mut groups: HashMap<(MessageCategory, String), Vec<(usize, MessageCategory)>> =
@@ -536,10 +608,9 @@ pub fn digest_messages(messages: &[(InboxMessage, bool)]) -> (Vec<DigestEntry>, 
     for (idx, cat) in classified.iter().enumerate() {
         let (msg, _) = &messages[idx];
         let key = match cat {
-            MessageCategory::Nudge => {
-                // Group nudges by sender
-                format!("nudge:{}", msg.from)
-            }
+            MessageCategory::Nudge => low_signal_group_key("nudge", msg),
+            MessageCategory::Reminder => low_signal_group_key("reminder", msg),
+            MessageCategory::Acknowledgement => low_signal_group_key("ack", msg),
             MessageCategory::Status => {
                 // Group status by task ID if available, else by sender
                 match extract_task_id(&msg.body) {
@@ -581,6 +652,13 @@ pub fn digest_messages(messages: &[(InboxMessage, bool)]) -> (Vec<DigestEntry>, 
     });
 
     (entries, raw_count)
+}
+
+fn low_signal_group_key(prefix: &str, msg: &InboxMessage) -> String {
+    match extract_task_id(&msg.body) {
+        Some(tid) => format!("{prefix}:task#{tid}"),
+        None => format!("{prefix}:from:{}", msg.from),
+    }
 }
 
 /// Extract `#NN` task references from a message body. Used by
@@ -1107,6 +1185,47 @@ mod tests {
     }
 
     #[test]
+    fn classify_structured_completion_packet_as_completion_action() {
+        let msg = make_msg(
+            "eng-1",
+            "manager",
+            r#"{"task_id":42,"branch":"eng-1/task-42","tests_passed":true,"outcome":"ready_for_review"}"#,
+            100,
+        );
+        assert_eq!(classify_message(&msg), MessageCategory::CompletionAction);
+    }
+
+    #[test]
+    fn classify_manager_dispatch_nudge_as_dispatch_action() {
+        let msg = make_msg(
+            "manager",
+            "eng-1",
+            "Manager dispatch nudge: start active Task #708 now on branch eng-1-3/708.",
+            100,
+        );
+        assert_eq!(classify_message(&msg), MessageCategory::DispatchAction);
+    }
+
+    #[test]
+    fn classify_review_acks_and_commit_reminders_as_low_signal() {
+        let ack = make_msg(
+            "manager",
+            "eng-1",
+            "REVIEW PASSED #696: merged to main as cb310fb9 and moved to done.",
+            100,
+        );
+        let reminder = make_msg(
+            "daemon",
+            "eng-1",
+            "COMMIT REMINDER: You have 324 uncommitted lines in your worktree.",
+            200,
+        );
+
+        assert_eq!(classify_message(&ack), MessageCategory::Acknowledgement);
+        assert_eq!(classify_message(&reminder), MessageCategory::Reminder);
+    }
+
+    #[test]
     fn classify_manual_review_notice_as_review_request() {
         let msg = make_msg(
             "eng-1",
@@ -1468,8 +1587,11 @@ mod tests {
             "Utilization recovery needed: 2 idle engineer(s), top task #42.",
         );
 
-        assert_eq!(classify_message(&dispatch), MessageCategory::Blocker);
-        assert_eq!(classify_message(&utilization), MessageCategory::Blocker);
+        assert_eq!(classify_message(&dispatch), MessageCategory::DispatchAction);
+        assert_eq!(
+            classify_message(&utilization),
+            MessageCategory::DispatchAction
+        );
     }
 
     #[test]
@@ -1481,6 +1603,93 @@ mod tests {
         );
 
         assert_eq!(classify_message(&recovery), MessageCategory::Status);
+    }
+
+    #[test]
+    fn digest_prioritizes_review_dispatch_and_completion_before_reminders_and_acks() {
+        let completion = r#"{"task_id":708,"branch":"eng-1-3/708","tests_passed":true,"outcome":"ready_for_review"}"#;
+        let msgs: Vec<(InboxMessage, bool)> = vec![
+            (
+                make_msg(
+                    "daemon",
+                    "manager",
+                    "COMMIT REMINDER: You have uncommitted work.",
+                    100,
+                ),
+                true,
+            ),
+            (
+                make_msg(
+                    "manager",
+                    "eng-1",
+                    "REVIEW PASSED #696: merged to main and moved to done.",
+                    200,
+                ),
+                true,
+            ),
+            (make_msg("eng-1", "manager", completion, 300), false),
+            (
+                make_msg(
+                    "daemon",
+                    "manager",
+                    "Dispatch recovery needed: idle engineer(s), top task #708.",
+                    400,
+                ),
+                false,
+            ),
+            (
+                make_msg("eng-2", "manager", "Task #709 ready for review", 500),
+                false,
+            ),
+        ];
+
+        let (entries, raw_count) = digest_messages(&msgs);
+        assert_eq!(raw_count, 5);
+        let categories: Vec<MessageCategory> = entries.iter().map(|entry| entry.category).collect();
+        assert_eq!(
+            &categories[..3],
+            &[
+                MessageCategory::ReviewRequest,
+                MessageCategory::DispatchAction,
+                MessageCategory::CompletionAction,
+            ]
+        );
+        assert_eq!(
+            &categories[3..],
+            &[MessageCategory::Reminder, MessageCategory::Acknowledgement,]
+        );
+    }
+
+    #[test]
+    fn digest_collapses_repeated_reminders_by_task_and_keeps_latest_context() {
+        let msgs: Vec<(InboxMessage, bool)> = vec![
+            (
+                make_msg(
+                    "daemon",
+                    "manager",
+                    "Your claim on task #708 expires in 5 minutes. Branch: old. Owner: eng-1-3.",
+                    100,
+                ),
+                true,
+            ),
+            (
+                make_msg(
+                    "daemon",
+                    "manager",
+                    "Your claim on task #708 expires in 1 minutes. Branch: eng-1-3/708. Owner: eng-1-3.",
+                    200,
+                ),
+                false,
+            ),
+        ];
+
+        let (entries, raw_count) = digest_messages(&msgs);
+        assert_eq!(raw_count, 2);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].category, MessageCategory::Reminder);
+        assert_eq!(entries[0].collapsed_count, 2);
+        assert!(entries[0].message.body.contains("eng-1-3/708"));
+        assert!(entries[0].message.body.contains("Owner: eng-1-3"));
     }
 
     #[test]
