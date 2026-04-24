@@ -570,7 +570,8 @@ impl TeamDaemon {
             let time_held_secs = claim_time_held_secs(task, now);
             if use_worktrees {
                 let base_branch = engineer_base_branch_name(engineer);
-                match reset_claimed_worktree_to_base(&work_dir, &base_branch) {
+                let trunk_branch = self.config.team_config.trunk_branch().to_string();
+                match reset_claimed_worktree_to_base(&work_dir, &base_branch, &trunk_branch) {
                     Ok(reason) if reason.reset_performed() => {
                         self.record_orchestrator_action(format!(
                             "claim ttl: reset {} worktree to {} before reclaiming task #{} ({})",
@@ -752,7 +753,8 @@ impl TeamDaemon {
             return;
         }
 
-        match reset_claimed_worktree_to_base(&worktree_dir, &base_branch) {
+        let trunk_branch = self.config.team_config.trunk_branch().to_string();
+        match reset_claimed_worktree_to_base(&worktree_dir, &base_branch, &trunk_branch) {
             Ok(reset_reason) if reset_reason.reset_performed() => {
                 info!(
                     engineer = %engineer,
@@ -2645,7 +2647,7 @@ impl TeamDaemon {
                 .collect();
 
             if branch == base_branch {
-                match crate::team::task_loop::refresh_engineer_worktree(
+                match crate::team::task_loop::refresh_engineer_worktree_from_trunk(
                     &self.config.project_root,
                     &worktree_dir,
                     &base_branch,
@@ -2657,14 +2659,15 @@ impl TeamDaemon {
                         info!(
                             engineer = %engineer,
                             branch = %base_branch,
-                            "auto-refreshed engineer worktree after main advanced"
+                            trunk_branch = %trunk_branch,
+                            "auto-refreshed engineer worktree after trunk advanced"
                         );
                         self.emit_event(TeamEvent::worktree_refreshed(
                             &engineer,
-                            "rebased clean base worktree onto main",
+                            &format!("rebased clean base worktree onto {trunk_branch}"),
                         ));
                         self.record_orchestrator_action(format!(
-                            "worktree: auto-rebased clean base worktree for {engineer} onto main"
+                            "worktree: auto-rebased clean base worktree for {engineer} onto {trunk_branch}"
                         ));
                     }
                     Ok(crate::team::task_loop::WorktreeRefreshAction::Unchanged)
@@ -2700,31 +2703,33 @@ impl TeamDaemon {
                 continue;
             }
 
-            let merged = match branch_is_merged_into(&self.config.project_root, &branch, "main") {
-                Ok(m) => m,
-                Err(_) => continue,
-            };
+            let merged =
+                match branch_is_merged_into(&self.config.project_root, &branch, &trunk_branch) {
+                    Ok(m) => m,
+                    Err(_) => continue,
+                };
 
             if !merged {
                 continue;
             }
 
-            // SAFETY: never reset a worktree that has work ahead of main.
+            // SAFETY: never reset a worktree that has work ahead of trunk.
             // During stop/start cycles, active_tasks can be empty momentarily
             // while the engineer still has unmerged commits.
-            if let Ok(ahead) = crate::worktree::commits_ahead(&worktree_dir, "main") {
+            if let Ok(ahead) = crate::worktree::commits_ahead(&worktree_dir, &trunk_branch) {
                 if ahead > 0 {
                     debug!(
                         engineer = %engineer,
                         branch = %branch,
                         ahead,
-                        "worktree has commits ahead of main; skipping reconciliation"
+                        trunk_branch = %trunk_branch,
+                        "worktree has commits ahead of trunk; skipping reconciliation"
                     );
                     continue;
                 }
             }
 
-            match reset_claimed_worktree_to_base(&worktree_dir, &base_branch) {
+            match reset_claimed_worktree_to_base(&worktree_dir, &base_branch, &trunk_branch) {
                 Ok(reset_reason) if reset_reason.reset_performed() => {
                     info!(
                         engineer = %engineer,
