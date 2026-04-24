@@ -19,6 +19,8 @@ use crate::team::supervisory_notice::{
     extract_task_id, is_idle_nudge, is_review_nudge, is_status_update_normalized, normalized_body,
 };
 
+const MANAGER_DIGEST_BACKPRESSURE_COOLDOWN_SECS: u64 = 30;
+
 /// Extract a task ID from assignment body text like "Task #42: ..." or "Task #42 ...".
 fn extract_task_id_from_body(body: &str) -> Option<u32> {
     let body = body.trim();
@@ -549,6 +551,24 @@ impl TeamDaemon {
         })
     }
 
+    fn pending_ack_contains_any_inbox_id(&self, messages: &[inbox::InboxMessage]) -> bool {
+        messages
+            .iter()
+            .any(|message| self.pending_ack_contains_inbox_id(&message.id))
+    }
+
+    fn manager_digest_backpressure_key(member_name: &str) -> String {
+        format!("manager-digest-backpressure::{member_name}")
+    }
+
+    fn manager_digest_backpressure_on_cooldown(&self, member_name: &str) -> bool {
+        self.intervention_cooldowns
+            .get(&Self::manager_digest_backpressure_key(member_name))
+            .is_some_and(|sent_at| {
+                sent_at.elapsed() < Duration::from_secs(MANAGER_DIGEST_BACKPRESSURE_COOLDOWN_SECS)
+            })
+    }
+
     fn enqueue_pending_shim_ack(
         &mut self,
         message_id: String,
@@ -978,6 +998,7 @@ impl TeamDaemon {
                 let digestible_messages: Vec<inbox::InboxMessage> = messages
                     .iter()
                     .filter(|msg| !suppressed_ids.contains(&msg.id))
+                    .filter(|msg| !self.pending_ack_contains_inbox_id(&msg.id))
                     .filter(|msg| matches!(msg.msg_type, inbox::MessageType::Send))
                     .filter(|msg| should_batch_manager_notice(classify_manager_notice(&msg.body)))
                     .cloned()
@@ -1219,7 +1240,7 @@ impl TeamDaemon {
                 std::thread::sleep(Duration::from_secs(1));
             }
 
-            if let Some(digest_messages) = pending_manager_digest.as_ref() {
+            if !delivered_any && let Some(digest_messages) = pending_manager_digest.as_ref() {
                 let flushed_ids = self.flush_manager_digest(&root, name, digest_messages)?;
                 if !flushed_ids.is_empty() {
                     delivered_any = true;
@@ -1295,7 +1316,27 @@ impl TeamDaemon {
         messages: &[inbox::InboxMessage],
     ) -> Result<Vec<String>> {
         let sender = self.automation_sender_for(member_name);
-        if !self.shim_handles.contains_key(member_name) {
+        if !self
+            .shim_handles
+            .get(member_name)
+            .is_some_and(|handle| handle.is_ready())
+        {
+            return Ok(Vec::new());
+        }
+        if self.pending_ack_contains_any_inbox_id(messages) {
+            debug!(
+                to = %member_name,
+                count = messages.len(),
+                "skipping manager supervisory digest while prior digest ack is pending"
+            );
+            return Ok(Vec::new());
+        }
+        if self.manager_digest_backpressure_on_cooldown(member_name) {
+            debug!(
+                to = %member_name,
+                count = messages.len(),
+                "skipping manager supervisory digest while backpressure cooldown is active"
+            );
             return Ok(Vec::new());
         }
 
@@ -1331,8 +1372,14 @@ impl TeamDaemon {
                 error = %error,
                 "failed to deliver manager supervisory digest"
             );
+            self.intervention_cooldowns.insert(
+                Self::manager_digest_backpressure_key(member_name),
+                Instant::now(),
+            );
             return Ok(Vec::new());
         }
+        self.intervention_cooldowns
+            .remove(&Self::manager_digest_backpressure_key(member_name));
         let mut class_counts: std::collections::HashMap<&'static str, usize> =
             std::collections::HashMap::new();
         for entry in &digest.entries {
@@ -2505,7 +2552,7 @@ mod tests {
     }
 
     #[test]
-    fn manager_inbox_delivers_completion_before_low_signal_digest() {
+    fn manager_inbox_defers_low_signal_digest_until_completion_is_acked() {
         let tmp = tempfile::tempdir().unwrap();
         let mut daemon = failed_delivery_test_daemon(&tmp);
         let root = inbox::inboxes_root(tmp.path());
@@ -2559,6 +2606,13 @@ mod tests {
             "manager".to_string(),
             crate::team::standup::MemberState::Idle,
         );
+        daemon
+            .shim_handles
+            .get_mut("manager")
+            .unwrap()
+            .channel
+            .set_read_timeout(Some(Duration::from_millis(5)))
+            .unwrap();
 
         daemon.deliver_inbox_messages().unwrap();
 
@@ -2566,15 +2620,50 @@ mod tests {
             .set_read_timeout(Some(Duration::from_secs(5)))
             .unwrap();
         let first_cmd: crate::shim::protocol::Command = child_channel.recv().unwrap().unwrap();
-        match first_cmd {
-            crate::shim::protocol::Command::SendMessage { body, .. } => {
+        let completion_message_id = match first_cmd {
+            crate::shim::protocol::Command::SendMessage {
+                body, message_id, ..
+            } => {
                 assert!(body.contains("requires manual review"));
+                message_id.expect("completion delivery should carry a shim message id")
             }
             other => panic!("expected SendMessage, got {other:?}"),
-        }
+        };
 
-        let second_cmd: crate::shim::protocol::Command = child_channel.recv().unwrap().unwrap();
-        match second_cmd {
+        child_channel
+            .set_read_timeout(Some(Duration::from_millis(25)))
+            .unwrap();
+        let second_cmd: Result<Option<crate::shim::protocol::Command>, _> = child_channel.recv();
+        assert!(
+            second_cmd.is_err(),
+            "digest should wait until the completion delivery is acknowledged"
+        );
+
+        child_channel
+            .send(&crate::shim::protocol::Event::MessageDelivered {
+                id: completion_message_id,
+            })
+            .unwrap();
+        child_channel
+            .send(&crate::shim::protocol::Event::StateChanged {
+                from: crate::shim::protocol::ShimState::Working,
+                to: crate::shim::protocol::ShimState::Idle,
+                summary: "ready".to_string(),
+            })
+            .unwrap();
+        daemon.poll_shim_handles().unwrap();
+        daemon.states.insert(
+            "manager".to_string(),
+            crate::team::standup::MemberState::Idle,
+        );
+
+        daemon.deliver_inbox_messages().unwrap();
+
+        child_channel
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let digest_cmd: crate::shim::protocol::Command = child_channel.recv().unwrap().unwrap();
+        match digest_cmd {
             crate::shim::protocol::Command::SendMessage { body, .. } => {
                 assert!(body.contains("[manager-digest]"));
                 assert!(body.contains("review [architect]"));
