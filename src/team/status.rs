@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -704,17 +704,53 @@ pub(crate) fn worktree_staleness_by_member(
                 return None;
             }
 
-            match super::task_loop::worktree_commits_behind_main(&worktree_dir) {
-                Ok(count) => Some((member.name.clone(), count)),
-                Err(error) => {
-                    warn!(
-                        member = %member.name,
-                        error = %error,
-                        "failed to measure engineer worktree staleness for status"
-                    );
-                    None
+            let mut max_count: Option<u32> = None;
+            for repo in status_worktree_repo_targets(&worktree_dir) {
+                match super::task_loop::worktree_commits_behind_main(&repo.path) {
+                    Ok(count) => {
+                        max_count = Some(match max_count {
+                            Some(current) => current.max(count),
+                            None => count,
+                        });
+                    }
+                    Err(error) => {
+                        warn!(
+                            member = %member.name,
+                            repo = repo.label.as_deref().unwrap_or("<root>"),
+                            worktree = %repo.path.display(),
+                            error = %error,
+                            "failed to measure engineer worktree staleness for status"
+                        );
+                    }
                 }
             }
+
+            max_count.map(|count| (member.name.clone(), count))
+        })
+        .collect()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StatusWorktreeRepoTarget {
+    label: Option<String>,
+    path: PathBuf,
+}
+
+fn status_worktree_repo_targets(worktree_dir: &Path) -> Vec<StatusWorktreeRepoTarget> {
+    if super::git_cmd::is_git_repo(worktree_dir) {
+        return vec![StatusWorktreeRepoTarget {
+            label: None,
+            path: worktree_dir.to_path_buf(),
+        }];
+    }
+
+    super::git_cmd::discover_sub_repos(worktree_dir)
+        .into_iter()
+        .map(|path| StatusWorktreeRepoTarget {
+            label: path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned()),
+            path,
         })
         .collect()
 }
@@ -3280,6 +3316,62 @@ mod tests {
         let mismatches = branch_mismatch_by_member(&repo, &[member]);
 
         assert!(mismatches.is_empty());
+    }
+
+    #[test]
+    fn status_worktree_repo_targets_discovers_git_children_under_non_git_worktree_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let worktree_dir = tmp.path().join(".batty").join("worktrees").join("eng-1");
+        let sub_repo = worktree_dir.join("repo");
+        fs::create_dir_all(&sub_repo).unwrap();
+        crate::team::test_support::git_ok(&sub_repo, &["init", "-b", "main"]);
+        crate::team::test_support::git_ok(
+            &sub_repo,
+            &["config", "user.email", "batty@example.com"],
+        );
+        crate::team::test_support::git_ok(&sub_repo, &["config", "user.name", "Batty Tests"]);
+        fs::write(sub_repo.join("README.md"), "hello\n").unwrap();
+        crate::team::test_support::git_ok(&sub_repo, &["add", "README.md"]);
+        crate::team::test_support::git_ok(&sub_repo, &["commit", "-m", "initial"]);
+
+        let targets = status_worktree_repo_targets(&worktree_dir);
+
+        assert_eq!(
+            targets,
+            vec![StatusWorktreeRepoTarget {
+                label: Some("repo".to_string()),
+                path: sub_repo,
+            }]
+        );
+    }
+
+    #[test]
+    fn worktree_staleness_by_member_uses_subrepos_for_multi_repo_worktrees() {
+        let tmp = tempfile::tempdir().unwrap();
+        let worktree_dir = tmp.path().join(".batty").join("worktrees").join("eng-1");
+        let sub_repo = worktree_dir.join("repo");
+        fs::create_dir_all(&sub_repo).unwrap();
+        crate::team::test_support::git_ok(&sub_repo, &["init", "-b", "main"]);
+        crate::team::test_support::git_ok(
+            &sub_repo,
+            &["config", "user.email", "batty@example.com"],
+        );
+        crate::team::test_support::git_ok(&sub_repo, &["config", "user.name", "Batty Tests"]);
+        fs::write(sub_repo.join("README.md"), "base\n").unwrap();
+        crate::team::test_support::git_ok(&sub_repo, &["add", "README.md"]);
+        crate::team::test_support::git_ok(&sub_repo, &["commit", "-m", "initial"]);
+        crate::team::test_support::git_ok(&sub_repo, &["checkout", "-b", "feature"]);
+        crate::team::test_support::git_ok(&sub_repo, &["checkout", "main"]);
+        fs::write(sub_repo.join("README.md"), "main update\n").unwrap();
+        crate::team::test_support::git_ok(&sub_repo, &["commit", "-am", "main update"]);
+        crate::team::test_support::git_ok(&sub_repo, &["checkout", "feature"]);
+
+        let mut member = engineer("eng-1");
+        member.use_worktrees = true;
+
+        let staleness = worktree_staleness_by_member(tmp.path(), &[member]);
+
+        assert_eq!(staleness.get("eng-1"), Some(&1));
     }
 
     #[test]
