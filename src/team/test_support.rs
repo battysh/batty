@@ -449,6 +449,7 @@ impl<'a> TestDaemonBuilder<'a> {
             project_root: self.project_root.to_path_buf(),
             team_config: TeamConfig {
                 name: "test".to_string(),
+                workspace_type: crate::team::config::WorkspaceType::Generic,
                 agent: None,
                 workflow_mode: WorkflowMode::Legacy,
                 workflow_policy: self.workflow_policy,

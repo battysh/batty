@@ -19,9 +19,9 @@ mod tests;
 use super::super::events::TeamEvent;
 use super::super::task_loop::engineer_base_branch_name;
 use super::super::task_loop::prepare_engineer_assignment_worktree;
-use super::super::task_loop::prepare_multi_repo_assignment_worktree;
 use super::super::task_loop::refresh_engineer_worktree_if_stale;
 use super::super::task_loop::{WorktreeRefreshAction, WorktreeRefreshOutcome};
+use super::super::workspace::prepare_workspace_assignment_worktree;
 use super::helpers::describe_command_failure;
 use super::launcher::{
     agent_supports_sdk_mode, canonical_agent_name, new_member_session_id, strip_nudge_section,
@@ -204,7 +204,7 @@ impl TeamDaemon {
             }
         }
         let work_dir = if let Some(task_branch) = task_branch.as_deref() {
-            let work_dir = project_root.join(".batty").join("worktrees").join(engineer);
+            let work_dir = self.worktree_dir(engineer);
             let base_branch = engineer_base_branch_name(engineer);
             if self.is_multi_repo {
                 let sub_repo_names = self.sub_repo_names.clone();
@@ -220,8 +220,9 @@ impl TeamDaemon {
                         Some(repo_name),
                     )?;
                 }
-                prepare_multi_repo_assignment_worktree(
+                prepare_workspace_assignment_worktree(
                     &project_root,
+                    self.config.team_config.workspace_type,
                     &work_dir,
                     engineer,
                     task_branch,

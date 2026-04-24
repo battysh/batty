@@ -353,6 +353,7 @@ exit 1
     pub fn test_team_config(name: &str) -> TeamConfig {
         TeamConfig {
             name: name.to_string(),
+            workspace_type: crate::team::config::WorkspaceType::Generic,
             agent: None,
             workflow_mode: WorkflowMode::Legacy,
             workflow_policy: WorkflowPolicy::default(),
