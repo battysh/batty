@@ -708,6 +708,7 @@ pub fn validate_team(project_root: &Path, verbose: bool) -> Result<()> {
     } else {
         team_config.validate()?;
     }
+    team_config.validate_project_refs(project_root)?;
 
     validate_board_layout(project_root, &team_config)?;
 

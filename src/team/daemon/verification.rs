@@ -52,7 +52,8 @@ pub(crate) fn run_automatic_verification(
     let test_run = run_tests_in_worktree(worktree_dir, test_command)?;
     let (failures, _failure_paths) =
         parse_test_output(&test_run.output, &test_run.results, test_run.passed);
-    let file_paths = changed_files_from_main(worktree_dir)?;
+    let file_paths =
+        changed_files_from_trunk(worktree_dir, &trunk_branch_for_worktree(worktree_dir)?)?;
     Ok(VerificationRunResult {
         passed: test_run.passed,
         output: test_run.output,
@@ -146,7 +147,8 @@ fn task_mismatch_validation_failure(worktree_dir: &Path) -> Result<Option<Verifi
     };
 
     let branch_name = current_branch_name(worktree_dir)?;
-    let commit_messages = commit_subjects_since_main(worktree_dir)?;
+    let commit_messages =
+        commit_subjects_since_trunk(worktree_dir, &trunk_branch_for_project(&project_root)?)?;
     let blockers = task_reference_mismatch_blockers(task.id, &branch_name, &commit_messages);
     if blockers.is_empty() {
         return Ok(None);
@@ -201,8 +203,16 @@ pub(crate) fn is_scope_ack_message(body: &str, task_id: u32) -> bool {
 }
 
 pub(crate) fn changed_files_from_main(worktree_dir: &Path) -> Result<Vec<String>> {
+    changed_files_from_trunk(worktree_dir, "main")
+}
+
+pub(crate) fn changed_files_from_trunk(
+    worktree_dir: &Path,
+    trunk_branch: &str,
+) -> Result<Vec<String>> {
+    let range = format!("{trunk_branch}..HEAD");
     let output = std::process::Command::new("git")
-        .args(["diff", "--name-only", "main..HEAD"])
+        .args(["diff", "--name-only", &range])
         .current_dir(worktree_dir)
         .output()
         .with_context(|| format!("failed to run git diff in {}", worktree_dir.display()))?;
@@ -210,7 +220,7 @@ pub(crate) fn changed_files_from_main(worktree_dir: &Path) -> Result<Vec<String>
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         anyhow::bail!(
-            "git diff --name-only main..HEAD failed in {}: {}",
+            "git diff --name-only {range} failed in {}: {}",
             worktree_dir.display(),
             stderr.trim()
         );
@@ -243,9 +253,15 @@ fn current_branch_name(worktree_dir: &Path) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn commit_subjects_since_main(worktree_dir: &Path) -> Result<Vec<String>> {
+    commit_subjects_since_trunk(worktree_dir, "main")
+}
+
+fn commit_subjects_since_trunk(worktree_dir: &Path, trunk_branch: &str) -> Result<Vec<String>> {
+    let range = format!("{trunk_branch}..HEAD");
     let output = std::process::Command::new("git")
-        .args(["log", "--format=%s", "main..HEAD"])
+        .args(["log", "--format=%s", &range])
         .current_dir(worktree_dir)
         .output()
         .with_context(|| {
@@ -258,7 +274,7 @@ fn commit_subjects_since_main(worktree_dir: &Path) -> Result<Vec<String>> {
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         anyhow::bail!(
-            "git log --format=%s main..HEAD failed in {}: {}",
+            "git log --format=%s {range} failed in {}: {}",
             worktree_dir.display(),
             stderr.trim()
         );
@@ -270,6 +286,26 @@ fn commit_subjects_since_main(worktree_dir: &Path) -> Result<Vec<String>> {
         .filter(|line| !line.is_empty())
         .map(|line| line.to_string())
         .collect())
+}
+
+fn trunk_branch_for_worktree(worktree_dir: &Path) -> Result<String> {
+    let Some((project_root, _)) = engineer_worktree_context(worktree_dir) else {
+        return Ok("main".to_string());
+    };
+    trunk_branch_for_project(&project_root)
+}
+
+fn trunk_branch_for_project(project_root: &Path) -> Result<String> {
+    let team_config_path = project_root
+        .join(".batty")
+        .join("team_config")
+        .join("team.yaml");
+    if !team_config_path.is_file() {
+        return Ok("main".to_string());
+    }
+    let team_config = TeamConfig::load(&team_config_path)
+        .with_context(|| format!("failed to load {}", team_config_path.display()))?;
+    Ok(team_config.trunk_branch().to_string())
 }
 
 pub(crate) fn validate_declared_scope(
@@ -353,7 +389,8 @@ pub(crate) fn inspect_scope_fence(worktree_dir: &Path) -> Result<Option<ScopeFen
 
     let task_text = std::fs::read_to_string(&task.source_path)
         .with_context(|| format!("failed to read {}", task.source_path.display()))?;
-    let changed_files = changed_files_from_main(worktree_dir)?;
+    let changed_files =
+        changed_files_from_trunk(worktree_dir, &trunk_branch_for_project(&project_root)?)?;
     let scope = validate_declared_scope(&task_text, &changed_files);
     if scope.declared_scope.is_empty() {
         return Ok(None);

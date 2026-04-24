@@ -194,6 +194,7 @@ impl TeamDaemon {
             .filter(|m| m.role_type == RoleType::Engineer && m.use_worktrees)
             .map(|m| m.name.clone())
             .collect();
+        let trunk_branch = self.config.team_config.trunk_branch().to_string();
 
         for name in &members {
             let worktree_path = self.worktree_dir(name);
@@ -216,10 +217,11 @@ impl TeamDaemon {
                         worktree = %repo_path.display(),
                         "worktree has unresolved merge conflicts; auto-recovering via merge --abort and reset"
                     );
-                    match crate::worktree::reset_worktree_to_base_if_clean(
+                    match crate::worktree::reset_worktree_to_base_if_clean_from_trunk(
                         repo_path,
                         &base,
                         "merge-conflict recovery",
+                        &trunk_branch,
                     ) {
                         Err(error) => {
                             warn!(
@@ -292,8 +294,8 @@ impl TeamDaemon {
                     }
                 };
 
-                // Skip if already on base branch or main.
-                if current_branch == base || current_branch == "main" {
+                // Skip if already on base branch or trunk.
+                if current_branch == base || current_branch == trunk_branch {
                     continue;
                 }
 
@@ -302,17 +304,17 @@ impl TeamDaemon {
                     continue;
                 }
 
-                // SAFETY: never reset a worktree that has commits ahead of main.
+                // SAFETY: never reset a worktree that has commits ahead of trunk.
                 // This protects against the race where active_tasks is empty during
                 // stop/start cycles but the engineer has uncommitted or unmerged work.
-                match crate::worktree::commits_ahead(repo_path, "main") {
+                match crate::worktree::commits_ahead(repo_path, &trunk_branch) {
                     Ok(ahead) if ahead > 0 => {
                         debug!(
                             member = %name,
                             repo = repo_name,
                             branch = %current_branch,
                             ahead,
-                            "worktree has {} commits ahead of main; skipping reset",
+                            "worktree has {} commits ahead of trunk; skipping reset",
                             ahead
                         );
                         continue;
@@ -330,7 +332,11 @@ impl TeamDaemon {
                     _ => {}
                 }
 
-                match crate::worktree::branch_fully_merged(repo_path, &current_branch, "main") {
+                match crate::worktree::branch_fully_merged(
+                    repo_path,
+                    &current_branch,
+                    &trunk_branch,
+                ) {
                     Ok(true) => {
                         info!(
                             member = %name,
@@ -338,17 +344,19 @@ impl TeamDaemon {
                             branch = %current_branch,
                             "stale branch detected; resetting worktree"
                         );
-                        match crate::worktree::reset_worktree_to_base_if_clean(
+                        match crate::worktree::reset_worktree_to_base_if_clean_from_trunk(
                             repo_path,
                             &base,
                             "stale-branch recovery",
+                            &trunk_branch,
                         ) {
                             Ok(reason) if reason.reset_performed() => {
                                 self.record_orchestrator_action(format!(
-                                    "runtime: auto-reset {}'s {} worktree — branch {} already on main ({})",
+                                    "runtime: auto-reset {}'s {} worktree — branch {} already on {} ({})",
                                     name,
                                     repo_name,
                                     current_branch,
+                                    trunk_branch,
                                     reason.as_str()
                                 ));
                             }

@@ -141,14 +141,15 @@ impl TeamDaemon {
 
             if completion_observed && self.active_task_id(name).is_some() {
                 // False-done prevention: verify the engineer's branch has commits
-                // beyond main before triggering completion. Without this check,
+                // beyond trunk before triggering completion. Without this check,
                 // idle engineers with no commits get marked as complete, orphaning
                 // their board task.
                 if self.member_uses_worktrees(name) {
                     let worktree_dir = self.worktree_dir(name);
+                    let range = format!("{}..HEAD", self.config.team_config.trunk_branch());
                     match crate::team::git_cmd::run_git(
                         &worktree_dir,
-                        &["rev-list", "--count", "main..HEAD"],
+                        &["rev-list", "--count", &range],
                     ) {
                         Ok(output) => {
                             let count = output.stdout.trim().parse::<u32>().unwrap_or(0);
@@ -158,8 +159,9 @@ impl TeamDaemon {
                                     "engineer idle but no commits on task branch — skipping completion"
                                 );
                                 self.record_orchestrator_action(format!(
-                                    "false-done prevention: {} reported completion but branch has no commits beyond main",
-                                    name
+                                    "false-done prevention: {} reported completion but branch has no commits beyond {}",
+                                    name,
+                                    self.config.team_config.trunk_branch()
                                 ));
                                 continue;
                             }

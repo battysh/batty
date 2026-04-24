@@ -1,6 +1,6 @@
 //! Core merge and worktree-reset operations.
 //!
-//! `merge_engineer_branch` rebases an engineer's worktree branch onto main and
+//! `merge_engineer_branch` rebases an engineer's worktree branch onto trunk and
 //! fast-forward merges it. `reset_engineer_worktree` returns the worktree to
 //! the engineer's base branch after a successful merge.
 
@@ -11,7 +11,7 @@ use tracing::{info, warn};
 
 use crate::team::task_loop::{
     ADDITIVE_CONFLICT_AUTO_RESOLVE_FENCE, branch_is_merged_into,
-    checkout_worktree_branch_from_main, current_worktree_branch, delete_branch,
+    checkout_worktree_branch_from_trunk, current_worktree_branch, delete_branch,
     engineer_base_branch_name, is_worktree_safe_to_mutate, merge_additive_only_text,
     worktree_has_user_changes,
 };
@@ -30,6 +30,14 @@ pub(crate) fn merge_engineer_branch(
     project_root: &Path,
     engineer_name: &str,
 ) -> Result<MergeOutcome> {
+    merge_engineer_branch_into_trunk(project_root, engineer_name, "main")
+}
+
+pub(crate) fn merge_engineer_branch_into_trunk(
+    project_root: &Path,
+    engineer_name: &str,
+    trunk_branch: &str,
+) -> Result<MergeOutcome> {
     let worktree_dir = project_root
         .join(".batty")
         .join("worktrees")
@@ -46,18 +54,18 @@ pub(crate) fn merge_engineer_branch(
     let branch = current_worktree_branch(&worktree_dir)?;
     info!(engineer = engineer_name, branch = %branch, "merging worktree branch");
 
-    // Fetch latest main into the worktree so rebase sees current state.
+    // Fetch latest trunk into the worktree so rebase sees current state.
     let _ = run_git_with_context(
         &worktree_dir,
-        &["fetch", ".", "main:main"],
-        "fetch main into worktree before rebase",
+        &["fetch", ".", &format!("{trunk_branch}:{trunk_branch}")],
+        &format!("fetch {trunk_branch} into worktree before rebase"),
     );
 
     let rebase = run_git_with_context(
         &worktree_dir,
-        &["rebase", "main"],
+        &["rebase", trunk_branch],
         &format!(
-            "rebase engineer branch '{branch}' onto main before merging for '{engineer_name}'"
+            "rebase engineer branch '{branch}' onto {trunk_branch} before merging for '{engineer_name}'"
         ),
     )?;
 
@@ -75,9 +83,9 @@ pub(crate) fn merge_engineer_branch(
             warn!(engineer = engineer_name, branch = %branch, "rebase conflict during merge");
             return Ok(MergeOutcome::RebaseConflict(describe_git_failure(
                 &worktree_dir,
-                &["rebase", "main"],
+                &["rebase", trunk_branch],
                 &format!(
-                    "rebase engineer branch '{branch}' onto main before merging for '{engineer_name}'"
+                    "rebase engineer branch '{branch}' onto {trunk_branch} before merging for '{engineer_name}'"
                 ),
                 &stderr,
             )));
@@ -105,14 +113,19 @@ pub(crate) fn merge_engineer_branch(
         )));
     }
 
-    let merge_plan = plan_root_merge(project_root).with_context(|| {
+    let merge_plan = plan_root_merge(project_root, trunk_branch).with_context(|| {
         format!("determine merge strategy for engineer branch '{branch}' from '{engineer_name}'")
     })?;
     let merge_result = match merge_plan.mode {
-        MergeMode::DirectRoot => merge_branch_into_root_main(project_root, engineer_name, &branch),
-        MergeMode::IsolatedIntegration => {
-            merge_branch_via_isolated_integration(project_root, engineer_name, &branch)
+        MergeMode::DirectRoot => {
+            merge_branch_into_root_trunk(project_root, engineer_name, &branch, trunk_branch)
         }
+        MergeMode::IsolatedIntegration => merge_branch_via_isolated_integration(
+            project_root,
+            engineer_name,
+            &branch,
+            trunk_branch,
+        ),
     };
     if let Err(error) = merge_result {
         let prefix = match merge_plan.mode {
@@ -136,7 +149,8 @@ pub(crate) fn merge_engineer_branch(
 
     println!("Merged branch '{branch}' from {engineer_name}");
 
-    if let Err(error) = reset_engineer_worktree(project_root, engineer_name) {
+    if let Err(error) = reset_engineer_worktree_to_trunk(project_root, engineer_name, trunk_branch)
+    {
         warn!(
             engineer = engineer_name,
             error = %error,
@@ -150,10 +164,10 @@ pub(crate) fn merge_engineer_branch(
     }))
 }
 
-fn plan_root_merge(project_root: &Path) -> Result<RootMergePlan> {
+fn plan_root_merge(project_root: &Path, trunk_branch: &str) -> Result<RootMergePlan> {
     let branch = current_worktree_branch(project_root).unwrap_or_else(|_| "HEAD".to_string());
     let has_user_changes = worktree_has_user_changes(project_root)?;
-    if branch == "main" && !has_user_changes {
+    if branch == trunk_branch && !has_user_changes {
         return Ok(RootMergePlan {
             mode: MergeMode::DirectRoot,
             reason: None,
@@ -161,11 +175,13 @@ fn plan_root_merge(project_root: &Path) -> Result<RootMergePlan> {
     }
 
     let reason = match (branch.as_str(), has_user_changes) {
-        ("main", true) => "root main checkout has local changes".to_string(),
+        (branch, true) if branch == trunk_branch => {
+            format!("root {trunk_branch} checkout has local changes")
+        }
         ("HEAD", true) => "root checkout is detached HEAD with local changes".to_string(),
         ("HEAD", false) => "root checkout is detached HEAD".to_string(),
         (other, true) => format!("root checkout is on '{other}' with local changes"),
-        (other, false) => format!("root checkout is on '{other}' instead of 'main'"),
+        (other, false) => format!("root checkout is on '{other}' instead of '{trunk_branch}'"),
     };
     Ok(RootMergePlan {
         mode: MergeMode::IsolatedIntegration,
@@ -173,15 +189,16 @@ fn plan_root_merge(project_root: &Path) -> Result<RootMergePlan> {
     })
 }
 
-fn merge_branch_into_root_main(
+fn merge_branch_into_root_trunk(
     project_root: &Path,
     engineer_name: &str,
     branch: &str,
+    trunk_branch: &str,
 ) -> Result<()> {
     let output = run_git_with_context(
         project_root,
         &["merge", branch, "--no-edit"],
-        &format!("merge engineer branch '{branch}' from '{engineer_name}' into main"),
+        &format!("merge engineer branch '{branch}' from '{engineer_name}' into {trunk_branch}"),
     )?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -190,7 +207,9 @@ fn merge_branch_into_root_main(
             describe_git_failure(
                 project_root,
                 &["merge", branch, "--no-edit"],
-                &format!("merge engineer branch '{branch}' from '{engineer_name}' into main"),
+                &format!(
+                    "merge engineer branch '{branch}' from '{engineer_name}' into {trunk_branch}"
+                ),
                 &stderr,
             )
         );
@@ -202,23 +221,24 @@ fn merge_branch_via_isolated_integration(
     project_root: &Path,
     engineer_name: &str,
     branch: &str,
+    trunk_branch: &str,
 ) -> Result<()> {
-    let main_before = run_git_with_context(
+    let trunk_before = run_git_with_context(
         project_root,
-        &["rev-parse", "refs/heads/main"],
-        "capture main ref before isolated merge",
+        &["rev-parse", &format!("refs/heads/{trunk_branch}")],
+        &format!("capture {trunk_branch} ref before isolated merge"),
     )?;
-    if !main_before.status.success() {
+    if !trunk_before.status.success() {
         bail!(
-            "failed to read main ref before isolated merge: {}",
-            String::from_utf8_lossy(&main_before.stderr).trim()
+            "failed to read {trunk_branch} ref before isolated merge: {}",
+            String::from_utf8_lossy(&trunk_before.stderr).trim()
         );
     }
-    let main_before = String::from_utf8_lossy(&main_before.stdout)
+    let trunk_before = String::from_utf8_lossy(&trunk_before.stdout)
         .trim()
         .to_string();
     let integration =
-        crate::worktree::prepare_integration_worktree(project_root, "merge-main-", "main")?;
+        crate::worktree::prepare_integration_worktree(project_root, "merge-main-", trunk_branch)?;
     let merge = run_git_with_context(
         integration.path(),
         &["merge", branch, "--no-edit"],
@@ -255,20 +275,20 @@ fn merge_branch_via_isolated_integration(
     let integration_head = String::from_utf8_lossy(&integration_head.stdout)
         .trim()
         .to_string();
-    let advance_main = run_git_with_context(
+    let advance_trunk = run_git_with_context(
         project_root,
         &[
             "update-ref",
-            "refs/heads/main",
+            &format!("refs/heads/{trunk_branch}"),
             integration_head.as_str(),
-            main_before.as_str(),
+            trunk_before.as_str(),
         ],
-        "advance main ref after isolated merge",
+        &format!("advance {trunk_branch} ref after isolated merge"),
     )?;
-    if !advance_main.status.success() {
+    if !advance_trunk.status.success() {
         bail!(
-            "failed to advance main after isolated merge: {}",
-            String::from_utf8_lossy(&advance_main.stderr).trim()
+            "failed to advance {trunk_branch} after isolated merge: {}",
+            String::from_utf8_lossy(&advance_trunk.stderr).trim()
         );
     }
     Ok(())
@@ -419,7 +439,16 @@ fn read_conflict_stage(worktree_dir: &Path, stage: u8, path: &str) -> Option<Str
     String::from_utf8(output.stdout).ok()
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn reset_engineer_worktree(project_root: &Path, engineer_name: &str) -> Result<()> {
+    reset_engineer_worktree_to_trunk(project_root, engineer_name, "main")
+}
+
+pub(crate) fn reset_engineer_worktree_to_trunk(
+    project_root: &Path,
+    engineer_name: &str,
+    trunk_branch: &str,
+) -> Result<()> {
     let worktree_dir = project_root
         .join(".batty")
         .join("worktrees")
@@ -446,7 +475,9 @@ pub(crate) fn reset_engineer_worktree(project_root: &Path, engineer_name: &str) 
     // Without this, `checkout -B` fails when the worktree is dirty.
     force_clean_worktree(&worktree_dir, engineer_name);
 
-    if let Err(error) = checkout_worktree_branch_from_main(&worktree_dir, &base_branch) {
+    if let Err(error) =
+        checkout_worktree_branch_from_trunk(&worktree_dir, &base_branch, trunk_branch)
+    {
         warn!(
             engineer = engineer_name,
             current_branch = %previous_branch,
@@ -481,7 +512,7 @@ pub(crate) fn reset_engineer_worktree(project_root: &Path, engineer_name: &str) 
         && previous_branch != "HEAD"
         && (previous_branch == engineer_name
             || previous_branch.starts_with(&format!("{engineer_name}/")))
-        && branch_is_merged_into(project_root, &previous_branch, "main")?
+        && branch_is_merged_into(project_root, &previous_branch, trunk_branch)?
         && let Err(error) = delete_branch(project_root, &previous_branch)
     {
         warn!(
@@ -496,7 +527,7 @@ pub(crate) fn reset_engineer_worktree(project_root: &Path, engineer_name: &str) 
         engineer = engineer_name,
         branch = %base_branch,
         worktree = %worktree_dir.display(),
-        "reset worktree to main after merge"
+        "reset worktree to trunk after merge"
     );
     Ok(())
 }

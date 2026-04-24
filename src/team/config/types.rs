@@ -10,6 +10,10 @@ use super::super::DEFAULT_EVENT_LOG_MAX_BYTES;
 pub struct TeamConfig {
     pub name: String,
     pub workspace_type: WorkspaceType,
+    /// Repository trunk branch used for git comparisons, worktree resets, and
+    /// merge verification. Defaults to `main`; Amazon/Brazil workspaces can set
+    /// this to `mainline`.
+    pub trunk_branch: String,
     /// Team-level default agent backend. Individual roles can override this
     /// with their own `agent` field. Resolution order:
     /// role-level agent > team-level agent > "claude" (hardcoded default).
@@ -66,6 +70,8 @@ struct TeamConfigWire {
     pub name: String,
     #[serde(default)]
     pub workspace_type: WorkspaceType,
+    #[serde(default = "default_trunk_branch")]
+    pub trunk_branch: String,
     #[serde(default)]
     pub agent: Option<String>,
     #[serde(default)]
@@ -131,6 +137,7 @@ impl From<TeamConfigWire> for TeamConfig {
         Self {
             name: wire.name,
             workspace_type: wire.workspace_type,
+            trunk_branch: wire.trunk_branch,
             agent: wire.agent,
             workflow_mode,
             board: wire.board,
@@ -209,6 +216,10 @@ fn default_use_sdk_mode() -> bool {
 
 fn default_auto_respawn_on_crash() -> bool {
     true
+}
+
+pub fn default_trunk_branch() -> String {
+    "main".to_string()
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]

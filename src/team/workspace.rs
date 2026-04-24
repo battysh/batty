@@ -5,7 +5,9 @@ use anyhow::{Context, Result};
 use tracing::warn;
 
 use super::config::WorkspaceType;
-use super::task_loop::{prepare_multi_repo_assignment_worktree, setup_multi_repo_worktree};
+use super::task_loop::{
+    prepare_multi_repo_assignment_worktree_from_trunk, setup_multi_repo_worktree_from_trunk,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkspaceRepoTarget {
@@ -81,13 +83,15 @@ pub fn setup_workspace_worktree(
     branch_name: &str,
     team_config_dir: &Path,
     sub_repo_names: &[String],
+    trunk_branch: &str,
 ) -> Result<PathBuf> {
-    setup_multi_repo_worktree(
+    setup_multi_repo_worktree_from_trunk(
         project_root,
         worktree_dir,
         branch_name,
         team_config_dir,
         sub_repo_names,
+        trunk_branch,
     )?;
     register_brazil_workspace_if_needed(workspace_type, worktree_dir, sub_repo_names)?;
     Ok(worktree_dir.to_path_buf())
@@ -101,14 +105,16 @@ pub fn prepare_workspace_assignment_worktree(
     task_branch: &str,
     team_config_dir: &Path,
     sub_repo_names: &[String],
+    trunk_branch: &str,
 ) -> Result<PathBuf> {
-    prepare_multi_repo_assignment_worktree(
+    prepare_multi_repo_assignment_worktree_from_trunk(
         project_root,
         worktree_dir,
         engineer_name,
         task_branch,
         team_config_dir,
         sub_repo_names,
+        trunk_branch,
     )?;
     register_brazil_workspace_if_needed(workspace_type, worktree_dir, sub_repo_names)?;
     Ok(worktree_dir.to_path_buf())

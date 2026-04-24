@@ -665,6 +665,7 @@ mod tests {
         TeamConfig {
             name: "batty".to_string(),
             workspace_type: crate::team::config::WorkspaceType::Generic,
+            trunk_branch: crate::team::config::default_trunk_branch(),
             agent: None,
             workflow_mode: WorkflowMode::Legacy,
             board: Default::default(),

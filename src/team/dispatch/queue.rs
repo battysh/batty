@@ -9,7 +9,7 @@ use regex::Regex;
 use tracing::{debug, info, warn};
 
 use super::super::super::policy::check_wip_limit;
-use super::super::super::task_loop::engineer_worktree_ready_for_dispatch;
+use super::super::super::task_loop::engineer_worktree_ready_for_dispatch_from_trunk;
 use super::super::task_cmd::{
     StatusTransitionAttribution, append_task_dependencies, assign_task_owners,
     transition_task_with_attribution,
@@ -1221,10 +1221,11 @@ impl TeamDaemon {
             let member_uses_worktrees = self.member_uses_worktrees(&entry.engineer);
             if member_uses_worktrees {
                 let worktree_dir = self.worktree_dir(&entry.engineer);
-                if let Err(error) = engineer_worktree_ready_for_dispatch(
+                if let Err(error) = engineer_worktree_ready_for_dispatch_from_trunk(
                     &self.config.project_root,
                     &worktree_dir,
                     &entry.engineer,
+                    self.config.team_config.trunk_branch(),
                 ) {
                     entry.validation_failures += 1;
                     entry.last_failure = Some(error.to_string());
@@ -1239,10 +1240,13 @@ impl TeamDaemon {
                     // Auto-recover: try rebase first, only reset as last resort.
                     let base_branch = format!("eng-main/{}", entry.engineer);
 
-                    // SAFETY: if worktree has commits ahead of main, try rebase not reset.
-                    let has_work = crate::worktree::commits_ahead(&worktree_dir, "main")
-                        .map(|n| n > 0)
-                        .unwrap_or(false)
+                    // SAFETY: if worktree has commits ahead of trunk, try rebase not reset.
+                    let has_work = crate::worktree::commits_ahead(
+                        &worktree_dir,
+                        self.config.team_config.trunk_branch(),
+                    )
+                    .map(|n| n > 0)
+                    .unwrap_or(false)
                         || crate::worktree::has_uncommitted_changes(&worktree_dir).unwrap_or(false);
 
                     if has_work {
@@ -1250,16 +1254,17 @@ impl TeamDaemon {
                             engineer = %entry.engineer,
                             "dispatch queue: worktree has work; trying rebase instead of reset"
                         );
-                        // Try to rebase onto main to preserve work
+                        // Try to rebase onto trunk to preserve work.
                         let rebase_result = std::process::Command::new("git")
-                            .args(["rebase", "main"])
+                            .args(["rebase", self.config.team_config.trunk_branch()])
                             .current_dir(&worktree_dir)
                             .output();
                         if rebase_result.map(|o| o.status.success()).unwrap_or(false) {
-                            match crate::team::task_loop::engineer_worktree_ready_for_dispatch(
+                            match crate::team::task_loop::engineer_worktree_ready_for_dispatch_from_trunk(
                                 &self.config.project_root,
                                 &worktree_dir,
                                 &entry.engineer,
+                                self.config.team_config.trunk_branch(),
                             ) {
                                 Ok(()) => {
                                     info!(
@@ -1296,10 +1301,11 @@ impl TeamDaemon {
                         base_branch = %base_branch,
                         "dispatch queue: auto-resetting worktree to base branch"
                     );
-                    match crate::worktree::reset_worktree_to_base_if_clean(
+                    match crate::worktree::reset_worktree_to_base_if_clean_from_trunk(
                         &worktree_dir,
                         &base_branch,
                         "dispatch/reset recovery",
+                        self.config.team_config.trunk_branch(),
                     ) {
                         Err(reset_err) => {
                             warn!(

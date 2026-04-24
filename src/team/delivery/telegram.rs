@@ -213,6 +213,7 @@ mod tests {
                 team_config: crate::team::config::TeamConfig {
                     name: "test".to_string(),
                     workspace_type: crate::team::config::WorkspaceType::Generic,
+                    trunk_branch: crate::team::config::default_trunk_branch(),
                     agent: None,
                     workflow_mode: WorkflowMode::Legacy,
                     workflow_policy: WorkflowPolicy::default(),
@@ -366,6 +367,7 @@ mod tests {
                 team_config: crate::team::config::TeamConfig {
                     name: "test".to_string(),
                     workspace_type: crate::team::config::WorkspaceType::Generic,
+                    trunk_branch: crate::team::config::default_trunk_branch(),
                     agent: None,
                     workflow_mode: WorkflowMode::Legacy,
                     workflow_policy: WorkflowPolicy::default(),

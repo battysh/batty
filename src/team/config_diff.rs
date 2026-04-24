@@ -96,6 +96,7 @@ mod tests {
         TeamConfig {
             name: "test".into(),
             workspace_type: crate::team::config::WorkspaceType::Generic,
+            trunk_branch: crate::team::config::default_trunk_branch(),
             agent: None,
             workflow_mode: Default::default(),
             board: Default::default(),

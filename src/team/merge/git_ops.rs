@@ -43,11 +43,17 @@ pub(crate) fn describe_git_failure(
     )
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn commits_ahead_of_main(worktree_dir: &Path) -> Result<u32> {
+    commits_ahead_of_trunk(worktree_dir, "main")
+}
+
+pub(crate) fn commits_ahead_of_trunk(worktree_dir: &Path, trunk_branch: &str) -> Result<u32> {
+    let range = format!("{trunk_branch}..HEAD");
     let output = run_git_with_context(
         worktree_dir,
-        &["rev-list", "--count", "main..HEAD"],
-        "count commits ahead of main before accepting engineer completion",
+        &["rev-list", "--count", &range],
+        &format!("count commits ahead of {trunk_branch} before accepting engineer completion"),
     )?;
 
     if !output.status.success() {
@@ -56,8 +62,10 @@ pub(crate) fn commits_ahead_of_main(worktree_dir: &Path) -> Result<u32> {
             "{}",
             describe_git_failure(
                 worktree_dir,
-                &["rev-list", "--count", "main..HEAD"],
-                "count commits ahead of main before accepting engineer completion",
+                &["rev-list", "--count", &range],
+                &format!(
+                    "count commits ahead of {trunk_branch} before accepting engineer completion"
+                ),
                 &stderr,
             )
         );
@@ -66,7 +74,7 @@ pub(crate) fn commits_ahead_of_main(worktree_dir: &Path) -> Result<u32> {
     let stdout = String::from_utf8_lossy(&output.stdout);
     stdout.trim().parse::<u32>().with_context(|| {
         format!(
-            "failed to parse git rev-list --count main..HEAD output: {:?}",
+            "failed to parse git rev-list --count {range} output: {:?}",
             stdout.trim()
         )
     })
@@ -74,11 +82,17 @@ pub(crate) fn commits_ahead_of_main(worktree_dir: &Path) -> Result<u32> {
 
 /// Return the diff stat between main and HEAD using `git diff --stat main..HEAD`.
 /// An empty string means the branch has no material file changes relative to main.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn diff_stat_from_main(worktree_dir: &Path) -> Result<String> {
+    diff_stat_from_trunk(worktree_dir, "main")
+}
+
+pub(crate) fn diff_stat_from_trunk(worktree_dir: &Path, trunk_branch: &str) -> Result<String> {
+    let range = format!("{trunk_branch}...HEAD");
     let output = run_git_with_context(
         worktree_dir,
-        &["diff", "--stat", "main...HEAD"],
-        "check diff stat between main and HEAD for narration-only detection",
+        &["diff", "--stat", &range],
+        &format!("check diff stat between {trunk_branch} and HEAD for narration-only detection"),
     )?;
 
     if !output.status.success() {
@@ -87,8 +101,10 @@ pub(crate) fn diff_stat_from_main(worktree_dir: &Path) -> Result<String> {
             "{}",
             describe_git_failure(
                 worktree_dir,
-                &["diff", "--stat", "main...HEAD"],
-                "check diff stat between main and HEAD for narration-only detection",
+                &["diff", "--stat", &range],
+                &format!(
+                    "check diff stat between {trunk_branch} and HEAD for narration-only detection"
+                ),
                 &stderr,
             )
         );
@@ -97,11 +113,20 @@ pub(crate) fn diff_stat_from_main(worktree_dir: &Path) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn changed_paths_from_main(worktree_dir: &Path) -> Result<Vec<PathBuf>> {
+    changed_paths_from_trunk(worktree_dir, "main")
+}
+
+pub(crate) fn changed_paths_from_trunk(
+    worktree_dir: &Path,
+    trunk_branch: &str,
+) -> Result<Vec<PathBuf>> {
+    let range = format!("{trunk_branch}...HEAD");
     let output = run_git_with_context(
         worktree_dir,
-        &["diff", "--name-only", "main...HEAD"],
-        "list changed paths between main and HEAD for narration-only detection",
+        &["diff", "--name-only", &range],
+        &format!("list changed paths between {trunk_branch} and HEAD for narration-only detection"),
     )?;
 
     if !output.status.success() {
@@ -110,8 +135,10 @@ pub(crate) fn changed_paths_from_main(worktree_dir: &Path) -> Result<Vec<PathBuf
             "{}",
             describe_git_failure(
                 worktree_dir,
-                &["diff", "--name-only", "main...HEAD"],
-                "list changed paths between main and HEAD for narration-only detection",
+                &["diff", "--name-only", &range],
+                &format!(
+                    "list changed paths between {trunk_branch} and HEAD for narration-only detection"
+                ),
                 &stderr,
             )
         );
@@ -145,8 +172,13 @@ fn is_completion_noise_path(path: &Path) -> bool {
     )
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn evidence_paths_from_main(worktree_dir: &Path) -> Result<Vec<PathBuf>> {
-    Ok(changed_paths_from_main(worktree_dir)?
+    evidence_paths_from_trunk(worktree_dir, "main")
+}
+
+fn evidence_paths_from_trunk(worktree_dir: &Path, trunk_branch: &str) -> Result<Vec<PathBuf>> {
+    Ok(changed_paths_from_trunk(worktree_dir, trunk_branch)?
         .into_iter()
         .filter(|path| !is_completion_noise_path(path))
         .collect())
@@ -193,13 +225,26 @@ pub(crate) fn is_non_code_path(path: &Path) -> bool {
 }
 
 /// Count files changed between main and HEAD.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn files_changed_from_main(worktree_dir: &Path) -> Result<u32> {
-    Ok(evidence_paths_from_main(worktree_dir)?.len() as u32)
+    files_changed_from_trunk(worktree_dir, "main")
+}
+
+pub(crate) fn files_changed_from_trunk(worktree_dir: &Path, trunk_branch: &str) -> Result<u32> {
+    Ok(evidence_paths_from_trunk(worktree_dir, trunk_branch)?.len() as u32)
 }
 
 /// Count code-relevant files changed between main and HEAD.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn code_files_changed_from_main(worktree_dir: &Path) -> Result<u32> {
-    Ok(evidence_paths_from_main(worktree_dir)?
+    code_files_changed_from_trunk(worktree_dir, "main")
+}
+
+pub(crate) fn code_files_changed_from_trunk(
+    worktree_dir: &Path,
+    trunk_branch: &str,
+) -> Result<u32> {
+    Ok(evidence_paths_from_trunk(worktree_dir, trunk_branch)?
         .into_iter()
         .filter(|path| !is_non_code_path(path))
         .count() as u32)

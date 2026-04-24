@@ -38,6 +38,7 @@ impl TestHarness {
             team_config: TeamConfig {
                 name: "test".to_string(),
                 workspace_type: crate::team::config::WorkspaceType::Generic,
+                trunk_branch: crate::team::config::default_trunk_branch(),
                 agent: None,
                 workflow_mode: WorkflowMode::Legacy,
                 workflow_policy: WorkflowPolicy::default(),

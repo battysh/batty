@@ -139,16 +139,18 @@ fn active_stale_review_entries(
 fn reset_claimed_worktree_to_base(
     work_dir: &std::path::Path,
     base_branch: &str,
+    trunk_branch: &str,
 ) -> Result<crate::worktree::WorktreeResetReason> {
     let branch = current_worktree_branch(work_dir).unwrap_or_else(|_| base_branch.to_string());
     let commit_message = format!("wip: auto-save before worktree reset [{branch}]");
-    crate::worktree::reset_worktree_to_base_with_options_for(
+    crate::worktree::reset_worktree_to_base_with_options_for_trunk(
         work_dir,
         base_branch,
         &commit_message,
         Duration::from_secs(5),
         crate::worktree::PreserveFailureMode::SkipReset,
         "state-reconciliation/claimed-lane-reset",
+        trunk_branch,
     )
     .map_err(|error| anyhow::anyhow!("{error}"))
 }
@@ -2609,6 +2611,7 @@ impl TeamDaemon {
                 (m.name.clone(), is_idle)
             })
             .collect();
+        let trunk_branch = self.config.team_config.trunk_branch().to_string();
 
         for (engineer, is_idle) in engineers {
             if !is_idle {
@@ -2647,6 +2650,7 @@ impl TeamDaemon {
                     &worktree_dir,
                     &base_branch,
                     &self.config.project_root.join(".batty").join("team_config"),
+                    &trunk_branch,
                 ) {
                     Ok(crate::team::task_loop::WorktreeRefreshAction::Rebased)
                     | Ok(crate::team::task_loop::WorktreeRefreshAction::Reset) => {

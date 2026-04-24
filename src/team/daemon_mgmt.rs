@@ -627,6 +627,7 @@ pub fn start_team(project_root: &Path, attach: bool) -> Result<String> {
 
     let team_config = config::TeamConfig::load(&config_path)?;
     team_config.validate()?;
+    team_config.validate_project_refs(project_root)?;
 
     let members = hierarchy::resolve_hierarchy(&team_config)?;
     let session = format!("batty-{}", team_config.name);
@@ -694,6 +695,7 @@ pub fn run_daemon(project_root: &Path, resume: bool) -> Result<()> {
     }
 
     let team_config = config::TeamConfig::load(&config_path)?;
+    team_config.validate_project_refs(project_root)?;
     let members = hierarchy::resolve_hierarchy(&team_config)?;
     let session = format!("batty-{}", team_config.name);
 

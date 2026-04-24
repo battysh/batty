@@ -212,6 +212,7 @@ fn daemon_registers_per_role_nudge_intervals_from_prompt_sections() {
         team_config: TeamConfig {
             name: "test".to_string(),
             workspace_type: crate::team::config::WorkspaceType::Generic,
+            trunk_branch: crate::team::config::default_trunk_branch(),
             agent: None,
             workflow_mode: WorkflowMode::Hybrid,
             board: BoardConfig::default(),
@@ -718,6 +719,7 @@ fn test_auto_dispatch_filters_idle_engineers_only() {
         team_config: TeamConfig {
             name: "test".to_string(),
             workspace_type: crate::team::config::WorkspaceType::Generic,
+            trunk_branch: crate::team::config::default_trunk_branch(),
             agent: None,
             workflow_mode: WorkflowMode::Hybrid,
             workflow_policy: WorkflowPolicy::default(),
@@ -1159,6 +1161,7 @@ fn daemon_lifecycle_happy_path_exercises_decomposed_modules() {
         team_config: TeamConfig {
             name: "test".to_string(),
             workspace_type: crate::team::config::WorkspaceType::Generic,
+            trunk_branch: crate::team::config::default_trunk_branch(),
             agent: None,
             workflow_mode: WorkflowMode::Legacy,
             workflow_policy: WorkflowPolicy::default(),
@@ -3648,6 +3651,7 @@ fn resume_decision_logged_to_orchestrator() {
         team_config: TeamConfig {
             name: "test".to_string(),
             workspace_type: crate::team::config::WorkspaceType::Generic,
+            trunk_branch: crate::team::config::default_trunk_branch(),
             agent: None,
             workflow_mode: WorkflowMode::Hybrid,
             workflow_policy: WorkflowPolicy::default(),
@@ -3925,6 +3929,7 @@ fn spawn_all_agents_resume_reports_missing_sessions_across_primary_roles() {
         team_config: TeamConfig {
             name: "test".to_string(),
             workspace_type: crate::team::config::WorkspaceType::Generic,
+            trunk_branch: crate::team::config::default_trunk_branch(),
             agent: None,
             workflow_mode: WorkflowMode::Legacy,
             workflow_policy: WorkflowPolicy::default(),
@@ -4083,6 +4088,7 @@ fn prepare_member_launch_injects_handoff_for_active_task() {
         team_config: TeamConfig {
             name: "test".to_string(),
             workspace_type: crate::team::config::WorkspaceType::Generic,
+            trunk_branch: crate::team::config::default_trunk_branch(),
             agent: None,
             workflow_mode: WorkflowMode::Hybrid,
             board: BoardConfig::default(),
@@ -4360,6 +4366,7 @@ fn clean_room_test_daemon(project_root: &Path) -> TeamDaemon {
     let team_config = TeamConfig {
         name: "clean-room".to_string(),
         workspace_type: crate::team::config::WorkspaceType::Generic,
+        trunk_branch: crate::team::config::default_trunk_branch(),
         agent: None,
         workflow_mode: WorkflowMode::Legacy,
         board: BoardConfig::default(),
