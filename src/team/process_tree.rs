@@ -1,7 +1,7 @@
 //! Process ancestry helpers for startup preflight checks.
 
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result};
@@ -23,22 +23,57 @@ impl ProcessInfo {
     }
 }
 
-pub(crate) fn concurrent_batty_process(current_pid: u32) -> Result<Option<ProcessInfo>> {
+pub(crate) fn concurrent_batty_process(
+    current_pid: u32,
+    project_root: &Path,
+) -> Result<Option<ProcessInfo>> {
     let processes = read_process_table().context("failed to inspect process table")?;
-    Ok(find_concurrent_batty_process(current_pid, &processes).cloned())
+    let canonical_root = project_root
+        .canonicalize()
+        .unwrap_or_else(|_| project_root.to_path_buf());
+    Ok(find_concurrent_batty_process(current_pid, &processes, &canonical_root).cloned())
 }
 
-fn find_concurrent_batty_process(
+fn find_concurrent_batty_process<'a>(
     current_pid: u32,
-    processes: &[ProcessInfo],
-) -> Option<&ProcessInfo> {
+    processes: &'a [ProcessInfo],
+    project_root: &Path,
+) -> Option<&'a ProcessInfo> {
     let ancestors = ancestor_pids(current_pid, processes);
     processes
         .iter()
         .filter(|process| process.pid != current_pid)
         .filter(|process| !ancestors.contains(&process.pid))
         .filter(|process| is_batty_command(&process.command))
+        .filter(|process| targets_project_root(&process.command, project_root))
         .min_by_key(|process| process.pid)
+}
+
+/// Returns true if the command's `--project-root <path>` argument matches the
+/// given project root (canonicalized), OR if no `--project-root` argument is
+/// present (legacy/ambiguous processes are treated as potential conflicts so
+/// the original safety rail still fires).
+fn targets_project_root(command: &str, project_root: &Path) -> bool {
+    let mut tokens = command.split_whitespace();
+    while let Some(token) = tokens.next() {
+        if token == "--project-root" {
+            let Some(value) = tokens.next() else {
+                return true;
+            };
+            let candidate = PathBuf::from(value);
+            let canonical = candidate
+                .canonicalize()
+                .unwrap_or_else(|_| candidate.clone());
+            return canonical == project_root;
+        } else if let Some(value) = token.strip_prefix("--project-root=") {
+            let candidate = PathBuf::from(value);
+            let canonical = candidate
+                .canonicalize()
+                .unwrap_or_else(|_| candidate.clone());
+            return canonical == project_root;
+        }
+    }
+    true
 }
 
 fn ancestor_pids(current_pid: u32, processes: &[ProcessInfo]) -> HashSet<u32> {
@@ -144,11 +179,14 @@ fn parse_proc_stat(stat: &str) -> Option<(u32, u32, String)> {
 
 fn read_process_table_from_ps() -> Result<Vec<ProcessInfo>> {
     let output = Command::new("ps")
-        .args(["-axo", "pid=,ppid=,comm="])
+        .args(["-axo", "pid=,ppid=,command="])
         .output()
-        .context("failed to run `ps -axo pid=,ppid=,comm=`")?;
+        .context("failed to run `ps -axo pid=,ppid=,command=`")?;
     if !output.status.success() {
-        anyhow::bail!("`ps -axo pid=,ppid=,comm=` exited with {}", output.status);
+        anyhow::bail!(
+            "`ps -axo pid=,ppid=,command=` exited with {}",
+            output.status
+        );
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -176,6 +214,10 @@ mod tests {
         ProcessInfo::new(pid, ppid, command)
     }
 
+    fn any_root() -> &'static Path {
+        Path::new("/tmp/batty-test-root")
+    }
+
     #[test]
     fn direct_parent_batty_wrapper_is_not_concurrent() {
         let processes = vec![
@@ -184,7 +226,10 @@ mod tests {
             proc(30, 20, "batty"),
         ];
 
-        assert_eq!(find_concurrent_batty_process(30, &processes), None);
+        assert_eq!(
+            find_concurrent_batty_process(30, &processes, any_root()),
+            None
+        );
     }
 
     #[test]
@@ -197,7 +242,10 @@ mod tests {
             proc(50, 40, "batty"),
         ];
 
-        assert_eq!(find_concurrent_batty_process(50, &processes), None);
+        assert_eq!(
+            find_concurrent_batty_process(50, &processes, any_root()),
+            None
+        );
     }
 
     #[test]
@@ -210,7 +258,7 @@ mod tests {
         ];
 
         assert_eq!(
-            find_concurrent_batty_process(40, &processes),
+            find_concurrent_batty_process(40, &processes, any_root()),
             Some(&proc(20, 10, "batty"))
         );
     }
@@ -224,7 +272,60 @@ mod tests {
             proc(40, 30, "batty"),
         ];
 
-        assert_eq!(find_concurrent_batty_process(40, &processes), None);
+        assert_eq!(
+            find_concurrent_batty_process(40, &processes, any_root()),
+            None
+        );
+    }
+
+    #[test]
+    fn different_project_root_is_not_concurrent() {
+        let processes = vec![
+            proc(10, 0, "launchd"),
+            proc(
+                20,
+                10,
+                "/usr/local/bin/batty console-pane --project-root /Users/me/batty --member architect",
+            ),
+            proc(30, 10, "zsh"),
+            proc(
+                40,
+                30,
+                "batty daemon --project-root /Users/me/batty_marketing --resume",
+            ),
+        ];
+
+        assert_eq!(
+            find_concurrent_batty_process(40, &processes, Path::new("/Users/me/batty_marketing")),
+            None
+        );
+    }
+
+    #[test]
+    fn same_project_root_is_concurrent() {
+        let processes = vec![
+            proc(10, 0, "launchd"),
+            proc(
+                20,
+                10,
+                "batty daemon --project-root /Users/me/batty_marketing --resume",
+            ),
+            proc(30, 10, "zsh"),
+            proc(
+                40,
+                30,
+                "batty daemon --project-root /Users/me/batty_marketing --resume",
+            ),
+        ];
+
+        assert_eq!(
+            find_concurrent_batty_process(40, &processes, Path::new("/Users/me/batty_marketing")),
+            Some(&proc(
+                20,
+                10,
+                "batty daemon --project-root /Users/me/batty_marketing --resume"
+            ))
+        );
     }
 
     #[test]
