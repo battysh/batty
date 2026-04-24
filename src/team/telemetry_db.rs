@@ -650,7 +650,7 @@ fn update_metrics_for_event(conn: &Connection, event: &TeamEvent) -> Result<()> 
                 [],
             )?;
         }
-        "auto_merge_post_verify_result" => match event.success {
+        "auto_merge_post_verify_result" | "github_verification_feedback" => match event.success {
             Some(true) => {
                 conn.execute(
                     "UPDATE session_summary SET verification_passes = verification_passes + 1
@@ -1557,6 +1557,22 @@ mod tests {
         .unwrap();
         insert_event(
             &conn,
+            &TeamEvent::github_verification_feedback(
+                &crate::team::events::GithubVerificationFeedbackInfo {
+                    task: "43",
+                    branch: Some("eng-1/43"),
+                    commit: Some("abcdef1"),
+                    check_name: "ci/test",
+                    success: Some(false),
+                    reason: "failure",
+                    next_action: Some("fix CI"),
+                    details: None,
+                },
+            ),
+        )
+        .unwrap();
+        insert_event(
+            &conn,
             &TeamEvent::notification_delivery_sample("daemon", "manager", 12, "digest"),
         )
         .unwrap();
@@ -1564,7 +1580,7 @@ mod tests {
         let summaries = query_session_summaries(&conn).unwrap();
         assert_eq!(summaries.len(), 1);
         assert_eq!(summaries[0].verification_passes, 1);
-        assert_eq!(summaries[0].verification_failures, 0);
+        assert_eq!(summaries[0].verification_failures, 1);
         assert_eq!(summaries[0].notification_latency_total_secs, 12);
         assert_eq!(summaries[0].notification_latency_samples, 1);
     }

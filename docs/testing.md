@@ -57,6 +57,23 @@ CI runs the default suite on every PR and a nightly fuzz job with
 `PROPTEST_CASES=2048` scheduled at 02:15 UTC. Both live in
 `.github/workflows/ci.yml`.
 
+## Feeding external verification back into Batty
+
+The daemon can ingest GitHub or CI check results from
+`.batty/github_verification.jsonl`. Each line is one JSON object:
+
+```json
+{"task_id":42,"branch":"eng-1/42","commit":"abcdef1","check_name":"ci/test","status":"failure","next_action":"fix the failing test"}
+```
+
+Use `status: "failure"` (or `failed`/`error`) to surface a task-scoped
+blocker in `batty status` and review/dispatch intervention messages.
+Use `status: "success"` (or `passed`) for a later record on the same
+task/commit to clear the active blocker while retaining the previous
+failed line as audit history. Records for unknown tasks or stale
+branches/commits are ignored for blocking and emitted as daemon
+warnings instead.
+
 ## Writing a new prescriptive scenario
 
 Every prescriptive scenario lives in `tests/scenarios/prescribed/`.

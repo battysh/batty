@@ -280,6 +280,9 @@ impl TeamDaemon {
             daemon.maybe_sweep_tiered_inboxes();
             Ok(())
         });
+        self.run_recoverable_step("check_github_verification_feedback", |daemon| {
+            daemon.check_github_verification_feedback()
+        });
 
         // -- Recoverable subsystems --
         self.run_recoverable_step("maybe_intervene_triage_backlog", |daemon| {

@@ -168,7 +168,7 @@ impl TeamDaemon {
             && !self.member_has_pending_inbox(inbox_root, member_name)
     }
 
-    fn intervention_on_cooldown(&self, key: &str) -> bool {
+    pub(in crate::team::daemon) fn intervention_on_cooldown(&self, key: &str) -> bool {
         let cooldown = Duration::from_secs(
             self.config
                 .team_config

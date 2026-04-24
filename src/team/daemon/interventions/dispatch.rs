@@ -476,6 +476,22 @@ impl TeamDaemon {
                 .collect::<Vec<_>>()
                 .join("; ")
         };
+        let active_ids = idle_active_reports
+            .iter()
+            .flat_map(|snapshot| snapshot.active_task_ids.iter().copied())
+            .collect::<std::collections::HashSet<_>>();
+        let github_blockers = crate::task::load_tasks_from_dir(&board_dir.join("tasks"))
+            .map(|tasks| {
+                let active_tasks = tasks
+                    .iter()
+                    .filter(|task| active_ids.contains(&task.id))
+                    .collect::<Vec<_>>();
+                crate::team::github_feedback::active_github_blockers_for_tasks(
+                    &self.config.project_root,
+                    &active_tasks,
+                )
+            })
+            .unwrap_or_default();
 
         let mut message = format!(
             "Dispatch recovery needed: you are idle, your reports are idle, and the lane has no triage/review backlog. Idle reports still holding active work: {active_report_summary}. Idle reports with no active task: {unassigned_report_summary}. Unassigned open board work: {open_task_summary}.\n\
@@ -504,6 +520,17 @@ impl TeamDaemon {
                 report = first_unassigned_report.name,
                 task_id = first_open_task.id,
                 title = first_open_task.title,
+            ));
+        }
+
+        if !github_blockers.is_empty() {
+            let blocker_lines = github_blockers
+                .iter()
+                .map(|feedback| format!("- {}", feedback.intervention_line()))
+                .collect::<Vec<_>>()
+                .join("\n");
+            message.push_str(&format!(
+                "\nGitHub/CI verification blockers on idle active work:\n{blocker_lines}"
             ));
         }
 

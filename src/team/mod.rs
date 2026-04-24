@@ -44,6 +44,7 @@ pub mod estimation;
 pub mod events;
 pub mod failure_patterns;
 pub mod git_cmd;
+pub mod github_feedback;
 pub mod grafana;
 pub mod harness;
 pub mod hierarchy;
