@@ -60,6 +60,14 @@ pub struct MainStartRefSelection {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BaselineBranchRepair {
+    pub branch: String,
+    pub start_ref: String,
+    pub start_commit: String,
+    pub fallback_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DispatchBranchReset {
     pub changed: bool,
     pub start_ref: String,
@@ -869,6 +877,57 @@ fn preferred_trunk_start_ref(path: &Path, trunk_branch: &str) -> Result<MainStar
 
 fn preferred_main_start_ref(path: &Path) -> Result<MainStartRefSelection> {
     preferred_trunk_start_ref(path, "main")
+}
+
+pub fn ensure_baseline_branch_from_trunk(
+    repo_path: &Path,
+    base_branch: &str,
+    trunk_branch: &str,
+) -> Result<Option<BaselineBranchRepair>> {
+    let base_ref = format!("refs/heads/{base_branch}");
+    if ref_exists(repo_path, &base_ref)? {
+        return Ok(None);
+    }
+
+    let selection = preferred_trunk_start_ref(repo_path, trunk_branch)
+        .with_context(|| {
+            format!(
+                "failed to select configured trunk '{trunk_branch}' while recreating missing baseline branch '{base_branch}' in {}",
+                repo_path.display()
+            )
+        })?;
+    let start_commit = current_commit(repo_path, selection.ref_name.as_str())
+        .with_context(|| {
+            format!(
+                "failed to resolve configured trunk ref '{}' for missing baseline branch '{}' in {}",
+                selection.ref_name,
+                base_branch,
+                repo_path.display()
+            )
+        })?;
+
+    let update = run_git(
+        repo_path,
+        ["update-ref", base_ref.as_str(), start_commit.as_str()],
+    )?;
+    if !update.status.success() {
+        bail!(
+            "failed to recreate missing baseline branch '{}' in {} from configured trunk ref '{}' (trunk_branch='{}', commit={}): {}",
+            base_branch,
+            repo_path.display(),
+            selection.ref_name,
+            trunk_branch,
+            start_commit,
+            String::from_utf8_lossy(&update.stderr).trim()
+        );
+    }
+
+    Ok(Some(BaselineBranchRepair {
+        branch: base_branch.to_string(),
+        start_ref: selection.ref_name,
+        start_commit,
+        fallback_reason: selection.fallback_reason,
+    }))
 }
 
 pub fn ensure_worktree_branch_for_dispatch(
@@ -2006,6 +2065,53 @@ mod tests {
 
         assert_eq!(selection.ref_name, "origin/mainline");
         assert!(selection.fallback_reason.is_none());
+    }
+
+    #[test]
+    fn ensure_baseline_branch_from_trunk_recreates_missing_branch_from_mainline() {
+        let Some(tmp) = init_repo() else {
+            return;
+        };
+        git(tmp.path(), &["checkout", "-b", "mainline"]);
+        fs::write(tmp.path().join("mainline.txt"), "mainline\n").unwrap();
+        git(tmp.path(), &["add", "mainline.txt"]);
+        git(tmp.path(), &["commit", "-q", "-m", "advance mainline"]);
+        git(tmp.path(), &["branch", "-D", "main"]);
+
+        let repair = ensure_baseline_branch_from_trunk(tmp.path(), "eng-main/test-eng", "mainline")
+            .unwrap()
+            .expect("missing baseline branch should be recreated");
+
+        assert_eq!(repair.branch, "eng-main/test-eng");
+        assert_eq!(repair.start_ref, "mainline");
+        assert_eq!(
+            current_commit(tmp.path(), "eng-main/test-eng").unwrap(),
+            current_commit(tmp.path(), "mainline").unwrap()
+        );
+    }
+
+    #[test]
+    fn ensure_baseline_branch_from_trunk_reports_missing_trunk_details() {
+        let Some(tmp) = init_repo() else {
+            return;
+        };
+
+        let error = ensure_baseline_branch_from_trunk(tmp.path(), "eng-main/test-eng", "mainline")
+            .unwrap_err();
+        let message = error.to_string();
+
+        assert!(
+            message.contains("configured trunk ref 'mainline'"),
+            "unexpected error: {message}"
+        );
+        assert!(
+            message.contains("eng-main/test-eng"),
+            "unexpected error: {message}"
+        );
+        assert!(
+            message.contains(tmp.path().to_string_lossy().as_ref()),
+            "unexpected error: {message}"
+        );
     }
 
     #[test]

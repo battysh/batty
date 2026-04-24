@@ -8,11 +8,12 @@ use crate::team::inbox;
 use crate::team::standup::MemberState;
 use crate::team::task_loop::{
     current_worktree_branch, engineer_base_branch_name, setup_engineer_worktree,
+    setup_multi_repo_worktree_from_trunk,
 };
 use crate::team::team_events_path;
 use crate::team::telemetry_db;
 use crate::team::test_support::{
-    TestDaemonBuilder, engineer_member, git_ok, git_stdout, init_git_repo, manager_member,
+    TestDaemonBuilder, engineer_member, git, git_ok, git_stdout, init_git_repo, manager_member,
     write_open_task_file, write_owned_task_file,
 };
 use std::collections::HashMap;
@@ -288,6 +289,94 @@ fn prepare_assignment_launch_falls_back_to_local_main_when_origin_main_is_frozen
                     .reason
                     .as_deref()
                     .is_some_and(|reason| reason.contains("stale_origin_fallback ahead=3"))
+        })
+        .unwrap();
+    assert_eq!(event.role.as_deref(), Some("eng-1"));
+}
+
+#[test]
+fn prepare_assignment_launch_recreates_missing_multi_repo_baseline_from_configured_trunk() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project_root = tmp.path().join("workspace");
+    let repo_name = "pkg-a";
+    let repo_root = project_root.join(repo_name);
+    let team_config_dir = project_root.join(".batty").join("team_config");
+    std::fs::create_dir_all(&team_config_dir).unwrap();
+    std::fs::create_dir_all(repo_root.join("src")).unwrap();
+    std::fs::write(repo_root.join("src").join("lib.rs"), "pub fn smoke() {}\n").unwrap();
+    git_ok(
+        &project_root,
+        &["init", "-b", "mainline", repo_root.to_str().unwrap()],
+    );
+    git_ok(&repo_root, &["config", "user.email", "batty@example.com"]);
+    git_ok(&repo_root, &["config", "user.name", "Batty Tests"]);
+    git_ok(&repo_root, &["add", "."]);
+    git_ok(&repo_root, &["commit", "-m", "initial mainline"]);
+
+    let base_branch = engineer_base_branch_name("eng-1");
+    let worktree_dir = project_root.join(".batty").join("worktrees").join("eng-1");
+    setup_multi_repo_worktree_from_trunk(
+        &project_root,
+        &worktree_dir,
+        &base_branch,
+        &team_config_dir,
+        &[repo_name.to_string()],
+        "mainline",
+    )
+    .unwrap();
+    let base_ref_path = repo_root
+        .join(".git")
+        .join("refs")
+        .join("heads")
+        .join("eng-main")
+        .join("eng-1");
+    assert!(base_ref_path.exists());
+    std::fs::remove_file(&base_ref_path).unwrap();
+    let missing = git(
+        &repo_root,
+        &[
+            "show-ref",
+            "--verify",
+            "--quiet",
+            "refs/heads/eng-main/eng-1",
+        ],
+    );
+    assert!(!missing.status.success());
+
+    let mut daemon = TestDaemonBuilder::new(project_root.as_path())
+        .members(vec![
+            manager_member("manager", None),
+            engineer_member("eng-1", Some("manager"), true),
+        ])
+        .build();
+    daemon.config.team_config.trunk_branch = "mainline".to_string();
+
+    let launch = daemon
+        .prepare_assignment_launch("eng-1", "Task #683: multi repo assignment", Some(683))
+        .unwrap();
+
+    let sub_worktree = worktree_dir.join(repo_name);
+    assert_eq!(launch.branch.as_deref(), Some("eng-1/683"));
+    assert_eq!(current_worktree_branch(&sub_worktree).unwrap(), "eng-1/683");
+    assert_eq!(
+        git_stdout(&repo_root, &["rev-parse", "eng-main/eng-1"]),
+        git_stdout(&repo_root, &["rev-parse", "mainline"])
+    );
+    assert_eq!(
+        git_stdout(&sub_worktree, &["rev-parse", "HEAD"]),
+        git_stdout(&repo_root, &["rev-parse", "mainline"])
+    );
+
+    let events = events::read_events(&team_events_path(&project_root)).unwrap();
+    let event = events
+        .iter()
+        .find(|event| {
+            event.event == "worktree_refreshed"
+                && event.reason.as_deref().is_some_and(|reason| {
+                    reason.contains("recreated missing baseline branch 'eng-main/eng-1'")
+                        && reason.contains("from 'mainline'")
+                        && reason.contains("repo=pkg-a")
+                })
         })
         .unwrap();
     assert_eq!(event.role.as_deref(), Some("eng-1"));

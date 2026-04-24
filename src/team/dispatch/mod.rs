@@ -111,6 +111,40 @@ impl TeamDaemon {
         Ok(())
     }
 
+    fn ensure_assignment_baseline_branch(
+        &mut self,
+        engineer: &str,
+        repo_root: &Path,
+        base_branch: &str,
+        repo_label: Option<&str>,
+    ) -> Result<()> {
+        let repair = crate::worktree::ensure_baseline_branch_from_trunk(
+            repo_root,
+            base_branch,
+            self.config.team_config.trunk_branch(),
+        )?;
+        let Some(repair) = repair else {
+            return Ok(());
+        };
+
+        let scope = repo_label
+            .map(|label| format!("repo={label} path={}", repo_root.display()))
+            .unwrap_or_else(|| format!("path={}", repo_root.display()));
+        let fallback = repair
+            .fallback_reason
+            .as_deref()
+            .map(|reason| format!("; {reason}"))
+            .unwrap_or_default();
+        self.emit_event(TeamEvent::worktree_refreshed(
+            engineer,
+            &format!(
+                "recreated missing baseline branch '{}' from '{}' ({}){}",
+                repair.branch, repair.start_ref, scope, fallback
+            ),
+        ));
+        Ok(())
+    }
+
     fn record_worktree_refresh(
         &mut self,
         engineer: &str,
@@ -212,6 +246,12 @@ impl TeamDaemon {
                 for repo_name in &sub_repo_names {
                     let repo_root = project_root.join(repo_name);
                     let sub_wt = work_dir.join(repo_name);
+                    self.ensure_assignment_baseline_branch(
+                        engineer,
+                        &repo_root,
+                        &base_branch,
+                        Some(repo_name),
+                    )?;
                     self.maybe_refresh_assignment_worktree(
                         engineer,
                         &repo_root,
@@ -232,6 +272,12 @@ impl TeamDaemon {
                     trunk_branch: self.config.team_config.trunk_branch(),
                 })?
             } else if work_dir.exists() {
+                self.ensure_assignment_baseline_branch(
+                    engineer,
+                    &project_root,
+                    &base_branch,
+                    None,
+                )?;
                 self.maybe_refresh_assignment_worktree(
                     engineer,
                     &project_root,
@@ -253,6 +299,12 @@ impl TeamDaemon {
                 }
                 work_dir
             } else {
+                self.ensure_assignment_baseline_branch(
+                    engineer,
+                    &project_root,
+                    &base_branch,
+                    None,
+                )?;
                 self.maybe_refresh_assignment_worktree(
                     engineer,
                     &project_root,
