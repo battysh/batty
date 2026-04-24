@@ -590,9 +590,7 @@ fn transient_removed_member_owner(name: &str) -> Option<&str> {
         return Some(owner);
     }
 
-    let Some(stem) = name.strip_suffix("-fix") else {
-        return None;
-    };
+    let stem = name.strip_suffix("-fix")?;
     let (owner, task_id) = stem.rsplit_once('-')?;
     if owner.is_empty() || task_id.is_empty() || !task_id.chars().all(|ch| ch.is_ascii_digit()) {
         return None;
