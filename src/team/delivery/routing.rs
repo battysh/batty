@@ -40,6 +40,33 @@ fn extract_task_id_from_body(body: &str) -> Option<u32> {
     None
 }
 
+/// B-1(1.4) status-guard predicate: inspect `tasks_dir` and determine whether
+/// an inbox assignment for `body` should be dropped because the target task
+/// is already in a terminal state.
+///
+/// Returns `Some((task_id, status))` when the assign MUST be dropped (status
+/// is `done` or `review`). Returns `None` when the assign should proceed
+/// (task is todo/in-progress/blocked/unknown, body has no parseable task id,
+/// or the board is unavailable).
+///
+/// Pure helper so the status-guard can be unit-tested without constructing a
+/// full `TeamDaemon`.
+fn assign_stale_terminal_status(tasks_dir: &std::path::Path, body: &str) -> Option<(u32, String)> {
+    let tid = extract_task_id_from_body(body)?;
+    if !tasks_dir.exists() {
+        return None;
+    }
+    let status = crate::task::load_tasks_from_dir(tasks_dir)
+        .ok()?
+        .into_iter()
+        .find(|t| t.id == tid)
+        .map(|t| t.status)?;
+    match status.as_str() {
+        "done" | "review" => Some((tid, status)),
+        _ => None,
+    }
+}
+
 fn shim_log_preview(body: &str) -> String {
     let single_line = body.split_whitespace().collect::<Vec<_>>().join(" ");
     let mut preview = single_line.chars().take(160).collect::<String>();
@@ -1476,30 +1503,41 @@ impl TeamDaemon {
                         }
                     }
                     inbox::MessageType::Assign => {
-                        // Check WIP limit: don't assign if engineer already has active work
+                        // B-1(1.4) status guard: before ANY auto-save / WIP / frontmatter
+                        // mutation, re-read the target task's current status. If the task
+                        // is already terminal (done/review), this is a stale assignment
+                        // (e.g. from a pre-reclaim inbox that drained after the task was
+                        // reassigned and completed by another engineer). Dropping early
+                        // prevents the done-task regression documented in Appendix B:
+                        // an auto-save on a now-stale worktree can fabricate a block_reason
+                        // and overwrite the task's canonical branch/worktree_path frontmatter.
                         let board_dir = self.board_dir();
                         let tasks_dir = board_dir.join("tasks");
-                        let active_count = if tasks_dir.exists() {
-                            crate::task::load_tasks_from_dir(&tasks_dir)
-                                .unwrap_or_default()
-                                .iter()
-                                .filter(|t| {
-                                    t.claimed_by.as_deref() == Some(name)
-                                        && matches!(t.status.as_str(), "in-progress" | "review")
-                                })
-                                .count()
-                        } else {
-                            0
-                        };
-                        if active_count > 0 {
+                        if let Some((tid, status)) =
+                            assign_stale_terminal_status(&tasks_dir, &msg.body)
+                        {
                             warn!(
                                 to = %name,
                                 from = %msg.from,
-                                active_count,
-                                "rejecting assignment: engineer already has {active_count} active board item(s)"
+                                task_id = tid,
+                                status = %status,
+                                id = %msg.id,
+                                "dropping stale assign for completed task; task already terminal"
                             );
-                            // Notify the sender with details of what the engineer is working on
-                            let active_tasks_desc: String = if tasks_dir.exists() {
+                            // Treat as delivered so the stale message clears the inbox.
+                            // Do NOT trigger any worktree auto-save / frontmatter write.
+                            let _ = self.queue_message(
+                                "daemon",
+                                &msg.from,
+                                &format!(
+                                    "Assignment of task #{tid} to {name} dropped: task is already {status}. \
+                                     This is almost certainly a stale message from before the task was reassigned/completed."
+                                ),
+                            );
+                            Ok(MessageDelivery::OrchestratorLogged)
+                        } else {
+                            // Check WIP limit: don't assign if engineer already has active work
+                            let active_count = if tasks_dir.exists() {
                                 crate::task::load_tasks_from_dir(&tasks_dir)
                                     .unwrap_or_default()
                                     .iter()
@@ -1507,40 +1545,63 @@ impl TeamDaemon {
                                         t.claimed_by.as_deref() == Some(name)
                                             && matches!(t.status.as_str(), "in-progress" | "review")
                                     })
-                                    .map(|t| format!("#{} ({}: {})", t.id, t.status, t.title))
-                                    .collect::<Vec<_>>()
-                                    .join(", ")
+                                    .count()
                             } else {
-                                String::new()
+                                0
                             };
-                            let reject_msg = format!(
-                                "Assignment to {name} rejected (WIP limit): engineer already has {active_count} active item(s): {active_tasks_desc}. \
+                            if active_count > 0 {
+                                warn!(
+                                    to = %name,
+                                    from = %msg.from,
+                                    active_count,
+                                    "rejecting assignment: engineer already has {active_count} active board item(s)"
+                                );
+                                // Notify the sender with details of what the engineer is working on
+                                let active_tasks_desc: String = if tasks_dir.exists() {
+                                    crate::task::load_tasks_from_dir(&tasks_dir)
+                                        .unwrap_or_default()
+                                        .iter()
+                                        .filter(|t| {
+                                            t.claimed_by.as_deref() == Some(name)
+                                                && matches!(
+                                                    t.status.as_str(),
+                                                    "in-progress" | "review"
+                                                )
+                                        })
+                                        .map(|t| format!("#{} ({}: {})", t.id, t.status, t.title))
+                                        .collect::<Vec<_>>()
+                                        .join(", ")
+                                } else {
+                                    String::new()
+                                };
+                                let reject_msg = format!(
+                                    "Assignment to {name} rejected (WIP limit): engineer already has {active_count} active item(s): {active_tasks_desc}. \
                                  Merge or complete the current work first, then re-assign."
-                            );
-                            let _ = self.queue_message("daemon", &msg.from, &reject_msg);
-                            // Still mark delivered so it doesn't retry
-                            Ok(MessageDelivery::OrchestratorLogged)
-                        } else {
-                            info!(to = %name, id = %msg.id, "delivering inbox assignment");
-                            self.manual_assign_cooldowns
-                                .insert(name.to_string(), Instant::now());
-                            let task_id = extract_task_id_from_body(&msg.body);
-                            // Claim the task on the board BEFORE launching the
-                            // assignment so auto-dispatch sees claimed_by and
-                            // skips this task. Without this, there is a race
-                            // window where auto-dispatch grabs the unclaimed
-                            // task and assigns it to a different engineer.
-                            if let Some(tid) = task_id {
-                                if let Err(e) = crate::team::task_cmd::assign_task_owners(
-                                    &board_dir,
-                                    tid,
-                                    Some(name),
-                                    None,
-                                ) {
-                                    debug!(task_id = tid, error = %e, "could not set claimed_by on manual assign");
+                                );
+                                let _ = self.queue_message("daemon", &msg.from, &reject_msg);
+                                // Still mark delivered so it doesn't retry
+                                Ok(MessageDelivery::OrchestratorLogged)
+                            } else {
+                                info!(to = %name, id = %msg.id, "delivering inbox assignment");
+                                self.manual_assign_cooldowns
+                                    .insert(name.to_string(), Instant::now());
+                                let task_id = extract_task_id_from_body(&msg.body);
+                                // Claim the task on the board BEFORE launching the
+                                // assignment so auto-dispatch sees claimed_by and
+                                // skips this task. Without this, there is a race
+                                // window where auto-dispatch grabs the unclaimed
+                                // task and assigns it to a different engineer.
+                                if let Some(tid) = task_id {
+                                    if let Err(e) = crate::team::task_cmd::assign_task_owners(
+                                        &board_dir,
+                                        tid,
+                                        Some(name),
+                                        None,
+                                    ) {
+                                        debug!(task_id = tid, error = %e, "could not set claimed_by on manual assign");
+                                    }
                                 }
-                            }
-                            self.assign_task_with_task_id_as(&msg.from, name, &msg.body, task_id)
+                                self.assign_task_with_task_id_as(&msg.from, name, &msg.body, task_id)
                             .map(|launch| {
                                 if let Some(tid) = task_id {
                                     if let Err(e) = crate::team::task_cmd::transition_task_with_attribution(
@@ -1560,6 +1621,7 @@ impl TeamDaemon {
                                 );
                                 MessageDelivery::LivePane
                             })
+                            }
                         }
                     }
                 };
@@ -4789,5 +4851,108 @@ mod tests {
 
         let daemon_msgs: Vec<_> = messages.iter().filter(|m| m.from == "daemon").collect();
         assert_eq!(daemon_msgs.len(), 2);
+    }
+
+    // ---------------------------------------------------------------------
+    // B-1(1.4) status-guard helper
+    // ---------------------------------------------------------------------
+
+    fn write_task_file(tasks_dir: &std::path::Path, id: u32, status: &str) {
+        std::fs::create_dir_all(tasks_dir).unwrap();
+        let path = tasks_dir.join(format!("{id:03}-test.md"));
+        let content = format!(
+            "---\nid: {id}\ntitle: test\nstatus: {status}\npriority: medium\nclass: standard\n---\n\nBody.\n"
+        );
+        std::fs::write(path, content).unwrap();
+    }
+
+    #[test]
+    fn assign_stale_terminal_status_drops_done_task() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = tmp.path().join("tasks");
+        write_task_file(&tasks_dir, 7, "done");
+        let result = super::assign_stale_terminal_status(&tasks_dir, "Task #7: some body");
+        assert_eq!(result, Some((7, "done".to_string())));
+    }
+
+    #[test]
+    fn assign_stale_terminal_status_drops_review_task() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = tmp.path().join("tasks");
+        write_task_file(&tasks_dir, 18, "review");
+        let result = super::assign_stale_terminal_status(&tasks_dir, "Task #18: review it");
+        assert_eq!(result, Some((18, "review".to_string())));
+    }
+
+    #[test]
+    fn assign_stale_terminal_status_allows_todo_task() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = tmp.path().join("tasks");
+        write_task_file(&tasks_dir, 19, "todo");
+        assert_eq!(
+            super::assign_stale_terminal_status(&tasks_dir, "Task #19: new work"),
+            None
+        );
+    }
+
+    #[test]
+    fn assign_stale_terminal_status_allows_in_progress_task() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = tmp.path().join("tasks");
+        write_task_file(&tasks_dir, 19, "in-progress");
+        assert_eq!(
+            super::assign_stale_terminal_status(&tasks_dir, "Task #19: continuing"),
+            None
+        );
+    }
+
+    #[test]
+    fn assign_stale_terminal_status_allows_blocked_task() {
+        // B-1 specifically calls out done/review as terminal. A blocked task
+        // may need reassignment when the block clears, so the guard must NOT
+        // drop it.
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = tmp.path().join("tasks");
+        write_task_file(&tasks_dir, 19, "blocked");
+        assert_eq!(
+            super::assign_stale_terminal_status(&tasks_dir, "Task #19: after unblock"),
+            None
+        );
+    }
+
+    #[test]
+    fn assign_stale_terminal_status_handles_body_with_no_task_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = tmp.path().join("tasks");
+        write_task_file(&tasks_dir, 7, "done");
+        assert_eq!(
+            super::assign_stale_terminal_status(&tasks_dir, "Please work on the eval harness"),
+            None
+        );
+    }
+
+    #[test]
+    fn assign_stale_terminal_status_handles_missing_tasks_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        // No tasks dir at all.
+        assert_eq!(
+            super::assign_stale_terminal_status(&tmp.path().join("tasks"), "Task #7: x"),
+            None
+        );
+    }
+
+    #[test]
+    fn assign_stale_terminal_status_handles_unknown_task_id() {
+        // Assign body references a task that doesn't exist on the board —
+        // must not false-positive into dropping the message. The caller will
+        // handle it as a normal assign attempt (which may itself fail with a
+        // clearer error than a silent drop).
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = tmp.path().join("tasks");
+        write_task_file(&tasks_dir, 7, "done");
+        assert_eq!(
+            super::assign_stale_terminal_status(&tasks_dir, "Task #999: does not exist"),
+            None
+        );
     }
 }

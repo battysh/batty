@@ -1107,27 +1107,15 @@ pub fn reset_worktree_to_base_with_options_for_trunk(
         // covers the case where `base_branch` already had unmerged commits from
         // a prior session (e.g. completed task work that hasn't been merged
         // yet) and the branch ref is about to be rewritten to trunk.
-        let _ =
-            archive_branch_if_commits_ahead(worktree_path, base_branch, trunk_branch, subsystem);
-    }
-
-    crate::team::task_loop::log_worktree_mutation_audit(
-        worktree_path,
-        subsystem,
-        "git checkout -B",
-        &crate::team::task_loop::current_worktree_user_change_paths(worktree_path)
-            .unwrap_or_default(),
-    );
-    let checkout = run_git(worktree_path, ["checkout", "-B", base_branch, trunk_branch])?;
-    if !checkout.status.success() {
-        bail!(
-            "failed to recreate '{}' from '{}' in {}: {}",
+        archive_branch_if_commits_ahead_across_repos(
+            worktree_path,
             base_branch,
             trunk_branch,
-            worktree_path.display(),
-            String::from_utf8_lossy(&checkout.stderr).trim()
+            subsystem,
         );
     }
+
+    checkout_base_branch_across_repos(worktree_path, base_branch, trunk_branch, subsystem)?;
     Ok(reason)
 }
 
@@ -1229,23 +1217,13 @@ pub fn reset_worktree_to_base_if_clean_from_trunk(
     let _ = run_git(worktree_path, ["merge", "--abort"]);
     // #659: archive commits ahead of trunk on `base_branch` before the
     // destructive `checkout -B base_branch <trunk>` below.
-    let _ = archive_branch_if_commits_ahead(worktree_path, base_branch, trunk_branch, subsystem);
-    crate::team::task_loop::log_worktree_mutation_audit(
+    archive_branch_if_commits_ahead_across_repos(
         worktree_path,
+        base_branch,
+        trunk_branch,
         subsystem,
-        "git checkout -B",
-        &dirty_paths,
     );
-    let checkout = run_git(worktree_path, ["checkout", "-B", base_branch, trunk_branch])?;
-    if !checkout.status.success() {
-        bail!(
-            "failed to recreate '{}' from '{}' in {}: {}",
-            base_branch,
-            trunk_branch,
-            worktree_path.display(),
-            String::from_utf8_lossy(&checkout.stderr).trim()
-        );
-    }
+    checkout_base_branch_across_repos(worktree_path, base_branch, trunk_branch, subsystem)?;
 
     Ok(WorktreeResetReason::CleanReset)
 }
@@ -1267,6 +1245,102 @@ fn archive_preserved_base_branch_head(worktree_path: &Path, base_branch: &str) -
         );
     }
     Ok(branch)
+}
+
+/// Iterate sub-repos (or the single repo at `worktree_path`) and archive any
+/// commits on `base_branch` that are ahead of each repo's default branch
+/// before a destructive `checkout -B`. Errors are logged but non-fatal: this
+/// mirrors the single-repo caller's `let _ = archive_branch_if_commits_ahead`
+/// best-effort behavior.
+///
+/// In multi-repo mode (worktree root is not a git repo), each sub-repo is
+/// processed independently. The default branch is resolved per-repo so
+/// repos with different conventions (mainline vs main) are both handled.
+fn archive_branch_if_commits_ahead_across_repos(
+    worktree_path: &Path,
+    base_branch: &str,
+    trunk_branch: &str,
+    subsystem: &str,
+) {
+    for repo in iter_repos_for_mutation(worktree_path) {
+        let base_ref = effective_trunk_branch_for_repo(&repo, trunk_branch);
+        let _ = archive_branch_if_commits_ahead(&repo, base_branch, &base_ref, subsystem);
+    }
+}
+
+/// Run `git checkout -B <base_branch> <default>` in each sub-repo (or the
+/// single repo at `worktree_path`). Multi-repo-aware replacement for the
+/// historic hardcoded `run_git(worktree_path, ["checkout", "-B", base_branch, "main"])`.
+///
+/// Failure modes:
+/// - Multi-repo with no sub-repos at all: returns Ok (nothing to do). Old
+///   code would have bailed with `fatal: not a git repository` here; the new
+///   behavior is a no-op consistent with an empty workspace.
+/// - Single-repo or per-sub-repo checkout failure: bails with the same
+///   "failed to recreate '<branch>' from '<default>' in <path>: <stderr>"
+///   shape as the legacy error (just with the resolved default branch name
+///   instead of hardcoded "main").
+fn checkout_base_branch_across_repos(
+    worktree_path: &Path,
+    base_branch: &str,
+    trunk_branch: &str,
+    subsystem: &str,
+) -> Result<()> {
+    let dirty_paths = crate::team::task_loop::current_worktree_user_change_paths(worktree_path)
+        .unwrap_or_default();
+    let repos = iter_repos_for_mutation(worktree_path);
+    if repos.is_empty() {
+        // Multi-repo container with zero sub-repos: nothing to check out. This
+        // is the exact shape that used to emit `fatal: not a git repository`
+        // and block the lane. Treat it as a no-op and let higher layers decide.
+        info!(
+            subsystem,
+            worktree = %worktree_path.display(),
+            "skipping checkout -B: no git repos found at worktree root or in immediate sub-dirs"
+        );
+        return Ok(());
+    }
+    for repo in repos {
+        let start = effective_trunk_branch_for_repo(&repo, trunk_branch);
+        crate::team::task_loop::log_worktree_mutation_audit(
+            &repo,
+            subsystem,
+            "git checkout -B",
+            &dirty_paths,
+        );
+        let checkout = run_git(&repo, ["checkout", "-B", base_branch, &start])?;
+        if !checkout.status.success() {
+            bail!(
+                "failed to recreate '{}' from '{}' in {}: {}",
+                base_branch,
+                start,
+                repo.display(),
+                String::from_utf8_lossy(&checkout.stderr).trim()
+            );
+        }
+    }
+    Ok(())
+}
+
+fn effective_trunk_branch_for_repo(repo: &Path, trunk_branch: &str) -> String {
+    if trunk_branch == "main" {
+        crate::team::git_cmd::default_branch_name(repo).unwrap_or_else(|| "main".to_string())
+    } else {
+        trunk_branch.to_string()
+    }
+}
+
+/// Enumerate the set of repos to mutate for a worktree path. Returns
+/// `[worktree_path]` for single-repo worktrees, or the immediate sub-repos
+/// discovered by `git_cmd::discover_sub_repos` for multi-repo worktrees.
+/// Returns empty when the path is neither a git repo nor a container with
+/// git sub-repos — callers decide how to handle that (usually a no-op).
+fn iter_repos_for_mutation(worktree_path: &Path) -> Vec<PathBuf> {
+    if crate::team::git_cmd::is_git_repo(worktree_path) {
+        vec![worktree_path.to_path_buf()]
+    } else {
+        crate::team::git_cmd::discover_sub_repos(worktree_path)
+    }
 }
 
 /// Archive a branch to `preserved/<slug>-<timestamp>` if it has commits ahead
@@ -2634,5 +2708,102 @@ mod tests {
             archive_branch_if_commits_ahead(tmp.path(), "nonexistent-branch", "main", "test")
                 .unwrap();
         assert!(result.is_none(), "missing branch should return None");
+    }
+
+    // ---------------------------------------------------------------------
+    // B-1 multi-repo-aware helpers
+    // ---------------------------------------------------------------------
+
+    fn init_sub_repo(parent: &Path, name: &str) -> PathBuf {
+        let sub = parent.join(name);
+        fs::create_dir_all(&sub).unwrap();
+        git(&sub, &["init", "-q", "-b", "mainline"]);
+        git(&sub, &["config", "user.email", "batty-test@example.com"]);
+        git(&sub, &["config", "user.name", "Batty Test"]);
+        fs::write(sub.join("README.md"), format!("{name}\n")).unwrap();
+        git(&sub, &["add", "README.md"]);
+        git(&sub, &["commit", "-q", "-m", "init"]);
+        // Set origin/HEAD so default_branch_name picks up mainline without a remote.
+        // In tests we leave it unset and rely on the show-ref fallback probe.
+        sub
+    }
+
+    #[test]
+    fn iter_repos_for_mutation_returns_single_repo_for_standalone_worktree() {
+        if !git_available() {
+            return;
+        }
+        let Some(tmp) = init_repo() else {
+            return;
+        };
+        let repos = iter_repos_for_mutation(tmp.path());
+        assert_eq!(repos.len(), 1);
+        assert_eq!(repos[0], tmp.path());
+    }
+
+    #[test]
+    fn iter_repos_for_mutation_returns_sub_repos_for_multi_repo_container() {
+        if !git_available() {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        // Container dir is NOT a git repo, but holds 3 sub-repos.
+        let r1 = init_sub_repo(tmp.path(), "PkgA");
+        let r2 = init_sub_repo(tmp.path(), "PkgB");
+        let r3 = init_sub_repo(tmp.path(), "PkgC");
+        let mut repos = iter_repos_for_mutation(tmp.path());
+        repos.sort();
+        let mut expected = vec![r1, r2, r3];
+        expected.sort();
+        assert_eq!(repos, expected);
+    }
+
+    #[test]
+    fn iter_repos_for_mutation_returns_empty_for_non_git_non_container() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Empty dir: no .git, no git sub-dirs.
+        let repos = iter_repos_for_mutation(tmp.path());
+        assert!(repos.is_empty());
+    }
+
+    #[test]
+    fn checkout_base_branch_across_repos_handles_container_with_no_git_no_fatal() {
+        // B-1(1.1) regression: container-shaped worktree must NOT bail with
+        // 'fatal: not a git repository'. The fix treats a no-sub-repo container
+        // as a no-op. This was the exact shape that kept blocking #7 TTL reclaim.
+        if !git_available() {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let result = checkout_base_branch_across_repos(tmp.path(), "eng-1-3/99", "main", "test");
+        assert!(
+            result.is_ok(),
+            "container with no sub-repos must NOT fatal; got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn checkout_base_branch_across_repos_switches_branch_in_each_sub_repo() {
+        // B-1(1.2): three-sub-repo workspace must get the new branch created in
+        // each repo. Verifies multi-repo fan-out works for the base-branch reset
+        // that TTL reclaim runs.
+        if !git_available() {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let r1 = init_sub_repo(tmp.path(), "PkgA");
+        let r2 = init_sub_repo(tmp.path(), "PkgB");
+        let r3 = init_sub_repo(tmp.path(), "PkgC");
+        checkout_base_branch_across_repos(tmp.path(), "eng-1-3/19", "main", "test").unwrap();
+        for repo in [&r1, &r2, &r3] {
+            let out = run_git(repo, ["branch", "--show-current"]).unwrap();
+            let branch = String::from_utf8_lossy(&out.stdout);
+            assert_eq!(
+                branch.trim(),
+                "eng-1-3/19",
+                "repo {} should be on new branch",
+                repo.display()
+            );
+        }
     }
 }
