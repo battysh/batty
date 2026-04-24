@@ -8,7 +8,33 @@ use anyhow::Result;
 use tracing::warn;
 
 use super::super::*;
-use crate::team::{checkpoint, context_management};
+use crate::team::{checkpoint, context_management, inbox, inbox_tiered};
+
+struct PendingHandoffDepth {
+    mailbox: usize,
+    delivery_queue: usize,
+    total: usize,
+}
+
+fn extract_handoff_section(handoff: &str, heading: &str) -> Option<String> {
+    let mut lines = handoff.lines();
+    for line in lines.by_ref() {
+        if line.trim() == heading {
+            break;
+        }
+    }
+
+    let mut section = Vec::new();
+    for line in lines {
+        if line.starts_with("### ") || line.starts_with("## ") {
+            break;
+        }
+        section.push(line);
+    }
+
+    let summary = section.join("\n").trim().to_string();
+    (!summary.is_empty()).then_some(summary)
+}
 
 impl TeamDaemon {
     pub(in super::super) fn consume_restart_handoff(
@@ -91,17 +117,105 @@ impl TeamDaemon {
         work_dir: &Path,
     ) -> String {
         let assignment = Self::restart_assignment_message(task);
+        let resume_context =
+            checkpoint::read_restart_context(work_dir).filter(|context| context.task_id == task.id);
         let Some(handoff) = self.consume_restart_handoff(member_name, task, work_dir, "restart")
         else {
             return assignment;
         };
+        let proactive_notice = resume_context
+            .as_ref()
+            .filter(|context| context.reason == "context_pressure")
+            .map(|context| {
+                self.proactive_context_handoff_notice(
+                    member_name,
+                    task,
+                    work_dir,
+                    context,
+                    &handoff,
+                )
+            });
+
+        match proactive_notice {
+            Some(notice) => format!(
+                "You are continuing work on Task #{}.\n\n{}\n\n{}\n\nResume from where you left off. Do not repeat already completed work.\n\n{}",
+                task.id,
+                notice,
+                handoff.trim_end(),
+                assignment
+            ),
+            None => format!(
+                "You are continuing work on Task #{}.\n\n{}\n\nResume from where you left off. Do not repeat already completed work.\n\n{}",
+                task.id,
+                handoff.trim_end(),
+                assignment
+            ),
+        }
+    }
+
+    fn proactive_context_handoff_notice(
+        &self,
+        member_name: &str,
+        task: &crate::task::Task,
+        work_dir: &Path,
+        context: &checkpoint::RestartContext,
+        handoff: &str,
+    ) -> String {
+        let branch = context
+            .branch
+            .as_deref()
+            .or(task.branch.as_deref())
+            .unwrap_or("(unknown)");
+        let worktree = context
+            .worktree_path
+            .as_deref()
+            .unwrap_or_else(|| work_dir.to_str().unwrap_or("(unknown)"));
+        let pending = self.pending_handoff_message_depth(member_name);
+        let progress = extract_handoff_section(handoff, "### Progress Summary")
+            .filter(|summary| summary != "(none)")
+            .unwrap_or_else(|| "(none recorded)".to_string());
+        let next_action = task
+            .next_action
+            .as_deref()
+            .filter(|next| !next.trim().is_empty())
+            .unwrap_or(
+                "Continue from the current worktree state, verify acceptance criteria, and finish the task without redoing completed work.",
+            );
+        let output_note = context
+            .output_bytes
+            .map(|bytes| format!("\nOutput bytes at handoff: {bytes}"))
+            .unwrap_or_default();
 
         format!(
-            "You are continuing work on Task #{}.\n\n{}\n\nResume from where you left off. Do not repeat already completed work.\n\n{}",
-            task.id,
-            handoff.trim_end(),
-            assignment
+            "## Proactive Context Handoff\n\
+            Reason: context budget crossed the proactive restart threshold before hard exhaustion.\n\
+            Active task: #{} ({})\n\
+            Branch: {branch}\n\
+            Worktree: {worktree}\n\
+            Pending inbox depth: {} (mailbox {}, delivery queue {})\n\
+            Last progress summary: {progress}\n\
+            Exact next action after restart: {next_action}{output_note}",
+            task.id, task.title, pending.total, pending.mailbox, pending.delivery_queue,
         )
+    }
+
+    fn pending_handoff_message_depth(&self, member_name: &str) -> PendingHandoffDepth {
+        let inbox_root = inbox::inboxes_root(&self.config.project_root);
+        let mailbox = inbox_tiered::pending_messages_union(&inbox_root, member_name)
+            .or_else(|_| inbox::pending_messages(&inbox_root, member_name))
+            .map(|messages| messages.len())
+            .unwrap_or(0);
+        let delivery_queue = self
+            .pending_delivery_queue
+            .get(member_name)
+            .map(Vec::len)
+            .unwrap_or(0);
+
+        PendingHandoffDepth {
+            mailbox,
+            delivery_queue,
+            total: mailbox + delivery_queue,
+        }
     }
 
     #[allow(dead_code)]
@@ -649,9 +763,25 @@ mod tests {
         let handoff_path = tmp.path().join(crate::shim::runtime::HANDOFF_FILE_NAME);
         std::fs::write(
             &handoff_path,
-            "# Carry-Forward Summary\n## Task Spec\nTask #42: resume widget",
+            "# Carry-Forward Summary\n## Task Spec\nTask #42: resume widget\n\n### Progress Summary\nedited src/widget.rs and added focused tests\n\n## What Remains\nRun the Rust tests and finish the restart handoff.",
         )
         .unwrap();
+        let inbox_root = crate::team::inbox::inboxes_root(tmp.path());
+        crate::team::inbox::deliver_to_inbox(
+            &inbox_root,
+            &crate::team::inbox::InboxMessage::new_send("manager", "eng-1", "Queued review note"),
+        )
+        .unwrap();
+        daemon
+            .pending_delivery_queue
+            .entry("eng-1".to_string())
+            .or_default()
+            .push(crate::team::delivery::PendingMessage {
+                from: "architect".to_string(),
+                body: "Queued delivery note".to_string(),
+                message_id: None,
+                queued_at: std::time::Instant::now(),
+            });
         crate::team::context_management::stage_restart_context(
             tmp.path(),
             "eng-1",
@@ -665,6 +795,18 @@ mod tests {
         let message = daemon.restart_assignment_with_handoff("eng-1", &task, tmp.path());
 
         assert!(message.contains("You are continuing work on Task #42."));
+        assert!(message.contains("## Proactive Context Handoff"));
+        assert!(message.contains("Active task: #42 (resume widget)"));
+        assert!(message.contains(&format!("Worktree: {}", tmp.path().display())));
+        assert!(message.contains("Pending inbox depth: 2 (mailbox 1, delivery queue 1)"));
+        assert!(
+            message.contains("Last progress summary: edited src/widget.rs and added focused tests")
+        );
+        assert!(
+            message.contains(
+                "Exact next action after restart: Continue from the current worktree state"
+            )
+        );
         assert!(message.contains("# Carry-Forward Summary"));
         assert!(message.contains("Continue widget implementation."));
         assert!(

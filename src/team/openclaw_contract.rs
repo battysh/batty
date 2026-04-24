@@ -1217,6 +1217,7 @@ mod tests {
                     health: status::AgentHealthSummary {
                         restart_count: 1,
                         context_exhaustion_count: 1,
+                        proactive_handoff_count: 0,
                         delivery_failure_count: 0,
                         supervisory_digest_count: 2,
                         dispatch_fallback_count: 0,
@@ -1248,6 +1249,7 @@ mod tests {
                     health: status::AgentHealthSummary {
                         restart_count: 0,
                         context_exhaustion_count: 0,
+                        proactive_handoff_count: 0,
                         delivery_failure_count: 0,
                         supervisory_digest_count: 0,
                         dispatch_fallback_count: 0,
