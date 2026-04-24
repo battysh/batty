@@ -30,6 +30,7 @@ pub type GeneratedTask = TaskSpec;
 pub use parser::{create_board_tasks, parse_planning_response};
 pub use prompt::{
     PLANNING_RESPONSE_FORMAT, compose_planning_prompt, compose_planning_prompt_with_blockers,
+    compose_planning_prompt_with_recovery_context,
 };
 
 pub fn dispatchable_task_count(

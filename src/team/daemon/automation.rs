@@ -116,6 +116,41 @@ fn top_blocked_task_summaries(tasks: &[crate::task::Task], limit: usize) -> Vec<
         .collect()
 }
 
+fn top_review_drain_task_summaries(tasks: &[crate::task::Task], limit: usize) -> Vec<String> {
+    let held_tasks = top_blocked_task_summaries(tasks, 5);
+    let held_summary = if held_tasks.is_empty() {
+        "review backlog is holding dispatchable follow-up work".to_string()
+    } else {
+        held_tasks.join("; ")
+    };
+    let mut review_tasks = tasks
+        .iter()
+        .filter(|task| task.status == "review")
+        .filter(|task| !crate::team::status::is_review_task_explicitly_blocked(task))
+        .collect::<Vec<_>>();
+    review_tasks.sort_by_key(|task| (planning_priority_rank(&task.priority), task.id));
+
+    review_tasks
+        .into_iter()
+        .take(limit)
+        .map(|task| {
+            let review_owner = task.review_owner.as_deref().unwrap_or("unassigned");
+            let branch = task.branch.as_deref().unwrap_or("missing");
+            let commit = task.commit.as_deref().unwrap_or("missing");
+            let next_action = task.next_action.as_deref().unwrap_or("review disposition");
+            let artifacts = if task.artifacts.is_empty() {
+                "none".to_string()
+            } else {
+                task.artifacts.join(", ")
+            };
+            format!(
+                "#{} {}: review_owner={review_owner}; branch={branch}; commit={commit}; artifacts={artifacts}; next_action={next_action}; gates held tasks: {held_summary}",
+                task.id, task.title
+            )
+        })
+        .collect()
+}
+
 fn planning_board_state_label(
     tasks: &[crate::task::Task],
     dispatchable_task_count: usize,
@@ -2434,9 +2469,6 @@ impl TeamDaemon {
         ) {
             return Ok(());
         }
-        if self.maybe_emit_review_drain_before_planning(&board_tasks)? {
-            return Ok(());
-        }
         let actionable_review_count = board_tasks
             .iter()
             .filter(|task| task.status == "review")
@@ -2457,6 +2489,14 @@ impl TeamDaemon {
             actionable_review_count,
             blocked_count,
         );
+        let review_drain_task_summaries = if planning_state == "review-backlog-gated"
+            && dispatchable_task_count == 0
+            && actionable_review_count > 0
+        {
+            top_review_drain_task_summaries(&board_tasks, 1)
+        } else {
+            Vec::new()
+        };
         let implementation_work_summary = crate::team::tact::parser::implementation_work_summary(
             dispatchable_task_count,
             actionable_review_count,
@@ -2511,7 +2551,7 @@ impl TeamDaemon {
             idle_count: idle_engineer_count,
             dispatchable_count: dispatchable_task_count,
         };
-        let prompt = crate::team::tact::compose_planning_prompt_with_blockers(
+        let prompt = crate::team::tact::compose_planning_prompt_with_recovery_context(
             idle_engineer_count,
             &board_summary,
             &recent_completions,
@@ -2519,6 +2559,7 @@ impl TeamDaemon {
             &project_goals,
             &self.config.team_config.name,
             &blocked_task_summaries,
+            &review_drain_task_summaries,
         );
         let body = format!(
             "HIGH PRIORITY: planning cycle triggered because idle engineers outnumber dispatchable tasks.\n\n{prompt}"
@@ -3291,6 +3332,7 @@ mod tests {
         write_owned_task_file, write_owned_task_file_with_context,
     };
     use std::collections::HashMap;
+    use std::path::Path;
 
     fn test_task(
         id: u32,
@@ -3422,6 +3464,33 @@ printf 'Created task #%s\n' \"$id\"
 
     fn planning_inbox_messages(tmp: &tempfile::TempDir) -> Vec<inbox::InboxMessage> {
         inbox::pending_messages(&inbox::inboxes_root(tmp.path()), "architect").unwrap()
+    }
+
+    fn write_review_backlog_task(project_root: &Path) {
+        let tasks_dir = project_root
+            .join(".batty")
+            .join("team_config")
+            .join("board")
+            .join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+        std::fs::write(
+            tasks_dir.join("736-review-backlog.md"),
+            "---\n\
+id: 736\n\
+title: Review retry branch completion\n\
+status: review\n\
+priority: high\n\
+claimed_by: eng-1-2\n\
+review_owner: manager\n\
+branch: eng-1-2/736\n\
+commit: abc1234\n\
+artifacts:\n\
+  - .batty/reports/verification/completion/task-736-eng-1-2-attempt-1.json\n\
+next_action: review branch and disposition retry\n\
+class: standard\n\
+---\n\nTask description.\n",
+        )
+        .unwrap();
     }
 
     fn write_planning_docs(tmp: &tempfile::TempDir) {
@@ -3584,7 +3653,11 @@ thread 'tmux::tests::split_window_horizontal_creates_new_pane' panicked at src/t
         let messages = planning_inbox_messages(&tmp);
         assert_eq!(messages.len(), 1);
         assert!(messages[0].body.contains("Idle engineers available: 2"));
-        assert!(messages[0].body.contains("Propose exactly 2 task(s)."));
+        assert!(
+            messages[0]
+                .body
+                .contains("Propose exactly 1 review-drain unblock task.")
+        );
     }
 
     #[test]
@@ -3662,6 +3735,49 @@ thread 'tmux::tests::split_window_horizontal_creates_new_pane' panicked at src/t
                 .body
                 .contains("Each proposed task must name the blocked task id")
         );
+    }
+
+    #[test]
+    fn planning_cycle_review_backlog_prompt_requests_review_drain_unblock_work() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = planning_test_daemon(&tmp, 300);
+        write_review_backlog_task(tmp.path());
+        write_board_task_file(
+            tmp.path(),
+            738,
+            "blocked-release",
+            "blocked",
+            None,
+            &[],
+            Some("waiting on #736 review disposition"),
+        );
+        write_board_task_file(
+            tmp.path(),
+            739,
+            "blocked-dispatch",
+            "blocked",
+            None,
+            &[],
+            Some("waiting on #736 review disposition"),
+        );
+
+        daemon.maybe_trigger_planning_cycle().unwrap();
+
+        let messages = planning_inbox_messages(&tmp);
+        assert_eq!(messages.len(), 1);
+        let body = &messages[0].body;
+        assert!(body.contains("planning_state=review-backlog-gated"));
+        assert!(body.contains("Review backlog requiring drain/unblock tasks:"));
+        assert!(body.contains("#736 Review retry branch completion"));
+        assert!(body.contains("review_owner=manager"));
+        assert!(body.contains("branch=eng-1-2/736"));
+        assert!(body.contains("commit=abc1234"));
+        assert!(body.contains("task-736-eng-1-2-attempt-1.json"));
+        assert!(body.contains("next_action=review branch and disposition retry"));
+        assert!(body.contains("#738 blocked-release"));
+        assert!(body.contains("#739 blocked-dispatch"));
+        assert!(body.contains("Propose exactly 1 review-drain unblock task."));
+        assert!(body.contains("depends_on set to the review task id"));
     }
 
     #[test]

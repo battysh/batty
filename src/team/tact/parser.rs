@@ -567,6 +567,45 @@ No title here."#;
     }
 
     #[test]
+    fn create_board_tasks_keeps_review_drain_task_dispatchable_after_review_resolves() {
+        let tmp = tempfile::tempdir().unwrap();
+        let board_dir = tmp.path().join("board");
+        std::fs::create_dir_all(board_dir.join("tasks")).unwrap();
+        let fake_kanban = setup_fake_kanban(&tmp).join("kanban-md");
+        let specs = parse_planning_response(
+            r#"---
+title: "Drain review backlog for task 736"
+priority: high
+depends_on: [736]
+tags: [review-backlog, dispatch]
+---
+Task body:
+- Review .batty/reports/verification/completion/task-736-eng-1-2-attempt-1.json
+- Disposition commit abc1234 on branch eng-1-2/736 so held tasks can proceed.
+"#,
+        );
+
+        let ids =
+            create_board_tasks_with_program(&specs, &board_dir, fake_kanban.to_str().unwrap())
+                .unwrap();
+        std::fs::write(
+            board_dir.join("tasks").join("736-reviewed.md"),
+            "---\nid: 736\ntitle: Reviewed source\nstatus: done\npriority: high\nclass: standard\n---\n\nReview resolved.\n",
+        )
+        .unwrap();
+
+        assert_eq!(ids, vec![1]);
+        let tasks = crate::team::resolver::dispatchable_tasks(&board_dir).unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].title, "Drain review backlog for task 736");
+        assert_eq!(tasks[0].status, "todo");
+        assert_eq!(tasks[0].priority, "high");
+        assert_eq!(tasks[0].depends_on, vec![736]);
+        assert!(tasks[0].blocked.is_none());
+        assert!(tasks[0].blocked_on.is_none());
+    }
+
+    #[test]
     fn create_board_tasks_missing_board_dir_returns_clear_error() {
         let specs = vec![TaskSpec {
             title: "Task one".into(),

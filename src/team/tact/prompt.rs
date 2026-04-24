@@ -61,12 +61,39 @@ pub fn compose_planning_prompt_with_blockers(
     project_name: &str,
     blocked_task_summaries: &[String],
 ) -> String {
+    compose_planning_prompt_with_recovery_context(
+        idle_engineer_count,
+        board_summary,
+        recent_completions,
+        roadmap_context,
+        project_goals,
+        project_name,
+        blocked_task_summaries,
+        &[],
+    )
+}
+
+pub fn compose_planning_prompt_with_recovery_context(
+    idle_engineer_count: usize,
+    board_summary: &str,
+    recent_completions: &[String],
+    roadmap_context: &[String],
+    project_goals: &[String],
+    project_name: &str,
+    blocked_task_summaries: &[String],
+    review_task_summaries: &[String],
+) -> String {
     let dispatchable_count = board_summary
         .split(',')
         .find_map(|part| part.trim().strip_prefix("dispatchable_tasks="))
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(0);
-    let requested_count = idle_engineer_count.saturating_sub(dispatchable_count);
+    let review_drain_mode = !review_task_summaries.is_empty();
+    let requested_count = if review_drain_mode {
+        1
+    } else {
+        idle_engineer_count.saturating_sub(dispatchable_count)
+    };
     let tact_prompt = TactPrompt {
         board_summary: format!(
             "{board_summary}, idle_engineers={idle_engineer_count}, dispatchable_tasks={}",
@@ -77,7 +104,7 @@ pub fn compose_planning_prompt_with_blockers(
         ),
         recent_completions: recent_completions.to_vec(),
         roadmap_priorities: roadmap_context.to_vec(),
-        idle_count: idle_engineer_count,
+        idle_count: dispatchable_count + requested_count,
         dispatchable_count,
     };
     let completions = if recent_completions.is_empty() {
@@ -126,7 +153,26 @@ Unblock task directive:\n\
 - Prefer concrete dependency-clearing, missing-artifact, failing-test, decision, or investigation work.\n\n"
         )
     };
-    let task_kind = if blocked_task_summaries.is_empty() {
+    let review_section = if review_task_summaries.is_empty() {
+        String::new()
+    } else {
+        let review_tasks = review_task_summaries
+            .iter()
+            .map(|task| format!("- {task}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!(
+            "Review backlog requiring drain/unblock tasks:\n{review_tasks}\n\n\
+Review-drain directive:\n\
+- Propose exactly one concrete review-disposition or unblock task for the top review item.\n\
+- The returned task must be a normal high-priority todo/backlog task with depends_on set to the review task id.\n\
+- Do not mark the returned task blocked solely because the source board is review-gated.\n\
+- Include the review artifact, branch, commit, next_action, and held task gate in the task body.\n\n"
+        )
+    };
+    let task_kind = if review_drain_mode {
+        "review-drain unblock task"
+    } else if blocked_task_summaries.is_empty() {
         "task(s)"
     } else {
         "executable unblock task(s)"
@@ -140,6 +186,7 @@ Current board state:\n\
 - Recently completed work:\n{completions}\n\n\
 Board summary:\n{board_summary}\n\n\
 {blocker_section}\
+{review_section}\
 Roadmap context:\n{roadmap}\n\n\
 Project goals:\n{goals}\n\n\
 Propose exactly {requested_count} {task_kind}. Each task must be feature-sized, self-contained, \
@@ -255,6 +302,34 @@ mod tests {
         assert!(prompt.contains("#737 Convert blocked-only planning cycles"));
         assert!(prompt.contains("Propose exactly 2 executable unblock task(s)."));
         assert!(prompt.contains("Each proposed task must name the blocked task id"));
+    }
+
+    #[test]
+    fn compose_with_review_backlog_requests_one_review_drain_task() {
+        let prompt = compose_planning_prompt_with_recovery_context(
+            3,
+            "todo=0, backlog=0, review=1, actionable_review=1, blocked=2, dispatchable_tasks=0, planning_state=review-backlog-gated",
+            &[],
+            &[],
+            &[],
+            "Batty",
+            &[
+                "#738 Ship dependent release: waiting on #736 review disposition".to_string(),
+                "#739 Restore downstream dispatch: waiting on #736 review disposition".to_string(),
+            ],
+            &[
+                "#736 Drain completion review: review_owner=manager; branch=eng-1-2/736; commit=abc1234; artifacts=.batty/reports/verification/completion/task-736-eng-1-2-attempt-1.json; next_action=review commit; gates held tasks: #738, #739".to_string(),
+            ],
+        );
+
+        assert!(prompt.contains("Review backlog requiring drain/unblock tasks:"));
+        assert!(prompt.contains("#736 Drain completion review"));
+        assert!(prompt.contains("commit=abc1234"));
+        assert!(prompt.contains("task-736-eng-1-2-attempt-1.json"));
+        assert!(prompt.contains("Propose exactly 1 review-drain unblock task."));
+        assert!(prompt.contains("depends_on set to the review task id"));
+        assert!(prompt.contains("Do not mark the returned task blocked"));
+        assert!(prompt.contains("Please specify 1 new tasks"));
     }
 
     #[test]
