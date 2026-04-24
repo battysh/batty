@@ -2070,29 +2070,36 @@ impl TeamDaemon {
         let tasks = crate::task::load_tasks_from_dir(&board_dir.join("tasks"))?;
         let done_task_ids: HashSet<u32> = tasks
             .iter()
-            .filter(|task| task.status == "done")
+            .filter(|task| matches!(task.status.as_str(), "done" | "archived"))
             .map(|task| task.id)
             .collect();
         let unblocked_tasks = tasks
             .iter()
-            .filter(|task| task.status == "blocked")
             .filter(|task| !task.depends_on.is_empty())
             .filter(|task| {
                 task.depends_on
                     .iter()
                     .all(|dependency| done_task_ids.contains(dependency))
             })
+            .filter(|task| match task.status.as_str() {
+                "blocked" => true,
+                "todo" | "backlog" | "runnable" => {
+                    task.blocked.is_some() || task.blocked_on.is_some() || task.claimed_by.is_some()
+                }
+                _ => false,
+            })
             .map(|task| {
                 (
                     task.id,
                     task.title.clone(),
+                    task.status.clone(),
                     task.depends_on.clone(),
                     self.auto_unblock_notification_recipient(task),
                 )
             })
             .collect::<Vec<_>>();
 
-        for (task_id, title, dependencies, recipient) in unblocked_tasks {
+        for (task_id, title, original_status, dependencies, recipient) in unblocked_tasks {
             let current_task = crate::task::load_task_by_id(&board_dir.join("tasks"), task_id)
                 .with_context(|| format!("failed to reload task #{task_id} before auto-unblock"))?;
             if current_task.status == "blocked" {
@@ -2107,6 +2114,12 @@ impl TeamDaemon {
                 task_cmd::clear_blocked_fields(&board_dir, task_id).with_context(|| {
                     format!("failed to clear stale blocked fields for task #{task_id}")
                 })?;
+            }
+            let current_task = crate::task::load_task_by_id(&board_dir.join("tasks"), task_id)
+                .with_context(|| format!("failed to reload task #{task_id} after auto-unblock"))?;
+            if current_task.status != "in-progress" {
+                task_cmd::unclaim_task(&board_dir, task_id)
+                    .with_context(|| format!("failed to clear stale claim for task #{task_id}"))?;
             }
 
             let dependency_list = dependencies
@@ -2131,9 +2144,15 @@ impl TeamDaemon {
             let Some(recipient) = recipient else {
                 continue;
             };
-            let body = format!(
-                "Task #{task_id} ({title}) was automatically moved from `blocked` to `todo` because dependencies [{dependency_list}] are done."
-            );
+            let body = if original_status == "blocked" {
+                format!(
+                    "Task #{task_id} ({title}) was automatically moved from `blocked` to `todo` because dependencies [{dependency_list}] are done."
+                )
+            } else {
+                format!(
+                    "Task #{task_id} ({title}) was automatically released for dispatch because dependencies [{dependency_list}] are done."
+                )
+            };
             if let Err(error) = self.queue_daemon_message(&recipient, &body) {
                 warn!(
                     task_id,
@@ -3794,6 +3813,7 @@ thread 'tmux::tests::split_window_horizontal_creates_new_pane' panicked at src/t
         let tasks = crate::task::load_tasks_from_dir(&board_tasks_dir).unwrap();
         let task = tasks.iter().find(|task| task.id == 13).unwrap();
         assert_eq!(task.status, "todo");
+        assert!(task.claimed_by.is_none());
         assert!(task.blocked_on.is_none());
         assert!(task.blocked.is_none());
 
@@ -3813,6 +3833,48 @@ thread 'tmux::tests::split_window_horizontal_creates_new_pane' panicked at src/t
                 && event.role.as_deref() == Some("eng-1")
                 && event.task.as_deref() == Some("13")
         }));
+    }
+
+    #[test]
+    fn maybe_auto_unblock_clears_stale_claim_from_todo_dependency_task() {
+        let tmp = tempfile::tempdir().unwrap();
+        let engineer = MemberInstance {
+            name: "eng-1".to_string(),
+            role_name: "eng".to_string(),
+            role_type: RoleType::Engineer,
+            agent: Some("codex".to_string()),
+            prompt: None,
+            reports_to: None,
+            use_worktrees: false,
+            ..Default::default()
+        };
+        let mut daemon = make_test_daemon(tmp.path(), vec![engineer]);
+        let board_tasks_dir = tmp
+            .path()
+            .join(".batty")
+            .join("team_config")
+            .join("board")
+            .join("tasks");
+
+        write_board_task_file(tmp.path(), 41, "dep-a", "done", None, &[], None);
+        write_board_task_file(
+            tmp.path(),
+            42,
+            "todo-child",
+            "todo",
+            Some("eng-1"),
+            &[41],
+            Some("waiting on dependencies"),
+        );
+
+        daemon.maybe_auto_unblock_blocked_tasks().unwrap();
+
+        let tasks = crate::task::load_tasks_from_dir(&board_tasks_dir).unwrap();
+        let task = tasks.iter().find(|task| task.id == 42).unwrap();
+        assert_eq!(task.status, "todo");
+        assert!(task.claimed_by.is_none());
+        assert!(task.blocked_on.is_none());
+        assert!(task.blocked.is_none());
     }
 
     #[test]

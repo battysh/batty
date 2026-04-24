@@ -1963,6 +1963,28 @@ mod tests {
     }
 
     #[test]
+    fn next_task_skips_blocked_or_reworked_parent_dependencies() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_open_task_file(tmp.path(), 8, "blocked-parent", "blocked");
+        write_open_task_file(tmp.path(), 9, "rework-parent", "rework");
+        write_task_with_deps(tmp.path(), 10, "blocked-child", &[8]);
+        write_task_with_deps(tmp.path(), 11, "rework-child", &[9]);
+        write_open_task_file(tmp.path(), 12, "free-task", "todo");
+
+        let daemon = TestDaemonBuilder::new(tmp.path()).build();
+        let board_dir = tmp.path().join(".batty").join("team_config").join("board");
+
+        let task = daemon
+            .test_next_dispatch_task(&board_dir, &HashSet::new())
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            task.id, 12,
+            "should only dispatch work whose parents are done or archived"
+        );
+    }
+
+    #[test]
     fn next_task_allows_met_dependencies() {
         let tmp = tempfile::tempdir().unwrap();
         write_open_task_file(tmp.path(), 9, "dep-done", "done");
