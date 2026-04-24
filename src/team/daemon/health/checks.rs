@@ -208,6 +208,7 @@ impl TeamDaemon {
     /// been cherry-picked onto main, and auto-reset them to the base branch.
     /// Also detects and auto-recovers worktrees stuck in merge conflict state.
     pub(in super::super) fn check_worktree_staleness(&mut self) -> Result<()> {
+        self.reconcile_active_tasks()?;
         let project_root = self.project_root().to_path_buf();
         if git_has_unresolved_conflicts(&project_root).unwrap_or(false) {
             let conflict_files = conflict_paths(&project_root);

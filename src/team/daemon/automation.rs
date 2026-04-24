@@ -874,7 +874,7 @@ impl TeamDaemon {
             .collect();
         let mut released_claims = false;
         for (engineer, task_id, reason, release_claim) in stale {
-            if reason == "task is done" {
+            if matches!(reason, "task is done" | "task is archived") {
                 if let Some(task) = board_tasks.iter().find(|task| task.id == task_id) {
                     let worktree_dir = self.worktree_dir(&engineer);
                     if worktree_dir.exists() {
@@ -893,7 +893,7 @@ impl TeamDaemon {
                         ) {
                             Ok(Some(record)) => {
                                 self.record_orchestrator_action(format!(
-                                    "state reconciliation: preserved completed task #{} for {} before cleanup ({})",
+                                    "state reconciliation: preserved terminal task #{} for {} before cleanup ({})",
                                     task_id,
                                     engineer,
                                     record.doctor_check_line()
@@ -924,6 +924,10 @@ impl TeamDaemon {
                 "Reconciled stale active_task: {engineer} was tracking task #{task_id} ({reason})"
             );
             let correction = match reason {
+                "task is done" => "clear_done",
+                "task is archived" => "clear_archived",
+                "task no longer exists" => "clear_missing",
+                "task no longer claimed by this engineer" => "clear_unassigned",
                 "task entered review" => "release_review",
                 "task entered blocked" => "release_blocked",
                 _ => "clear",
@@ -965,22 +969,6 @@ impl TeamDaemon {
                 engineer,
                 reason
             ));
-            // #630: if the task is done/archived but the engineer's
-            // worktree is still dirty on the old task branch,
-            // snapshot the dirty state into a preservation commit
-            // so the worktree can be freed for the next task. Without
-            // this call the engineer sits on a completed branch
-            // indefinitely until a human intervenes.
-            if reason == "task is done/archived" {
-                let worktree_dir = self.worktree_dir(&engineer);
-                if worktree_dir.exists() {
-                    self.preserve_worktree_before_restart(
-                        &engineer,
-                        &worktree_dir,
-                        "post_approval_dirty_lane_recovery",
-                    );
-                }
-            }
             self.clear_active_task(&engineer);
         }
         if released_claims {
@@ -4060,7 +4048,24 @@ thread 'tmux::tests::split_window_horizontal_creates_new_pane' panicked at src/t
         );
 
         daemon.reconcile_active_tasks().unwrap();
+        daemon.reconcile_active_tasks().unwrap();
         assert!(!daemon.active_tasks.contains_key("eng-1"));
+
+        let events =
+            crate::team::events::read_events(&crate::team::team_events_path(tmp.path())).unwrap();
+        let clear_done_events = events
+            .iter()
+            .filter(|event| {
+                event.event == "state_reconciliation"
+                    && event.role.as_deref() == Some("eng-1")
+                    && event.task.as_deref() == Some("10")
+                    && event.reason.as_deref() == Some("clear_done")
+            })
+            .count();
+        assert_eq!(
+            clear_done_events, 1,
+            "done-task cleanup should emit one stale active audit event"
+        );
     }
 
     #[test]
@@ -4091,6 +4096,70 @@ thread 'tmux::tests::split_window_horizontal_creates_new_pane' panicked at src/t
 
         daemon.reconcile_active_tasks().unwrap();
         assert!(!daemon.active_tasks.contains_key("eng-1"));
+
+        let events =
+            crate::team::events::read_events(&crate::team::team_events_path(tmp.path())).unwrap();
+        assert!(events.iter().any(|event| {
+            event.event == "state_reconciliation"
+                && event.role.as_deref() == Some("eng-1")
+                && event.task.as_deref() == Some("10")
+                && event.reason.as_deref() == Some("clear_archived")
+        }));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn reconcile_active_tasks_preserves_dirty_archived_lane_before_clear() {
+        let _path_lock = PATH_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "reconcile-archived-dirty-lane");
+        let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
+        let team_config_dir = repo.join(".batty").join("team_config");
+        let base_branch = engineer_base_branch_name("eng-1");
+        setup_engineer_worktree(&repo, &worktree_dir, &base_branch, &team_config_dir).unwrap();
+        crate::team::task_loop::checkout_worktree_branch_from_main(&worktree_dir, "eng-1/42")
+            .unwrap();
+        std::fs::write(
+            worktree_dir.join("archived-dirty.txt"),
+            "archived dirty work\n",
+        )
+        .unwrap();
+        git_ok(&worktree_dir, &["add", "archived-dirty.txt"]);
+
+        write_owned_task_file_with_context(
+            &repo,
+            42,
+            "archived-task",
+            "archived",
+            "eng-1",
+            "eng-1/42",
+            ".batty/worktrees/eng-1",
+        );
+
+        let mut daemon = TestDaemonBuilder::new(repo.as_path())
+            .members(vec![
+                manager_member("manager", None),
+                engineer_member("eng-1", Some("manager"), true),
+            ])
+            .states(HashMap::from([("eng-1".to_string(), MemberState::Idle)]))
+            .build();
+        daemon.active_tasks.insert("eng-1".to_string(), 42);
+
+        daemon.reconcile_active_tasks().unwrap();
+
+        assert!(!daemon.active_tasks.contains_key("eng-1"));
+        assert_eq!(current_worktree_branch(&worktree_dir).unwrap(), base_branch);
+        assert!(
+            !crate::team::task_loop::worktree_has_user_changes(&worktree_dir).unwrap(),
+            "dirty archived-lane work should be preserved before the lane is reset"
+        );
+        let preserved_record =
+            crate::team::checkpoint::read_preserved_lane_record(&repo, "eng-1").unwrap();
+        assert_eq!(preserved_record.task_id, 42);
+        assert!(
+            preserved_record.doctor_check_line().contains("eng-1/42"),
+            "preservation record should name the archived task branch"
+        );
     }
 
     #[test]
