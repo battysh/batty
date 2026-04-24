@@ -87,10 +87,9 @@ impl TeamDaemon {
             // escalates (`escalation_sent = true`), the architect signal becomes
             // load-bearing again, so we only suppress the pre-escalation window.
             .filter(|name| {
-                !self
-                    .owned_task_interventions
+                self.owned_task_interventions
                     .get(name.as_str())
-                    .is_some_and(|state| !state.escalation_sent)
+                    .is_none_or(|state| state.escalation_sent)
             })
             .filter_map(|name| {
                 let task_ids: Vec<u32> = tasks
@@ -111,6 +110,24 @@ impl TeamDaemon {
             .iter()
             .filter(|task| dispatchable_task_ids.contains(&task.id))
             .collect();
+
+        if !idle_active_engineers.is_empty() || !idle_unassigned_engineers.is_empty() {
+            if let Some(gate) = phase_gate_blocks_dispatch(&tasks, &dispatchable_task_ids) {
+                info!(
+                    gated_tasks = gate.task_ids.len(),
+                    reasons = %gate.reasons.join("; "),
+                    idle_active_engineers = idle_active_engineers.len(),
+                    idle_unassigned_engineers = idle_unassigned_engineers.len(),
+                    "suppressing utilization intervention: phase gate blocks dispatch"
+                );
+                self.record_orchestrator_action(format!(
+                    "recovery: utilization suppressed by phase gate (gated tasks: {}; reasons: {})",
+                    format_task_ids(&gate.task_ids),
+                    gate.reasons.join("; ")
+                ));
+                return Ok(());
+            }
+        }
 
         let utilization_gap = !idle_active_engineers.is_empty()
             || (!idle_unassigned_engineers.is_empty() && !unassigned_open_tasks.is_empty());
@@ -320,6 +337,83 @@ impl TeamDaemon {
             message,
         )
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PhaseGateDispatchBlock {
+    task_ids: Vec<u32>,
+    reasons: Vec<String>,
+}
+
+fn phase_gate_blocks_dispatch(
+    tasks: &[crate::task::Task],
+    dispatchable_task_ids: &std::collections::HashSet<u32>,
+) -> Option<PhaseGateDispatchBlock> {
+    if !dispatchable_task_ids.is_empty() {
+        return None;
+    }
+
+    let mut task_ids = Vec::new();
+    let mut reasons = std::collections::BTreeSet::new();
+    for task in tasks {
+        if !matches!(task.status.as_str(), "todo" | "backlog" | "runnable") {
+            continue;
+        }
+        if task.claimed_by.is_some() {
+            continue;
+        }
+        let Some(reason) = phase_gate_reason(task) else {
+            continue;
+        };
+        task_ids.push(task.id);
+        reasons.insert(reason);
+    }
+
+    if task_ids.is_empty() {
+        return None;
+    }
+
+    task_ids.sort_unstable();
+    Some(PhaseGateDispatchBlock {
+        task_ids,
+        reasons: reasons.into_iter().collect(),
+    })
+}
+
+fn phase_gate_reason(task: &crate::task::Task) -> Option<String> {
+    for reason in task.blocked.iter().chain(task.blocked_on.iter()) {
+        if declares_phase_gate(reason) {
+            return Some(reason.clone());
+        }
+    }
+    if task.tags.iter().any(|tag| declares_phase_gate(tag)) {
+        return Some("phase-gate tag".to_string());
+    }
+    if declares_phase_gate(&task.description) {
+        return Some("description declares phase gate".to_string());
+    }
+    None
+}
+
+fn declares_phase_gate(text: &str) -> bool {
+    let normalized: String = text
+        .chars()
+        .map(|ch| match ch {
+            '-' | '_' => ' ',
+            other => other.to_ascii_lowercase(),
+        })
+        .collect();
+    normalized.contains("phase gate")
+        || normalized.contains("phase gated")
+        || normalized.contains("gated by phase")
+}
+
+fn format_task_ids(task_ids: &[u32]) -> String {
+    task_ids
+        .iter()
+        .map(|id| format!("#{id}"))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 pub(super) fn architect_utilization_intervention_key(member_name: &str) -> String {

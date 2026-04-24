@@ -158,6 +158,10 @@ fatal: Not a valid object name eng-main/<eng>
 
 **Fix direction:** Reproduce first. Likely candidates: tmux session state drift, stalled kiro-cli subprocess, or shim waiting on a marker that never arrives (overlap with P0-4/P0-5).
 
+**Status 2026-04-24:** Bounded reproducer added in `tmux::tests::command_timeout_reproducer_bounds_stalled_subprocess`: a stuck child process is killed at the instrumentation timeout instead of wedging the harness. Initial isolation points at blocking `tmux` subprocess calls in marker verification (`capture-pane` / `send-keys`) rather than tmux state drift or shim state transitions.
+
+**Follow-up task:** Broaden the same timeout wrapper to the remaining supervision-critical `tmux` command sites (`pane_id`, pane metadata, paste-buffer/load-buffer, layout probes) and include command/target/elapsed telemetry in daemon logs so future hangs identify the exact blocking operation.
+
 ---
 
 ## P1-6 — AIM package eventId-* dirs bleed across DevSpace launches
@@ -193,6 +197,8 @@ fatal: Not a valid object name eng-main/<eng>
 **Impact:** Prompt noise; occasional agent over-reach into protected `planning/continuous_improvement/` files. Mitigated with explicit prompts, not code.
 
 **Fix direction:** Daemon should read phase-gate config from roadmap and suppress idle-nudges when the gate explicitly blocks dispatch. Or expose a `nudge_replenish_disabled` file primitive (already partially exists as marker file) to the manager prompt.
+
+**Status:** Fixed in Task #692. Utilization recovery now suppresses architect nudges when no engineer-dispatchable tasks exist and the remaining unassigned open work explicitly declares a phase gate in its blocker/tag/description. The suppression is written to logs/orchestrator activity so it is distinguishable from a stalled daemon, and runnable ungated work still triggers utilization recovery.
 
 ---
 

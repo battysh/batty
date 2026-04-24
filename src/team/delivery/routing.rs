@@ -6,6 +6,7 @@ use uuid::Uuid;
 
 use super::{MessageDelivery, PendingMessage};
 use crate::team::append_shim_event_log;
+use crate::team::completion;
 use crate::team::config::RoleType;
 use crate::team::daemon::{PendingAckInboxMessage, PendingShimAck, TeamDaemon};
 use crate::team::errors::DeliveryError;
@@ -231,6 +232,174 @@ fn is_structured_completion_packet(body: &str) -> bool {
         || body.contains("outcome: ready_for_review");
 
     mentions_task && tests_passed && ready_for_review
+}
+
+#[derive(Debug, Clone)]
+struct ReviewPacketTriageNudge {
+    body: String,
+    cooldown_key: String,
+}
+
+fn extract_bracketed_sender(body: &str) -> Option<String> {
+    let trimmed = body.trim_start();
+    let rest = trimmed.strip_prefix('[')?;
+    let end = rest.find(']')?;
+    let value = rest[..end].trim();
+    (!value.is_empty()).then(|| value.to_string())
+}
+
+fn extract_task_id_field(body: &str) -> Option<u32> {
+    let field_start = body.find("task_id")?;
+    let after_field = &body[field_start + "task_id".len()..];
+    let digit_start = after_field.find(|c: char| c.is_ascii_digit())?;
+    let digits = after_field[digit_start..]
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect::<String>();
+    digits.parse().ok()
+}
+
+fn extract_task_id_number(body: &str) -> Option<u32> {
+    extract_task_id(body)
+        .and_then(|id| id.parse().ok())
+        .or_else(|| extract_task_id_field(body))
+}
+
+fn extract_json_string_field(body: &str, field: &str) -> Option<String> {
+    let needle = format!("\"{field}\"");
+    let field_start = body.find(&needle)?;
+    let after_field = &body[field_start + needle.len()..];
+    let colon = after_field.find(':')?;
+    let after_colon = after_field[colon + 1..].trim_start();
+    let rest = after_colon.strip_prefix('"')?;
+    let end = rest.find('"')?;
+    let value = rest[..end].trim();
+    (!value.is_empty()).then(|| value.to_string())
+}
+
+fn extract_line_field(body: &str, field: &str) -> Option<String> {
+    body.lines().find_map(|line| {
+        let trimmed = line.trim();
+        let (key, value) = trimmed.split_once(':')?;
+        if key.trim().eq_ignore_ascii_case(field) {
+            let value = value.trim().trim_matches('"');
+            (!value.is_empty()).then(|| value.to_string())
+        } else {
+            None
+        }
+    })
+}
+
+fn tests_summary(body: &str, packet: Option<&completion::CompletionPacket>) -> String {
+    if let Some(packet) = packet {
+        return match (packet.tests_run, packet.tests_passed) {
+            (true, true) => "passed (reported run)".to_string(),
+            (true, false) => "failed (reported run)".to_string(),
+            (false, true) => "passed (run not reported)".to_string(),
+            (false, false) => "not reported".to_string(),
+        };
+    }
+
+    let normalized = normalized_body(body);
+    if normalized.contains("\"tests_passed\":true")
+        || normalized.contains("\"tests_passed\": true")
+        || normalized.contains("tests_passed: true")
+        || normalized.contains("tests: passed")
+    {
+        "passed".to_string()
+    } else if normalized.contains("\"tests_passed\":false")
+        || normalized.contains("\"tests_passed\": false")
+        || normalized.contains("tests_passed: false")
+        || normalized.contains("tests: failed")
+    {
+        "failed".to_string()
+    } else {
+        "not reported".to_string()
+    }
+}
+
+fn requested_review_action(body: &str, packet: Option<&completion::CompletionPacket>) -> String {
+    if let Some(packet) = packet
+        && !packet.outcome.trim().is_empty()
+    {
+        return format!(
+            "{}; review completion and decide merge, rework, or escalation",
+            packet.outcome.trim()
+        );
+    }
+
+    let normalized = normalized_body(body);
+    if normalized.contains("requires manual review")
+        || normalized.contains("awaiting manual review")
+    {
+        "manual review required; decide merge, rework, or escalation".to_string()
+    } else if normalized.contains("ready_for_review") || normalized.contains("ready for review") {
+        "ready for review; decide merge, rework, or escalation".to_string()
+    } else {
+        "review the packet and decide the next action".to_string()
+    }
+}
+
+fn build_review_packet_triage_nudge(
+    recipient: &str,
+    message: &inbox::InboxMessage,
+) -> Option<ReviewPacketTriageNudge> {
+    let normalized = normalized_body(&message.body);
+    if normalized.starts_with("review packet delivered:") {
+        return None;
+    }
+
+    let packet = completion::parse_completion(&message.body).ok();
+    let task_id = packet
+        .as_ref()
+        .map(|packet| packet.task_id)
+        .or_else(|| extract_task_id_number(&message.body));
+    let is_review_packet = packet.is_some()
+        || is_manager_completion_notice(&normalized)
+        || (matches!(
+            inbox::classify_message(message),
+            inbox::MessageCategory::ReviewRequest
+        ) && task_id.is_some());
+
+    if !is_review_packet {
+        return None;
+    }
+
+    let engineer = extract_bracketed_sender(&message.body).unwrap_or_else(|| message.from.clone());
+    let branch = packet
+        .as_ref()
+        .and_then(|packet| packet.branch.clone())
+        .or_else(|| extract_json_string_field(&message.body, "branch"))
+        .or_else(|| extract_line_field(&message.body, "branch"));
+    let commit = packet
+        .as_ref()
+        .and_then(|packet| packet.commit.clone())
+        .or_else(|| extract_json_string_field(&message.body, "commit"))
+        .or_else(|| extract_line_field(&message.body, "commit"));
+    let task = task_id
+        .map(|id| format!("#{id}"))
+        .unwrap_or_else(|| "unknown".to_string());
+    let branch = branch.unwrap_or_else(|| "not provided".to_string());
+    let commit = commit.unwrap_or_else(|| "not provided".to_string());
+    let tests = tests_summary(&message.body, packet.as_ref());
+    let action = requested_review_action(&message.body, packet.as_ref());
+
+    let body = format!(
+        "Review packet delivered: triage this completion now.\n\
+         Task: {task}\n\
+         Engineer: {engineer}\n\
+         Branch: {branch}\n\
+         Commit: {commit}\n\
+         Tests: {tests}\n\
+         Requested review action: {action}\n\n\
+         Packet contents:\n{}",
+        message.body
+    );
+
+    Some(ReviewPacketTriageNudge {
+        body,
+        cooldown_key: format!("review_packet_triage:{recipient}:{}", message.id),
+    })
 }
 
 fn is_manager_status_update(body: &str) -> bool {
@@ -620,7 +789,7 @@ impl TeamDaemon {
                 self.mark_member_working(recipient);
                 Ok(MessageDelivery::LivePane)
             }
-            Err(error) => Err(error.into()),
+            Err(error) => Err(error),
         }
     }
 
@@ -1073,12 +1242,28 @@ impl TeamDaemon {
                             );
                             Ok(MessageDelivery::OrchestratorLogged)
                         } else {
+                            let review_packet_nudge = build_review_packet_triage_nudge(name, msg)
+                                .filter(|nudge| {
+                                    let cooldown = Duration::from_secs(
+                                        self.config
+                                            .team_config
+                                            .automation
+                                            .intervention_cooldown_secs,
+                                    );
+                                    self.intervention_cooldowns
+                                        .get(&nudge.cooldown_key)
+                                        .is_none_or(|sent_at| sent_at.elapsed() >= cooldown)
+                                });
+                            let delivery_body = review_packet_nudge
+                                .as_ref()
+                                .map(|nudge| nudge.body.as_str())
+                                .unwrap_or(&msg.body);
                             info!(from = %msg.from, to = %name, id = %msg.id, "delivering inbox message via shim");
                             if self.shim_handles.contains_key(name) {
                                 let result = self.send_live_shim_message(
                                     name,
                                     &msg.from,
-                                    &msg.body,
+                                    delivery_body,
                                     msg.id.clone(),
                                     vec![PendingAckInboxMessage {
                                         id: msg.id.clone(),
@@ -1093,6 +1278,12 @@ impl TeamDaemon {
                                     handle.apply_state_change(
                                         crate::shim::protocol::ShimState::Working,
                                     );
+                                }
+                                if result.is_ok()
+                                    && let Some(nudge) = review_packet_nudge
+                                {
+                                    self.intervention_cooldowns
+                                        .insert(nudge.cooldown_key, Instant::now());
                                 }
                                 result
                             } else {
@@ -1546,6 +1737,30 @@ mod tests {
         daemon.config.team_config.roles = inferred_role_defs(&daemon.config.members);
         daemon.config.pane_map = HashMap::from([("eng-1".to_string(), "%9999999".to_string())]);
         daemon
+    }
+
+    fn install_idle_test_shim(
+        daemon: &mut TeamDaemon,
+        tmp: &tempfile::TempDir,
+        member: &str,
+    ) -> crate::shim::protocol::Channel {
+        let (parent_sock, child_sock) = crate::shim::protocol::socketpair().unwrap();
+        let parent_channel = crate::shim::protocol::Channel::new(parent_sock);
+        let child_channel = crate::shim::protocol::Channel::new(child_sock);
+        let mut handle = crate::team::daemon::agent_handle::AgentHandle::new(
+            member.to_string(),
+            parent_channel,
+            12345,
+            "claude".to_string(),
+            "claude".to_string(),
+            tmp.path().to_path_buf(),
+        );
+        handle.apply_state_change(crate::shim::protocol::ShimState::Idle);
+        daemon.shim_handles.insert(member.to_string(), handle);
+        daemon
+            .states
+            .insert(member.to_string(), crate::team::standup::MemberState::Idle);
+        child_channel
     }
 
     #[test]
@@ -2546,6 +2761,112 @@ mod tests {
         match second_cmd {
             crate::shim::protocol::Command::SendMessage { body, .. } => {
                 assert!(body.contains("Status update: triage queue is unchanged."));
+            }
+            other => panic!("expected SendMessage, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn completion_packet_delivery_adds_targeted_review_triage_nudge() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = failed_delivery_test_daemon(&tmp);
+        let root = inbox::inboxes_root(tmp.path());
+        daemon
+            .config
+            .pane_map
+            .insert("manager".to_string(), "%123".to_string());
+
+        let body = r#"## Completion Packet
+```json
+{"task_id":42,"branch":"eng-1/task-42","worktree_path":".batty/worktrees/eng-1","commit":"abc1234","changed_paths":["src/team/delivery/routing.rs"],"tests_run":true,"tests_passed":true,"artifacts":[],"outcome":"ready_for_review"}
+```"#;
+        let id = inbox::deliver_to_inbox(
+            &root,
+            &inbox::InboxMessage::new_send("eng-1", "manager", body),
+        )
+        .unwrap();
+
+        let mut child_channel = install_idle_test_shim(&mut daemon, &tmp, "manager");
+
+        daemon.deliver_inbox_messages().unwrap();
+
+        child_channel
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let cmd: crate::shim::protocol::Command = child_channel.recv().unwrap().unwrap();
+        match cmd {
+            crate::shim::protocol::Command::SendMessage { body, .. } => {
+                assert!(body.starts_with("Review packet delivered"));
+                assert!(body.contains("Task: #42"));
+                assert!(body.contains("Engineer: eng-1"));
+                assert!(body.contains("Branch: eng-1/task-42"));
+                assert!(body.contains("Commit: abc1234"));
+                assert!(body.contains("Tests: passed"));
+                assert!(body.contains("Requested review action: ready_for_review"));
+                assert!(body.contains("Packet contents:"));
+                assert!(body.contains("\"task_id\":42"));
+            }
+            other => panic!("expected SendMessage, got {other:?}"),
+        }
+
+        assert!(
+            daemon
+                .intervention_cooldowns
+                .contains_key(&format!("review_packet_triage:manager:{id}"))
+        );
+    }
+
+    #[test]
+    fn completion_packet_delivery_cooldown_prevents_repeated_triage_wrapper_for_same_packet() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = failed_delivery_test_daemon(&tmp);
+        let root = inbox::inboxes_root(tmp.path());
+        daemon
+            .config
+            .pane_map
+            .insert("manager".to_string(), "%123".to_string());
+
+        let body = r#"## Completion Packet
+```json
+{"task_id":42,"branch":"eng-1/task-42","worktree_path":".batty/worktrees/eng-1","commit":"abc1234","changed_paths":["src/team/delivery/routing.rs"],"tests_run":true,"tests_passed":true,"artifacts":[],"outcome":"ready_for_review"}
+```"#;
+        inbox::deliver_to_inbox(
+            &root,
+            &inbox::InboxMessage::new_send("eng-1", "manager", body),
+        )
+        .unwrap();
+
+        let mut child_channel = install_idle_test_shim(&mut daemon, &tmp, "manager");
+        child_channel
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+
+        daemon.deliver_inbox_messages().unwrap();
+        let first_cmd: crate::shim::protocol::Command = child_channel.recv().unwrap().unwrap();
+        match first_cmd {
+            crate::shim::protocol::Command::SendMessage { body, .. } => {
+                assert!(body.starts_with("Review packet delivered"));
+            }
+            other => panic!("expected SendMessage, got {other:?}"),
+        }
+
+        daemon.pending_shim_acks.clear();
+        daemon
+            .shim_handles
+            .get_mut("manager")
+            .unwrap()
+            .apply_state_change(crate::shim::protocol::ShimState::Idle);
+
+        daemon.deliver_inbox_messages().unwrap();
+        let second_cmd: crate::shim::protocol::Command = child_channel.recv().unwrap().unwrap();
+        match second_cmd {
+            crate::shim::protocol::Command::SendMessage { body, .. } => {
+                assert!(
+                    !body.starts_with("Review packet delivered"),
+                    "same packet should not receive another triage wrapper while cooldown is active"
+                );
+                assert!(body.starts_with("## Completion Packet"));
+                assert!(body.contains("\"task_id\":42"));
             }
             other => panic!("expected SendMessage, got {other:?}"),
         }

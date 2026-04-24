@@ -1087,12 +1087,13 @@ impl TeamDaemon {
                     .get(&task.id)
                     .is_some_and(|record| record.in_cascade_window(rescue_base_cooldown));
                 if is_repeat_in_cascade {
-                    let block_reason = format!(
-                        "orphan-rescue cascade: task was claimed and released repeatedly by different engineers \
-                         within the cascade window. Likely causes: wrong role/assignee, ambiguous ownership, \
-                         or the task body already describes completed/parked work. Manager triage required \
-                         before returning to todo."
-                    );
+                    let block_reason = concat!(
+                        "orphan-rescue cascade: task was claimed and released repeatedly by different engineers ",
+                        "within the cascade window. Likely causes: wrong role/assignee, ambiguous ownership, ",
+                        "or the task body already describes completed/parked work. Manager triage required ",
+                        "before returning to todo."
+                    )
+                    .to_string();
                     warn!(
                         task_id = task.id,
                         "orphan-rescue cascade detected — moving task #{} to blocked for manager triage",
