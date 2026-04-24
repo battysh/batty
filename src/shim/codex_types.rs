@@ -6,6 +6,9 @@
 
 use serde::Deserialize;
 
+pub const CODEX_DEFAULT_MODEL: &str = "gpt-5.5";
+pub const CODEX_DEFAULT_REASONING_EFFORT: &str = "high";
+
 // ---------------------------------------------------------------------------
 // Top-level thread events (one per JSONL line)
 // ---------------------------------------------------------------------------
@@ -97,11 +100,14 @@ impl CodexItem {
 /// `thread_id`: if provided, resumes an existing thread for multi-turn.
 /// The final `-` instructs Codex to read the prompt from stdin.
 pub fn codex_sdk_args(program: &str, thread_id: Option<&str>) -> (String, Vec<String>) {
+    let reasoning_config = format!("model_reasoning_effort=\"{CODEX_DEFAULT_REASONING_EFFORT}\"");
     let mut args = vec![
         "exec".to_string(),
         "--json".to_string(),
         "-m".to_string(),
-        "gpt-5.4".to_string(),
+        CODEX_DEFAULT_MODEL.to_string(),
+        "-c".to_string(),
+        reasoning_config,
         "--dangerously-bypass-approvals-and-sandbox".to_string(),
     ];
 
@@ -121,16 +127,17 @@ pub fn codex_sdk_args(program: &str, thread_id: Option<&str>) -> (String, Vec<St
 /// `prompt`: the message/task text to send.
 pub fn codex_sdk_command(program: &str, prompt: &str, thread_id: Option<&str>) -> String {
     let escaped_prompt = prompt.replace('\'', "'\\''");
+    let reasoning_config = format!("model_reasoning_effort=\"{CODEX_DEFAULT_REASONING_EFFORT}\"");
     match thread_id {
         Some(tid) => {
             let escaped_tid = tid.replace('\'', "'\\''");
             format!(
-                "exec {program} exec --json -m gpt-5.4 --dangerously-bypass-approvals-and-sandbox resume '{escaped_tid}' '{escaped_prompt}'"
+                "exec {program} exec --json -m {CODEX_DEFAULT_MODEL} -c '{reasoning_config}' --dangerously-bypass-approvals-and-sandbox resume '{escaped_tid}' '{escaped_prompt}'"
             )
         }
         None => {
             format!(
-                "exec {program} exec --json -m gpt-5.4 --dangerously-bypass-approvals-and-sandbox '{escaped_prompt}'"
+                "exec {program} exec --json -m {CODEX_DEFAULT_MODEL} -c '{reasoning_config}' --dangerously-bypass-approvals-and-sandbox '{escaped_prompt}'"
             )
         }
     }
@@ -218,7 +225,8 @@ mod tests {
     fn codex_sdk_command_new_session() {
         let cmd = codex_sdk_command("codex", "fix the bug", None);
         assert!(cmd.contains("exec codex exec --json"));
-        assert!(cmd.contains("-m gpt-5.4"));
+        assert!(cmd.contains("-m gpt-5.5"));
+        assert!(cmd.contains("-c 'model_reasoning_effort=\"high\"'"));
         assert!(cmd.contains("--dangerously-bypass-approvals-and-sandbox"));
         assert!(cmd.contains("'fix the bug'"));
         assert!(!cmd.contains("resume"));
@@ -227,7 +235,8 @@ mod tests {
     #[test]
     fn codex_sdk_command_resume() {
         let cmd = codex_sdk_command("codex", "next step", Some("tid-123"));
-        assert!(cmd.contains("-m gpt-5.4"));
+        assert!(cmd.contains("-m gpt-5.5"));
+        assert!(cmd.contains("-c 'model_reasoning_effort=\"high\"'"));
         assert!(cmd.contains("resume 'tid-123'"));
         assert!(cmd.contains("'next step'"));
     }
@@ -248,7 +257,9 @@ mod tests {
                 "exec",
                 "--json",
                 "-m",
-                "gpt-5.4",
+                "gpt-5.5",
+                "-c",
+                "model_reasoning_effort=\"high\"",
                 "--dangerously-bypass-approvals-and-sandbox",
                 "-"
             ]
@@ -265,7 +276,9 @@ mod tests {
                 "exec",
                 "--json",
                 "-m",
-                "gpt-5.4",
+                "gpt-5.5",
+                "-c",
+                "model_reasoning_effort=\"high\"",
                 "--dangerously-bypass-approvals-and-sandbox",
                 "resume",
                 "tid-123",
