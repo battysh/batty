@@ -14,6 +14,8 @@ const RELEASES_DIR: &str = ".batty/releases";
 const RELEASE_HISTORY_FILE: &str = "history.jsonl";
 const RELEASE_LATEST_JSON: &str = "latest.json";
 const RELEASE_LATEST_MARKDOWN: &str = "latest.md";
+const RELEASE_READINESS_JSON: &str = "readiness.json";
+const RELEASE_READINESS_MARKDOWN: &str = "readiness.md";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ReleaseMetadata {
@@ -58,6 +60,27 @@ pub struct ReleaseRecord {
     pub reason: String,
     pub details: Option<String>,
     pub notes_path: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReleaseReadinessReport {
+    pub package_name: Option<String>,
+    pub version: Option<String>,
+    pub proposed_tag: Option<String>,
+    pub current_commit: Option<String>,
+    pub branch: Option<String>,
+    pub previous_tag: Option<String>,
+    pub commits_since_previous: Option<usize>,
+    pub recently_merged_task_ids: Vec<String>,
+    pub verification_command: Option<String>,
+    pub verification_summary: Option<String>,
+    pub blockers: Vec<String>,
+}
+
+impl ReleaseReadinessReport {
+    fn ready(&self) -> bool {
+        self.blockers.is_empty()
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -152,6 +175,27 @@ pub fn cmd_release(project_root: &Path, requested_tag: Option<&str>) -> Result<(
     }
 }
 
+pub fn cmd_release_readiness(project_root: &Path, requested_tag: Option<&str>) -> Result<()> {
+    let verifier = ConfiguredVerificationRunner {
+        command_override: None,
+    };
+    let (report, markdown) =
+        generate_release_readiness_with_verifier(project_root, requested_tag, &verifier)?;
+    let (json_path, markdown_path) = persist_release_readiness(project_root, &report, &markdown)?;
+    if report.ready() {
+        println!("Release readiness: ready");
+    } else {
+        println!("Release readiness: blocked");
+    }
+    println!("Readiness report: {}", markdown_path.display());
+    println!("Readiness JSON: {}", json_path.display());
+    if report.ready() {
+        Ok(())
+    } else {
+        bail!("release readiness blocked: {}", report.blockers.join("; "))
+    }
+}
+
 pub fn latest_record(project_root: &Path) -> Result<Option<ReleaseRecord>> {
     let path = releases_dir(project_root).join(RELEASE_LATEST_JSON);
     if !path.exists() {
@@ -162,6 +206,132 @@ pub fn latest_record(project_root: &Path) -> Result<Option<ReleaseRecord>> {
     let record = serde_json::from_str(&content)
         .with_context(|| format!("failed to parse {}", path.display()))?;
     Ok(Some(record))
+}
+
+fn generate_release_readiness_with_verifier(
+    project_root: &Path,
+    requested_tag: Option<&str>,
+    verifier: &dyn VerificationRunner,
+) -> Result<(ReleaseReadinessReport, String)> {
+    let mut report = ReleaseReadinessReport {
+        package_name: None,
+        version: None,
+        proposed_tag: None,
+        current_commit: None,
+        branch: None,
+        previous_tag: None,
+        commits_since_previous: None,
+        recently_merged_task_ids: collect_recently_merged_task_ids(project_root, 10)?,
+        verification_command: None,
+        verification_summary: None,
+        blockers: Vec::new(),
+    };
+
+    match load_release_metadata(project_root, requested_tag) {
+        Ok(metadata) => {
+            report.package_name = Some(metadata.package_name);
+            report.version = Some(metadata.version);
+            report.proposed_tag = Some(metadata.tag);
+        }
+        Err(error) => report
+            .blockers
+            .push(format!("missing_release_metadata: {error}")),
+    }
+
+    match git_stdout(project_root, &["rev-parse", "--abbrev-ref", "HEAD"]) {
+        Ok(branch) => {
+            if branch != "main" {
+                report
+                    .blockers
+                    .push(format!("not_on_main: current branch is `{branch}`"));
+            }
+            report.branch = Some(branch);
+        }
+        Err(error) => report
+            .blockers
+            .push(format!("git_branch_lookup_failed: {error}")),
+    }
+
+    match git_stdout(project_root, &["status", "--porcelain"]) {
+        Ok(dirty) => {
+            let dirty_entries: Vec<&str> = dirty
+                .lines()
+                .filter(|line| !line.starts_with("?? .batty/"))
+                .collect();
+            if !dirty_entries.is_empty() {
+                report.blockers.push(format!(
+                    "dirty_main: {} uncommitted change(s)",
+                    dirty_entries.len()
+                ));
+            }
+        }
+        Err(error) => report.blockers.push(format!("git_status_failed: {error}")),
+    }
+
+    match git_stdout(project_root, &["rev-parse", "HEAD"]) {
+        Ok(git_ref) => report.current_commit = Some(git_ref),
+        Err(error) => report
+            .blockers
+            .push(format!("git_ref_lookup_failed: {error}")),
+    }
+
+    if let Some(tag) = report.proposed_tag.as_deref() {
+        match git_ref_for_tag(project_root, tag) {
+            Ok(Some(_)) => report
+                .blockers
+                .push(format!("tag_exists: tag `{tag}` already exists")),
+            Ok(None) => {}
+            Err(error) => report.blockers.push(format!("tag_lookup_failed: {error}")),
+        }
+    }
+
+    match latest_git_tag(project_root) {
+        Ok(previous_tag) => {
+            report.previous_tag = previous_tag.clone();
+            match count_commits_since(project_root, previous_tag.as_deref()) {
+                Ok(count) => report.commits_since_previous = Some(count),
+                Err(error) => report
+                    .blockers
+                    .push(format!("commit_count_failed: {error}")),
+            }
+        }
+        Err(error) => report
+            .blockers
+            .push(format!("previous_tag_lookup_failed: {error}")),
+    }
+
+    match verifier.run(project_root) {
+        Ok(verification) => {
+            report.verification_command = Some(verification.command);
+            let summary = verification.summary.trim().to_string();
+            report.verification_summary = Some(summary.clone());
+            if !verification.passed {
+                report.blockers.push(format!(
+                    "verification_failed: {}",
+                    verification
+                        .details
+                        .as_deref()
+                        .unwrap_or(summary.as_str())
+                        .trim()
+                ));
+            } else if summary.is_empty() {
+                report.blockers.push(
+                    "missing_verification_evidence: verification passed without a summary"
+                        .to_string(),
+                );
+            }
+        }
+        Err(error) => report
+            .blockers
+            .push(format!("verification_unavailable: {error}")),
+    }
+
+    if let Some(blocker) = daemon_binary_blocker(project_root)? {
+        report.blockers.push(blocker);
+    }
+
+    let markdown = render_release_readiness_report(&report);
+    Ok((report, markdown))
 }
 
 #[allow(clippy::result_large_err)]
@@ -574,6 +744,62 @@ fn collect_commit_summaries(
         .collect())
 }
 
+fn collect_recently_merged_task_ids(project_root: &Path, limit: usize) -> Result<Vec<String>> {
+    let path = crate::team::team_events_path(project_root);
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let content =
+        fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
+    let mut task_ids = Vec::new();
+    for line in content.lines().rev() {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let event = value.get("event").and_then(|event| event.as_str());
+        if !matches!(event, Some("task_auto_merged" | "task_manual_merged")) {
+            continue;
+        }
+        let Some(task_id) = value.get("task").and_then(|task| task.as_str()) else {
+            continue;
+        };
+        if !task_ids.iter().any(|existing| existing == task_id) {
+            task_ids.push(task_id.to_string());
+        }
+        if task_ids.len() >= limit {
+            break;
+        }
+    }
+    task_ids.reverse();
+    Ok(task_ids)
+}
+
+fn daemon_binary_blocker(project_root: &Path) -> Result<Option<String>> {
+    let binary_path = std::env::current_exe().context("failed to resolve current executable")?;
+    daemon_binary_blocker_for_path(project_root, &binary_path)
+}
+
+fn daemon_binary_blocker_for_path(
+    project_root: &Path,
+    binary_path: &Path,
+) -> Result<Option<String>> {
+    let Some(freshness) = crate::team::daemon::health::binary_freshness::evaluate_binary_freshness(
+        binary_path,
+        project_root,
+    )?
+    else {
+        return Ok(None);
+    };
+    if freshness.fresh {
+        Ok(None)
+    } else {
+        Ok(Some(format!(
+            "stale_daemon_binary: {} commit(s) behind main (last: {} {})",
+            freshness.commits_behind, freshness.last_hash, freshness.last_subject
+        )))
+    }
+}
+
 fn render_release_notes(context: &ReleaseContext, verification: &ReleaseVerification) -> String {
     let mut out = String::new();
     out.push_str("# Release Notes\n\n");
@@ -616,6 +842,66 @@ fn render_release_notes(context: &ReleaseContext, verification: &ReleaseVerifica
         for commit in &context.commit_summaries {
             out.push_str("- ");
             out.push_str(commit);
+            out.push('\n');
+        }
+    }
+
+    out
+}
+
+fn render_release_readiness_report(report: &ReleaseReadinessReport) -> String {
+    let mut out = String::new();
+    out.push_str("# Release Readiness\n\n");
+    out.push_str(&format!(
+        "- Status: {}\n",
+        if report.ready() { "ready" } else { "blocked" }
+    ));
+    if let Some(package_name) = report.package_name.as_deref() {
+        out.push_str(&format!("- Package: {package_name}\n"));
+    }
+    if let Some(version) = report.version.as_deref() {
+        out.push_str(&format!("- Version: {version}\n"));
+    }
+    if let Some(tag) = report.proposed_tag.as_deref() {
+        out.push_str(&format!("- Proposed Tag: {tag}\n"));
+    }
+    if let Some(current_commit) = report.current_commit.as_deref() {
+        out.push_str(&format!("- Current Commit: {current_commit}\n"));
+    }
+    if let Some(branch) = report.branch.as_deref() {
+        out.push_str(&format!("- Branch: {branch}\n"));
+    }
+    if let Some(previous_tag) = report.previous_tag.as_deref() {
+        out.push_str(&format!("- Previous Tag: {previous_tag}\n"));
+    }
+    if let Some(commits_since_previous) = report.commits_since_previous {
+        out.push_str(&format!(
+            "- Commits Since Previous Tag: {commits_since_previous}\n"
+        ));
+    }
+    if let Some(command) = report.verification_command.as_deref() {
+        out.push_str(&format!("- Verification Command: {command}\n"));
+    }
+    if let Some(summary) = report.verification_summary.as_deref() {
+        out.push_str(&format!("- Verification Summary: {summary}\n"));
+    }
+
+    out.push_str("\n## Recently Merged Tasks\n\n");
+    if report.recently_merged_task_ids.is_empty() {
+        out.push_str("- none recorded\n");
+    } else {
+        for task_id in &report.recently_merged_task_ids {
+            out.push_str(&format!("- #{task_id}\n"));
+        }
+    }
+
+    out.push_str("\n## Blockers\n\n");
+    if report.blockers.is_empty() {
+        out.push_str("- none\n");
+    } else {
+        for blocker in &report.blockers {
+            out.push_str("- ");
+            out.push_str(blocker);
             out.push('\n');
         }
     }
@@ -675,6 +961,22 @@ fn render_attempt_report(record: &ReleaseRecord) -> String {
         out.push('\n');
     }
     out
+}
+
+fn persist_release_readiness(
+    project_root: &Path,
+    report: &ReleaseReadinessReport,
+    markdown: &str,
+) -> Result<(PathBuf, PathBuf)> {
+    let dir = releases_dir(project_root);
+    fs::create_dir_all(&dir).with_context(|| format!("failed to create {}", dir.display()))?;
+    let json_path = dir.join(RELEASE_READINESS_JSON);
+    let markdown_path = dir.join(RELEASE_READINESS_MARKDOWN);
+    fs::write(&json_path, serde_json::to_vec_pretty(report)?)
+        .with_context(|| format!("failed to write {}", json_path.display()))?;
+    fs::write(&markdown_path, markdown)
+        .with_context(|| format!("failed to write {}", markdown_path.display()))?;
+    Ok((json_path, markdown_path))
 }
 
 fn write_release_notes(
@@ -879,6 +1181,31 @@ mod tests {
         tmp
     }
 
+    fn passing_verifier(calls: Arc<AtomicUsize>) -> StubVerifier {
+        StubVerifier {
+            result: ReleaseVerification {
+                command: "cargo test".to_string(),
+                passed: true,
+                summary: "cargo test passed".to_string(),
+                details: None,
+            },
+            calls,
+        }
+    }
+
+    fn write_merge_event(repo: &Path, task_id: &str) {
+        let events_dir = repo.join(".batty").join("team_config");
+        fs::create_dir_all(&events_dir).unwrap();
+        fs::write(
+            events_dir.join("events.jsonl"),
+            format!(
+                "{{\"event\":\"task_auto_merged\",\"task\":\"{}\",\"branch\":\"eng-1/{}\"}}\n",
+                task_id, task_id
+            ),
+        )
+        .unwrap();
+    }
+
     #[test]
     fn release_fails_when_changelog_entry_is_missing() {
         let tmp = tempfile::tempdir().unwrap();
@@ -949,6 +1276,136 @@ mod tests {
         assert_eq!(error.record.reason, "verification_failed");
         assert_eq!(error.record.details.as_deref(), Some("suite::it_breaks"));
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn release_readiness_clean_report_includes_evidence_without_tagging() {
+        let tmp = init_repo();
+        write_merge_event(tmp.path(), "704");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let verifier = passing_verifier(calls.clone());
+
+        let (report, markdown) =
+            generate_release_readiness_with_verifier(tmp.path(), None, &verifier).unwrap();
+
+        assert!(report.ready());
+        assert_eq!(report.proposed_tag.as_deref(), Some("v0.10.0"));
+        assert_eq!(report.branch.as_deref(), Some("main"));
+        assert_eq!(report.recently_merged_task_ids, vec!["704".to_string()]);
+        assert!(report.current_commit.is_some());
+        assert!(markdown.contains("# Release Readiness"));
+        assert!(markdown.contains("- Status: ready"));
+        assert!(markdown.contains("- #704"));
+        assert!(markdown.contains("- Verification Summary: cargo test passed"));
+        assert_eq!(git_output(tmp.path(), &["tag", "--list", "v0.10.0"]), "");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn release_readiness_reports_dirty_blocker() {
+        let tmp = init_repo();
+        fs::write(tmp.path().join("README.md"), "dirty\n").unwrap();
+        let verifier = passing_verifier(Arc::new(AtomicUsize::new(0)));
+
+        let (report, markdown) =
+            generate_release_readiness_with_verifier(tmp.path(), None, &verifier).unwrap();
+
+        assert!(!report.ready());
+        assert!(
+            report
+                .blockers
+                .iter()
+                .any(|blocker| blocker.starts_with("dirty_main:"))
+        );
+        assert!(markdown.contains("## Blockers"));
+        assert!(markdown.contains("dirty_main"));
+    }
+
+    #[test]
+    fn release_readiness_reports_missing_verification_evidence() {
+        let tmp = init_repo();
+        let verifier = StubVerifier {
+            result: ReleaseVerification {
+                command: "cargo test".to_string(),
+                passed: true,
+                summary: String::new(),
+                details: None,
+            },
+            calls: Arc::new(AtomicUsize::new(0)),
+        };
+
+        let (report, _) =
+            generate_release_readiness_with_verifier(tmp.path(), None, &verifier).unwrap();
+
+        assert!(!report.ready());
+        assert!(
+            report
+                .blockers
+                .iter()
+                .any(|blocker| blocker.starts_with("missing_verification_evidence:"))
+        );
+    }
+
+    #[test]
+    fn release_readiness_report_format_is_stable() {
+        let report = ReleaseReadinessReport {
+            package_name: Some("batty".to_string()),
+            version: Some("0.10.0".to_string()),
+            proposed_tag: Some("v0.10.0".to_string()),
+            current_commit: Some("abc123".to_string()),
+            branch: Some("main".to_string()),
+            previous_tag: Some("v0.9.0".to_string()),
+            commits_since_previous: Some(2),
+            recently_merged_task_ids: vec!["704".to_string(), "706".to_string()],
+            verification_command: Some("cargo test".to_string()),
+            verification_summary: Some("ok".to_string()),
+            blockers: vec!["dirty_main: 1 uncommitted change(s)".to_string()],
+        };
+
+        assert_eq!(
+            render_release_readiness_report(&report),
+            "# Release Readiness\n\n\
+- Status: blocked\n\
+- Package: batty\n\
+- Version: 0.10.0\n\
+- Proposed Tag: v0.10.0\n\
+- Current Commit: abc123\n\
+- Branch: main\n\
+- Previous Tag: v0.9.0\n\
+- Commits Since Previous Tag: 2\n\
+- Verification Command: cargo test\n\
+- Verification Summary: ok\n\n\
+## Recently Merged Tasks\n\n\
+- #704\n\
+- #706\n\n\
+## Blockers\n\n\
+- dirty_main: 1 uncommitted change(s)\n"
+        );
+    }
+
+    #[test]
+    fn release_readiness_surfaces_stale_daemon_binary_blocker() {
+        let tmp = tempfile::tempdir().unwrap();
+        git(tmp.path(), &["init", "-b", "main"]);
+        git(tmp.path(), &["config", "user.name", "Batty Tests"]);
+        git(tmp.path(), &["config", "user.email", "batty@example.com"]);
+        fs::create_dir_all(tmp.path().join("src")).unwrap();
+        fs::write(tmp.path().join("src").join("lib.rs"), "pub fn old() {}\n").unwrap();
+        git(tmp.path(), &["add", "."]);
+        git(tmp.path(), &["commit", "-m", "Initial src commit"]);
+        let binary = tmp.path().join("batty-bin");
+        fs::write(&binary, "binary\n").unwrap();
+        filetime::set_file_mtime(&binary, filetime::FileTime::from_unix_time(1, 0)).unwrap();
+        fs::write(tmp.path().join("src").join("lib.rs"), "pub fn new() {}\n").unwrap();
+        git(tmp.path(), &["add", "."]);
+        git(tmp.path(), &["commit", "-m", "Runtime change"]);
+
+        let blocker = daemon_binary_blocker_for_path(tmp.path(), &binary)
+            .unwrap()
+            .unwrap();
+
+        assert!(blocker.starts_with("stale_daemon_binary:"));
+        assert!(blocker.contains("Runtime change"));
     }
 
     #[test]

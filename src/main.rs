@@ -1405,8 +1405,12 @@ fn main() -> Result<()> {
             team::verification::cmd_verify(&root)?;
         }
 
-        Command::Release { tag } => {
-            release::cmd_release(&root, tag.as_deref())?;
+        Command::Release { tag, readiness } => {
+            if readiness {
+                release::cmd_release_readiness(&root, tag.as_deref())?;
+            } else {
+                release::cmd_release(&root, tag.as_deref())?;
+            }
         }
 
         Command::Queue => {
