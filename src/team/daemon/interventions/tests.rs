@@ -1747,7 +1747,7 @@ fn build_review_intervention_message_suppresses_merge_without_verified_lane() {
 }
 
 #[test]
-fn build_review_intervention_message_includes_merge_path_for_verified_lane() {
+fn build_review_intervention_message_includes_merge_and_rework_paths() {
     let harness = TestHarness::new()
         .with_member(architect_member("architect"))
         .with_member(manager_member("lead", Some("architect")))
@@ -1798,6 +1798,7 @@ fn build_review_intervention_message_includes_merge_path_for_verified_lane() {
 
     assert!(message.contains("Review backlog detected"));
     assert!(message.contains("batty merge eng-1"));
+    assert!(message.contains("To request rework"));
     assert!(message.contains("kanban-md move --dir"));
     assert!(message.contains("batty assign eng-1"));
     assert!(message.contains("batty send architect"));
