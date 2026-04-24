@@ -1017,6 +1017,7 @@ impl TeamDaemon {
     }
 
     pub(in super::super) fn process_dispatch_queue(&mut self) -> Result<()> {
+        self.reconcile_active_tasks()?;
         let board_dir = self.board_dir();
         let benched_engineers = crate::team::bench::benched_engineer_names(self.project_root())?;
         // #689: re-check the rescue cooldown at drain time. An entry can

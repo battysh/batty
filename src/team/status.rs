@@ -75,6 +75,8 @@ pub(crate) struct AgentHealthSummary {
     pub(crate) supervisory_digest_count: u32,
     pub(crate) dispatch_fallback_count: u32,
     pub(crate) dispatch_fallback_reason: Option<String>,
+    pub(crate) stale_active_cleared_count: u32,
+    pub(crate) stale_active_summary: Option<String>,
     pub(crate) task_elapsed_secs: Option<u64>,
     pub(crate) stall_summary: Option<String>,
     pub(crate) stall_reason: Option<String>,
@@ -91,6 +93,14 @@ impl AgentHealthSummary {
         self.dispatch_fallback_reason = reason.map(str::to_string);
     }
 
+    pub(crate) fn record_stale_active_clear(&mut self, task: Option<&str>, reason: Option<&str>) {
+        let Some(summary) = stale_active_clear_summary(task, reason) else {
+            return;
+        };
+        self.stale_active_cleared_count += 1;
+        self.stale_active_summary = Some(summary);
+    }
+
     pub(crate) fn record_supervisory_stall(&mut self, reason: Option<&str>, summary: Option<&str>) {
         self.stall_reason = reason.map(str::to_string);
         self.stall_summary = summary.map(str::to_string);
@@ -105,6 +115,7 @@ impl AgentHealthSummary {
             || self.context_exhaustion_count > 0
             || self.proactive_handoff_count > 0
             || self.delivery_failure_count > 0
+            || self.stale_active_cleared_count > 0
             || self.has_supervisory_warning()
             || !self.backend_health.is_healthy()
     }
@@ -435,6 +446,7 @@ pub(crate) fn build_team_status_rows(
             let signal = merge_status_signal(
                 signal,
                 branch_mismatches.get(&member.name).cloned(),
+                health.stale_active_summary.clone(),
                 health.stall_summary.clone(),
                 &supervisory_pressure,
                 stale_review_backlog,
@@ -862,6 +874,15 @@ pub(crate) fn agent_health_by_member(
                             .or_default()
                             .record_dispatch_fallback(event.reason.as_deref());
                     }
+                    "state_reconciliation" => {
+                        health_by_member
+                            .entry(role.to_string())
+                            .or_default()
+                            .record_stale_active_clear(
+                                event.task.as_deref(),
+                                event.reason.as_deref(),
+                            );
+                    }
                     "stall_detected" => {
                         let role_type = members
                             .iter()
@@ -1137,6 +1158,23 @@ fn parse_assigned_task_id(task: &str) -> Option<u32> {
         })
 }
 
+fn stale_active_clear_summary(task: Option<&str>, reason: Option<&str>) -> Option<String> {
+    let label = match reason {
+        Some("clear_done") => "done",
+        Some("clear_archived") => "archived",
+        Some("clear_missing") => "missing",
+        Some("clear_unassigned") => "unassigned",
+        Some("release_review") => "review",
+        Some("release_blocked") => "blocked",
+        _ => return None,
+    };
+    let task = task.and_then(parse_assigned_task_id);
+    Some(match task {
+        Some(task_id) => format!("cleared stale active #{task_id} ({label})"),
+        None => format!("cleared stale active ({label})"),
+    })
+}
+
 fn parse_leading_task_id(value: &str) -> Option<u32> {
     let digits = value
         .trim_start()
@@ -1180,6 +1218,9 @@ pub(crate) fn format_agent_health_summary_for_role(
             None => format!("fd{}", health.dispatch_fallback_count),
         };
         parts.push(token);
+    }
+    if health.stale_active_cleared_count > 0 {
+        parts.push(format!("sa{}", health.stale_active_cleared_count));
     }
     if let Some(supervisory_token) = health.supervisory_status_token_for_role(role_type) {
         parts.push(supervisory_token);
@@ -1237,6 +1278,7 @@ fn fallback_supervisory_stall_summary(
 fn merge_status_signal(
     signal: Option<String>,
     branch_mismatch_signal: Option<String>,
+    stale_active_signal: Option<String>,
     stall_signal: Option<String>,
     supervisory_pressure: &SupervisoryPressureSnapshot,
     stale_review_backlog: usize,
@@ -1250,6 +1292,9 @@ fn merge_status_signal(
     }
     if let Some(branch_mismatch) = branch_mismatch_signal {
         signals.push(branch_mismatch);
+    }
+    if let Some(stale_active) = stale_active_signal {
+        signals.push(stale_active);
     }
     if let Some(stall) = stall_signal
         && (!actionable_backlog_present || is_actionable_control_plane_stall(&stall))
@@ -3279,6 +3324,47 @@ mod tests {
     }
 
     #[test]
+    fn build_team_status_rows_surfaces_cleared_stale_active_lane() {
+        let members = vec![engineer("eng-1")];
+        let runtime_statuses = HashMap::from([(
+            "eng-1".to_string(),
+            RuntimeMemberStatus {
+                state: "idle".to_string(),
+                signal: None,
+                label: None,
+            },
+        )]);
+        let agent_health = HashMap::from([(
+            "eng-1".to_string(),
+            AgentHealthSummary {
+                stale_active_cleared_count: 1,
+                stale_active_summary: Some("cleared stale active #42 (done)".to_string()),
+                ..AgentHealthSummary::default()
+            },
+        )]);
+
+        let rows = build_team_status_rows(
+            &members,
+            true,
+            &runtime_statuses,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &agent_health,
+        );
+
+        assert_eq!(rows[0].state, "idle");
+        assert_eq!(
+            rows[0].signal.as_deref(),
+            Some("cleared stale active #42 (done)")
+        );
+        assert_eq!(rows[0].health_summary, "sa1");
+    }
+
+    #[test]
     fn build_team_status_rows_includes_branch_mismatch_signal() {
         let members = vec![engineer("eng-1")];
         let runtime_statuses = HashMap::from([(
@@ -3585,6 +3671,8 @@ mod tests {
                     supervisory_digest_count: 0,
                     dispatch_fallback_count: 0,
                     dispatch_fallback_reason: None,
+                    stale_active_cleared_count: 0,
+                    stale_active_summary: None,
                     task_elapsed_secs: None,
                     backend_health: crate::agent::BackendHealth::default(),
                     stall_summary: None,
@@ -3615,6 +3703,8 @@ mod tests {
                     supervisory_digest_count: 0,
                     dispatch_fallback_count: 0,
                     dispatch_fallback_reason: None,
+                    stale_active_cleared_count: 0,
+                    stale_active_summary: None,
                     task_elapsed_secs: None,
                     backend_health: crate::agent::BackendHealth::default(),
                     stall_summary: None,
@@ -4115,6 +4205,7 @@ mod tests {
             merge_status_signal(
                 Some("nudged".to_string()),
                 None,
+                None,
                 Some("manager (manager) stalled after 5m: no actionable progress".to_string()),
                 &pressure,
                 0,
@@ -4126,7 +4217,14 @@ mod tests {
     #[test]
     fn merge_status_signal_returns_none_when_no_signals_exist() {
         assert_eq!(
-            merge_status_signal(None, None, None, &SupervisoryPressureSnapshot::default(), 0,),
+            merge_status_signal(
+                None,
+                None,
+                None,
+                None,
+                &SupervisoryPressureSnapshot::default(),
+                0,
+            ),
             None
         );
     }
@@ -4670,6 +4768,8 @@ mod tests {
                         supervisory_digest_count: 0,
                         dispatch_fallback_count: 0,
                         dispatch_fallback_reason: None,
+                        stale_active_cleared_count: 0,
+                        stale_active_summary: None,
                         task_elapsed_secs: Some(30),
                         stall_reason: None,
                         stall_summary: None,
@@ -4920,13 +5020,15 @@ mod tests {
             supervisory_digest_count: 1,
             dispatch_fallback_count: 0,
             dispatch_fallback_reason: None,
+            stale_active_cleared_count: 1,
+            stale_active_summary: Some("cleared stale active #42 (done)".to_string()),
             task_elapsed_secs: Some(750),
             stall_reason: None,
             stall_summary: None,
             backend_health: crate::agent::BackendHealth::default(),
         });
 
-        assert_eq!(summary, "r2 c1 ph1 d3 sd1 t12m");
+        assert_eq!(summary, "r2 c1 ph1 d3 sd1 sa1 t12m");
         assert_eq!(
             format_agent_health_summary(&AgentHealthSummary::default()),
             "-"
@@ -5006,6 +5108,11 @@ mod tests {
         digest_emitted.ts = now_unix().saturating_sub(565);
         sink.emit(digest_emitted).unwrap();
 
+        let mut stale_active =
+            TeamEvent::state_reconciliation(Some("eng-1"), Some("42"), "clear_done");
+        stale_active.ts = now_unix().saturating_sub(563);
+        sink.emit(stale_active).unwrap();
+
         let mut supervisory_stall = TeamEvent::stall_detected_with_reason(
             "eng-1",
             None,
@@ -5036,6 +5143,11 @@ mod tests {
         assert_eq!(eng_1.proactive_handoff_count, 1);
         assert_eq!(eng_1.delivery_failure_count, 1);
         assert_eq!(eng_1.supervisory_digest_count, 1);
+        assert_eq!(eng_1.stale_active_cleared_count, 1);
+        assert_eq!(
+            eng_1.stale_active_summary.as_deref(),
+            Some("cleared stale active #42 (done)")
+        );
         assert_eq!(
             eng_1.stall_reason.as_deref(),
             Some("supervisory_stalled_manager_no_actionable_progress")
@@ -5415,6 +5527,7 @@ mod tests {
         let result = merge_status_signal(
             None,
             None,
+            None,
             Some("manager stall after 32m".to_string()),
             &review_pressure,
             0,
@@ -5433,6 +5546,7 @@ mod tests {
         let result = merge_status_signal(
             None,
             None,
+            None,
             Some("architect stall after 15m".to_string()),
             &triage_pressure,
             0,
@@ -5444,6 +5558,7 @@ mod tests {
         );
 
         let result = merge_status_signal(
+            None,
             None,
             None,
             Some("manager stall after 42m".to_string()),

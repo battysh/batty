@@ -702,6 +702,7 @@ impl TeamDaemon {
         if !self.config.team_config.board.auto_dispatch {
             return Ok(());
         }
+        self.reconcile_active_tasks()?;
         if self.dispatch_paused_by_main_smoke() {
             debug!("auto-dispatch skipped because main smoke has gated dispatch");
             return Ok(());

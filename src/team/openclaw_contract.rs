@@ -1224,6 +1224,8 @@ mod tests {
                         supervisory_digest_count: 2,
                         dispatch_fallback_count: 0,
                         dispatch_fallback_reason: None,
+                        stale_active_cleared_count: 0,
+                        stale_active_summary: None,
                         task_elapsed_secs: Some(300),
                         stall_reason: Some("supervisory_stalled".to_string()),
                         stall_summary: Some(
@@ -1256,6 +1258,8 @@ mod tests {
                         supervisory_digest_count: 0,
                         dispatch_fallback_count: 0,
                         dispatch_fallback_reason: None,
+                        stale_active_cleared_count: 0,
+                        stale_active_summary: None,
                         task_elapsed_secs: None,
                         stall_reason: None,
                         stall_summary: None,
