@@ -176,6 +176,23 @@ impl TeamDaemon {
                 continue;
             }
 
+            let dispatch_key = manager_dispatch_intervention_key(&name);
+            let signature = manager_dispatch_intervention_signature(
+                &idle_active_reports,
+                &idle_unassigned_reports,
+                &unassigned_open_tasks,
+            );
+            if self
+                .owned_task_interventions
+                .get(&dispatch_key)
+                .is_some_and(|state| state.signature == signature)
+            {
+                continue;
+            }
+            if self.intervention_on_cooldown(&dispatch_key) {
+                continue;
+            }
+
             if dispatch_gap_stalled
                 && !idle_unassigned_reports.is_empty()
                 && !unassigned_open_tasks.is_empty()
@@ -202,25 +219,20 @@ impl TeamDaemon {
                         "recovery: dispatch fallback for {} assigned {} task(s) directly ({})",
                         name, fallback_count, reason
                     ));
+                    let idle_epoch = self.triage_idle_epochs.get(&name).copied().unwrap_or(0);
+                    self.owned_task_interventions.insert(
+                        dispatch_key.clone(),
+                        OwnedTaskInterventionState {
+                            idle_epoch,
+                            signature,
+                            detected_at: Instant::now(),
+                            escalation_sent: false,
+                        },
+                    );
+                    self.intervention_cooldowns
+                        .insert(dispatch_key, Instant::now());
                     continue;
                 }
-            }
-
-            let dispatch_key = manager_dispatch_intervention_key(&name);
-            let signature = manager_dispatch_intervention_signature(
-                &idle_active_reports,
-                &idle_unassigned_reports,
-                &unassigned_open_tasks,
-            );
-            if self
-                .owned_task_interventions
-                .get(&dispatch_key)
-                .is_some_and(|state| state.signature == signature)
-            {
-                continue;
-            }
-            if self.intervention_on_cooldown(&dispatch_key) {
-                continue;
             }
 
             let text = self.build_manager_dispatch_gap_message(
@@ -377,6 +389,7 @@ impl TeamDaemon {
         for (report, task) in idle_unassigned_reports
             .iter()
             .zip(unassigned_open_tasks.iter())
+            .take(1)
         {
             let assignment_message =
                 format!("Task #{}: {}\n\n{}", task.id, task.title, task.description);

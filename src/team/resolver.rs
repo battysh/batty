@@ -145,6 +145,21 @@ pub fn dispatch_blocking_reason(task: &Task, tasks: &[Task]) -> Option<String> {
         .iter()
         .map(|dependency| (dependency.id, dependency.status.as_str()))
         .collect();
+    if let Some(body_dep_ids) =
+        crate::team::daemon::dispatch::queue::parse_body_dependency_ids(&task.description)
+    {
+        if body_dep_ids.is_empty() {
+            return Some("body dependency reference".to_string());
+        }
+        if let Some(dep_id) = body_dep_ids.iter().find(|dep_id| {
+            !status_by_id
+                .get(dep_id)
+                .is_some_and(|status| matches!(*status, "done" | "archived"))
+        }) {
+            let status = status_by_id.get(dep_id).copied().unwrap_or("missing");
+            return Some(format!("unmet body dependency #{dep_id} ({status})"));
+        }
+    }
     task.depends_on.iter().find_map(|dep_id| {
         let status = status_by_id.get(dep_id).copied().unwrap_or("missing");
         if matches!(status, "done" | "archived") {
@@ -176,10 +191,12 @@ pub fn engineer_dispatchable_tasks(
         .filter(|member| member.role_type != RoleType::Engineer)
         .map(|member| member.name.clone())
         .collect();
-    Ok(dispatchable_tasks(board_dir)?
+    let mut tasks: Vec<Task> = dispatchable_tasks(board_dir)?
         .into_iter()
         .filter(|task| is_engineer_dispatchable(task, &non_engineer_names))
-        .collect())
+        .collect();
+    tasks.sort_by_key(|task| (dispatch_priority_rank(&task.priority), task.id));
+    Ok(tasks)
 }
 
 pub fn is_engineer_dispatchable(task: &Task, non_engineer_names: &HashSet<String>) -> bool {
@@ -250,10 +267,30 @@ fn blocking_reason(
             task.scheduled_for.as_deref().unwrap_or("unknown")
         ));
     }
+    if let Some(body_dep_ids) =
+        crate::team::daemon::dispatch::queue::parse_body_dependency_ids(&task.description)
+    {
+        if body_dep_ids.is_empty() {
+            return Some("body dependency reference".to_string());
+        }
+        if let Some(dep_id) = body_dep_ids.iter().find(|dep_id| !done.contains(dep_id)) {
+            return Some(format!("unmet body dependency #{dep_id}"));
+        }
+    }
     task.depends_on
         .iter()
         .find(|dep_id| !done.contains(dep_id))
         .map(|dep_id| format!("unmet dependency #{dep_id}"))
+}
+
+fn dispatch_priority_rank(priority: &str) -> u32 {
+    match priority {
+        "critical" => 0,
+        "high" => 1,
+        "medium" => 2,
+        "low" => 3,
+        _ => 4,
+    }
 }
 
 fn load_workflow_metadata(task: &Task) -> Result<WorkflowMetadata> {
@@ -322,6 +359,17 @@ mod tests {
             path,
             format!(
                 "---\nid: {id}\ntitle: Task {id}\npriority: high\n{extra_frontmatter}class: standard\n---\n\nBody.\n"
+            ),
+        )
+        .unwrap();
+    }
+
+    fn write_task_with_body(tasks_dir: &Path, id: u32, extra_frontmatter: &str, body: &str) {
+        let path = tasks_dir.join(format!("{id:03}-task-{id}.md"));
+        std::fs::write(
+            path,
+            format!(
+                "---\nid: {id}\ntitle: Task {id}\npriority: high\n{extra_frontmatter}class: standard\n---\n\n{body}\n"
             ),
         )
         .unwrap();
@@ -596,6 +644,57 @@ roles:
         assert_eq!(
             task3.blocking_reason.as_deref(),
             Some("unmet dependency #2")
+        );
+    }
+
+    #[test]
+    fn body_dependency_unmet_is_blocked() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = tmp.path().join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+        write_task(&tasks_dir, 1, "status: todo\n");
+        write_task_with_body(&tasks_dir, 2, "status: todo\n", "Blocked on: #1");
+
+        let resolutions = resolve_board(tmp.path(), &solo_members()).unwrap();
+        let task2 = resolutions.iter().find(|r| r.task_id == 2).unwrap();
+        assert_eq!(task2.status, ResolutionStatus::Blocked);
+        assert_eq!(
+            task2.blocking_reason.as_deref(),
+            Some("unmet body dependency #1")
+        );
+    }
+
+    #[test]
+    fn body_dependency_met_is_runnable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = tmp.path().join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+        write_task(&tasks_dir, 1, "status: done\n");
+        write_task_with_body(&tasks_dir, 2, "status: todo\n", "Blocked on: #1");
+
+        let resolutions = resolve_board(tmp.path(), &solo_members()).unwrap();
+        let task2 = resolutions.iter().find(|r| r.task_id == 2).unwrap();
+        assert_eq!(task2.status, ResolutionStatus::Runnable);
+        assert!(task2.blocking_reason.is_none());
+    }
+
+    #[test]
+    fn body_blocker_without_task_id_is_blocked() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = tmp.path().join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+        write_task_with_body(
+            &tasks_dir,
+            1,
+            "status: todo\n",
+            "Blocked on: provider-console token",
+        );
+
+        let resolutions = resolve_board(tmp.path(), &solo_members()).unwrap();
+        assert_eq!(resolutions[0].status, ResolutionStatus::Blocked);
+        assert_eq!(
+            resolutions[0].blocking_reason.as_deref(),
+            Some("body dependency reference")
         );
     }
 

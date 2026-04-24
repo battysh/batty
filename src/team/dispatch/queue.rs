@@ -228,12 +228,11 @@ pub(crate) fn parse_body_owner_role(body: &str) -> Option<String> {
 }
 
 /// Parse task IDs from "Blocked on:" or "Depends on:" lines in the task body.
-/// Returns None if no dependency line found, Some(vec) of referenced task IDs.
-fn parse_body_dependency_ids(body: &str) -> Option<Vec<u32>> {
-    let lower = body.to_lowercase();
-    for line in lower.lines() {
-        let trimmed = line.trim().trim_start_matches('-').trim();
-        if trimmed.starts_with("blocked on:") || trimmed.starts_with("depends on:") {
+/// Returns None if no dependency line is found. Returns Some(vec) when a
+/// dependency line is present, with an empty vec for non-task-id blockers.
+pub(crate) fn parse_body_dependency_ids(body: &str) -> Option<Vec<u32>> {
+    for line in body.lines() {
+        if let Some(trimmed) = body_dependency_reference(line) {
             let ids: Vec<u32> = trimmed
                 .split('#')
                 .skip(1)
@@ -245,12 +244,20 @@ fn parse_body_dependency_ids(body: &str) -> Option<Vec<u32>> {
                         .ok()
                 })
                 .collect();
-            if !ids.is_empty() {
-                return Some(ids);
-            }
+            return Some(ids);
         }
     }
     None
+}
+
+fn body_dependency_reference(line: &str) -> Option<&str> {
+    let trimmed = line.trim().trim_start_matches('-').trim();
+    let lower = trimmed.to_ascii_lowercase();
+    if lower.starts_with("blocked on:") || lower.starts_with("depends on:") {
+        Some(trimmed)
+    } else {
+        None
+    }
 }
 use super::{DISPATCH_QUEUE_FAILURE_LIMIT, DispatchQueueEntry, dispatch_priority_rank};
 
@@ -525,6 +532,7 @@ fn available_dispatch_tasks(
                     .is_none_or(|status| dep_status_satisfied(status))
             })
         })
+        .filter(|task| body_dependencies_satisfied(task, &task_status_by_id))
         .collect();
 
     available.sort_by_key(|task| (dispatch_priority_rank(&task.priority), task.id));
@@ -537,6 +545,21 @@ fn available_dispatch_tasks(
 /// work stays stuck after a long-running project winds down.
 fn dep_status_satisfied(status: &str) -> bool {
     matches!(status, "done" | "archived")
+}
+
+fn body_dependencies_satisfied(
+    task: &crate::task::Task,
+    task_status_by_id: &HashMap<u32, String>,
+) -> bool {
+    let Some(blocked_ids) = parse_body_dependency_ids(&task.description) else {
+        return true;
+    };
+    !blocked_ids.is_empty()
+        && blocked_ids.iter().all(|dep_id| {
+            task_status_by_id
+                .get(dep_id)
+                .is_some_and(|status| dep_status_satisfied(status))
+        })
 }
 
 /// #677: A task matches the excluded tags list (case-insensitive) when any
@@ -1013,6 +1036,7 @@ impl TeamDaemon {
                         .get(dep_id)
                         .is_none_or(|status| dep_status_satisfied(status))
                 })
+                && body_dependencies_satisfied(task, &task_status_by_id)
         }))
     }
 
@@ -1119,10 +1143,14 @@ impl TeamDaemon {
                     crate::task::load_tasks_from_dir(&board_dir.join("tasks")).unwrap_or_default();
                 let unmet: Vec<u32> = blocked_ids
                     .iter()
-                    .filter(|id| !all_tasks.iter().any(|t| t.id == **id && t.status == "done"))
+                    .filter(|id| {
+                        !all_tasks
+                            .iter()
+                            .any(|t| t.id == **id && dep_status_satisfied(&t.status))
+                    })
                     .copied()
                     .collect();
-                if !unmet.is_empty() {
+                if blocked_ids.is_empty() || !unmet.is_empty() {
                     warn!(
                         engineer = %entry.engineer,
                         task_id = task.id,
@@ -1960,6 +1988,76 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(task.id, 11, "should skip task with unmet dependency");
+    }
+
+    #[test]
+    fn next_task_skips_unmet_body_dependency() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_open_task_file(tmp.path(), 9, "dep-task", "in-progress");
+        write_task_with_body(
+            tmp.path(),
+            10,
+            "body-blocked",
+            "todo",
+            None,
+            "Blocked on: #9",
+        );
+        write_open_task_file(tmp.path(), 11, "free-task", "todo");
+
+        let daemon = TestDaemonBuilder::new(tmp.path()).build();
+        let board_dir = tmp.path().join(".batty").join("team_config").join("board");
+
+        let task = daemon
+            .test_next_dispatch_task(&board_dir, &HashSet::new())
+            .unwrap()
+            .unwrap();
+        assert_eq!(task.id, 11, "should skip task with unmet body dependency");
+    }
+
+    #[test]
+    fn next_task_allows_met_body_dependency() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_open_task_file(tmp.path(), 9, "dep-done", "done");
+        write_task_with_body(
+            tmp.path(),
+            10,
+            "body-unblocked",
+            "todo",
+            None,
+            "Blocked on: #9",
+        );
+
+        let daemon = TestDaemonBuilder::new(tmp.path()).build();
+        let board_dir = tmp.path().join(".batty").join("team_config").join("board");
+
+        let task = daemon
+            .test_next_dispatch_task(&board_dir, &HashSet::new())
+            .unwrap()
+            .unwrap();
+        assert_eq!(task.id, 10, "should allow satisfied body dependency");
+    }
+
+    #[test]
+    fn next_task_skips_body_blocker_without_task_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_task_with_body(
+            tmp.path(),
+            10,
+            "body-blocked",
+            "todo",
+            None,
+            "Blocked on: provider-console token",
+        );
+        write_open_task_file(tmp.path(), 11, "free-task", "todo");
+
+        let daemon = TestDaemonBuilder::new(tmp.path()).build();
+        let board_dir = tmp.path().join(".batty").join("team_config").join("board");
+
+        let task = daemon
+            .test_next_dispatch_task(&board_dir, &HashSet::new())
+            .unwrap()
+            .unwrap();
+        assert_eq!(task.id, 11, "should skip non-task-id body blocker");
     }
 
     #[test]

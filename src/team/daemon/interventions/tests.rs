@@ -1126,17 +1126,20 @@ fn stalled_manager_dispatch_gap_fallback_dispatches_highest_priority_work_first(
         "critical task should be selected before lower priorities"
     );
     assert!(
-        assigned.contains(&Some(191)),
-        "high task should be selected before medium priority"
-    );
-    assert!(
         !assigned.contains(&Some(190)),
         "medium task should wait while higher-priority work exists"
+    );
+    assert!(
+        !assigned.contains(&Some(191)),
+        "fallback dispatch is bounded to one task per intervention"
     );
     let tasks = crate::task::load_tasks_from_dir(&harness.board_tasks_dir()).unwrap();
     let medium = tasks.iter().find(|task| task.id == 190).unwrap();
     assert_eq!(medium.status, "todo");
     assert!(medium.claimed_by.is_none());
+    let high = tasks.iter().find(|task| task.id == 191).unwrap();
+    assert_eq!(high.status, "todo");
+    assert!(high.claimed_by.is_none());
 }
 
 #[test]
@@ -1178,6 +1181,129 @@ fn stalled_manager_dispatch_gap_skips_blocked_manual_work() {
     assert!(
         child.recv::<crate::shim::protocol::Command>().is_err(),
         "blocked/manual work should not be direct-dispatched"
+    );
+}
+
+#[test]
+fn stalled_manager_dispatch_gap_skips_unmet_depends_on_work() {
+    let harness = intervention_team_harness()
+        .with_member_state("lead", MemberState::Working)
+        .with_member_state("eng-1", MemberState::Idle)
+        .with_member_state("eng-2", MemberState::Idle)
+        .with_pane("lead", "%999997");
+    crate::team::test_support::write_board_task_file(
+        harness.project_root(),
+        198,
+        "depends-blocked",
+        "todo",
+        None,
+        &[199],
+        None,
+    );
+    let mut daemon = harness.build_daemon().unwrap();
+    daemon.config.team_config.use_shim = true;
+    let threshold = daemon
+        .config
+        .team_config
+        .workflow_policy
+        .stall_threshold_secs;
+    insert_working_shim_handle(&mut daemon, "lead", threshold + 10, 1);
+    let mut child = insert_idle_shim_handle(&mut daemon, "eng-1");
+    child
+        .set_read_timeout(Some(Duration::from_millis(50)))
+        .unwrap();
+
+    daemon.maybe_intervene_manager_dispatch_gap().unwrap();
+
+    assert_eq!(daemon.active_task_id("eng-1"), None);
+    let tasks = crate::task::load_tasks_from_dir(&harness.board_tasks_dir()).unwrap();
+    let task = tasks.iter().find(|task| task.id == 198).unwrap();
+    assert_eq!(task.status, "todo");
+    assert!(task.claimed_by.is_none());
+    assert!(
+        child.recv::<crate::shim::protocol::Command>().is_err(),
+        "depends_on-blocked work should not be direct-dispatched"
+    );
+}
+
+#[test]
+fn stalled_manager_dispatch_gap_skips_body_blocked_work() {
+    let harness = intervention_team_harness()
+        .with_member_state("lead", MemberState::Working)
+        .with_member_state("eng-1", MemberState::Idle)
+        .with_member_state("eng-2", MemberState::Idle)
+        .with_pane("lead", "%999997");
+    fs::create_dir_all(harness.board_tasks_dir()).unwrap();
+    fs::write(
+        harness.board_tasks_dir().join("198-body-blocked.md"),
+        "---\nid: 198\ntitle: body-blocked\nstatus: todo\npriority: critical\nclass: standard\n---\n\nBlocked on: #199\n",
+    )
+    .unwrap();
+    let mut daemon = harness.build_daemon().unwrap();
+    daemon.config.team_config.use_shim = true;
+    let threshold = daemon
+        .config
+        .team_config
+        .workflow_policy
+        .stall_threshold_secs;
+    insert_working_shim_handle(&mut daemon, "lead", threshold + 10, 1);
+    let mut child = insert_idle_shim_handle(&mut daemon, "eng-1");
+    child
+        .set_read_timeout(Some(Duration::from_millis(50)))
+        .unwrap();
+
+    daemon.maybe_intervene_manager_dispatch_gap().unwrap();
+
+    assert_eq!(daemon.active_task_id("eng-1"), None);
+    let tasks = crate::task::load_tasks_from_dir(&harness.board_tasks_dir()).unwrap();
+    let task = tasks.iter().find(|task| task.id == 198).unwrap();
+    assert_eq!(task.status, "todo");
+    assert!(task.claimed_by.is_none());
+    assert!(
+        child.recv::<crate::shim::protocol::Command>().is_err(),
+        "body-blocked work should not be direct-dispatched"
+    );
+}
+
+#[test]
+fn stalled_manager_dispatch_gap_fallback_cooldown_suppresses_second_assignment() {
+    let harness = intervention_team_harness()
+        .with_member_state("lead", MemberState::Working)
+        .with_member_state("eng-1", MemberState::Idle)
+        .with_member_state("eng-2", MemberState::Idle)
+        .with_pane("lead", "%999997")
+        .with_board_task(191, "high-task", "todo", None)
+        .with_board_task(192, "critical-task", "todo", None);
+    let mut daemon = harness.build_daemon().unwrap();
+    daemon.config.team_config.use_shim = true;
+    let threshold = daemon
+        .config
+        .team_config
+        .workflow_policy
+        .stall_threshold_secs;
+    insert_working_shim_handle(&mut daemon, "lead", threshold + 10, 1);
+    let _eng1_child = insert_idle_shim_handle(&mut daemon, "eng-1");
+    let _eng2_child = insert_idle_shim_handle(&mut daemon, "eng-2");
+
+    daemon.maybe_intervene_manager_dispatch_gap().unwrap();
+    daemon.maybe_intervene_manager_dispatch_gap().unwrap();
+
+    let tasks = crate::task::load_tasks_from_dir(&harness.board_tasks_dir()).unwrap();
+    let claimed: Vec<u32> = tasks
+        .iter()
+        .filter(|task| task.claimed_by.is_some())
+        .map(|task| task.id)
+        .collect();
+    assert_eq!(claimed, vec![191]);
+    let events =
+        crate::team::events::read_events(&crate::team::team_events_path(harness.project_root()))
+            .unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.event == "dispatch_fallback_used")
+            .count(),
+        1
     );
 }
 
