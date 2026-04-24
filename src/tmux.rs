@@ -771,7 +771,9 @@ pub struct TestSession {
 impl TestSession {
     /// Create a new test session guard wrapping an existing session name.
     pub fn new(name: impl Into<String>) -> Self {
-        Self { name: name.into() }
+        let name = name.into();
+        let _ = kill_session(&name);
+        Self { name }
     }
 
     /// The session name.

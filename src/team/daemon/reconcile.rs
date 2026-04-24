@@ -3,6 +3,8 @@
 //! When team.yaml changes and the daemon detects a topology diff, this module
 //! spawns new agents for added members and gracefully shuts down removed ones.
 
+use std::collections::BTreeSet;
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -14,10 +16,14 @@ use crate::task::load_tasks_from_dir;
 use crate::team::config::{RoleType, TeamConfig};
 use crate::team::config_diff::TopologyDiff;
 use crate::team::events::TeamEvent;
+use crate::team::git_cmd;
 use crate::team::hierarchy::MemberInstance;
 use crate::team::inbox;
 use crate::team::standup::MemberState;
 use crate::team::task_cmd;
+use crate::team::task_loop::{
+    branch_is_merged_into, current_worktree_branch, engineer_base_branch_name,
+};
 use crate::team::watcher::SessionWatcher;
 use crate::tmux;
 
@@ -258,6 +264,14 @@ impl TeamDaemon {
         self.last_uncommitted_warn.remove(name);
         self.pending_delivery_queue.remove(name);
 
+        if let Err(error) = self.cleanup_removed_member_worktree(name) {
+            warn!(
+                member = name,
+                error = %error,
+                "failed to clean removed member worktree"
+            );
+        }
+
         // Log event
         let reason = if is_working {
             "removed after graceful shutdown (was working)"
@@ -269,6 +283,131 @@ impl TeamDaemon {
         }
 
         self.record_orchestrator_action(format!("topology: removed member {name}"));
+        Ok(())
+    }
+
+    pub(super) fn cleanup_removed_member_worktree(&mut self, name: &str) -> Result<()> {
+        let project_root = self.config.project_root.clone();
+        let worktree_dir = self.worktree_dir(name);
+        if !self.member_uses_worktrees(name) && !worktree_dir.exists() {
+            return Ok(());
+        }
+        if self.removed_member_still_owns_board_work(name)? {
+            warn!(
+                member = name,
+                "skipping removed member worktree cleanup because board still claims work for member"
+            );
+            return Ok(());
+        }
+
+        if self.is_multi_repo {
+            for repo_name in self.sub_repo_names.clone() {
+                let repo_root = project_root.join(&repo_name);
+                let sub_worktree = worktree_dir.join(&repo_name);
+                self.cleanup_removed_member_git_worktree(name, &repo_root, &sub_worktree)?;
+            }
+            if worktree_dir
+                .read_dir()
+                .map(|mut entries| entries.next().is_none())
+                .unwrap_or(false)
+            {
+                std::fs::remove_dir(&worktree_dir)?;
+            }
+        } else {
+            self.cleanup_removed_member_git_worktree(name, &project_root, &worktree_dir)?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn cleanup_unconfigured_member_worktrees(&mut self) -> Result<()> {
+        let worktrees_root = self.config.project_root.join(".batty").join("worktrees");
+        if !worktrees_root.exists() {
+            return Ok(());
+        }
+        let configured_members: BTreeSet<String> = self
+            .config
+            .members
+            .iter()
+            .map(|member| member.name.clone())
+            .collect();
+
+        for entry in std::fs::read_dir(&worktrees_root)? {
+            let entry = entry?;
+            if !entry.file_type()?.is_dir() {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if configured_members.contains(&name) {
+                continue;
+            }
+            let path = entry.path();
+            if !self.is_multi_repo && !path.join(".git").exists() {
+                continue;
+            }
+            self.cleanup_removed_member_worktree(&name)?;
+        }
+        Ok(())
+    }
+
+    fn removed_member_still_owns_board_work(&self, name: &str) -> Result<bool> {
+        let tasks_dir = self.board_dir().join("tasks");
+        if !tasks_dir.exists() {
+            return Ok(false);
+        }
+        Ok(load_tasks_from_dir(&tasks_dir)?
+            .into_iter()
+            .any(|task| task.claimed_by.as_deref() == Some(name)))
+    }
+
+    fn cleanup_removed_member_git_worktree(
+        &mut self,
+        name: &str,
+        repo_root: &Path,
+        worktree_dir: &Path,
+    ) -> Result<()> {
+        let mut branches = removed_member_branch_candidates(repo_root, name)?;
+
+        if worktree_dir.exists() {
+            let current_branch = current_worktree_branch(worktree_dir)?;
+            if !removed_member_owns_branch(name, &current_branch) {
+                warn!(
+                    member = name,
+                    worktree = %worktree_dir.display(),
+                    branch = %current_branch,
+                    "skipping removed member worktree cleanup because branch is outside member namespace"
+                );
+                return Ok(());
+            }
+            if crate::team::task_loop::worktree_has_user_changes(worktree_dir)? {
+                warn!(
+                    member = name,
+                    worktree = %worktree_dir.display(),
+                    "skipping removed member worktree cleanup because worktree has uncommitted changes"
+                );
+                return Ok(());
+            }
+            branches.insert(current_branch);
+
+            git_cmd::worktree_remove(repo_root, worktree_dir, true).map_err(|error| {
+                anyhow::anyhow!(
+                    "failed to remove worktree '{}': {error}",
+                    worktree_dir.display()
+                )
+            })?;
+            info!(
+                member = name,
+                worktree = %worktree_dir.display(),
+                "removed worktree for topology-removed member"
+            );
+        }
+
+        for branch in branches {
+            cleanup_removed_member_branch(repo_root, name, &branch)?;
+        }
+
+        self.record_orchestrator_action(format!(
+            "topology: cleaned removed member worktree state for {name}"
+        ));
         Ok(())
     }
 
@@ -359,6 +498,67 @@ impl TeamDaemon {
             .cloned()
             .unwrap_or_else(|| "%0".to_string())
     }
+}
+
+fn removed_member_branch_candidates(repo_root: &Path, name: &str) -> Result<BTreeSet<String>> {
+    let branches = git_cmd::for_each_ref_branches(repo_root).map_err(|error| {
+        anyhow::anyhow!("failed to list branches for '{name}' cleanup: {error}")
+    })?;
+    Ok(branches
+        .into_iter()
+        .filter(|branch| removed_member_owns_branch(name, branch))
+        .collect())
+}
+
+fn removed_member_owns_branch(name: &str, branch: &str) -> bool {
+    branch == name
+        || branch == engineer_base_branch_name(name)
+        || branch
+            .strip_prefix(name)
+            .is_some_and(|suffix| suffix.starts_with('/'))
+}
+
+fn cleanup_removed_member_branch(repo_root: &Path, name: &str, branch: &str) -> Result<()> {
+    if !git_cmd::show_ref_exists(repo_root, branch).map_err(|error| {
+        anyhow::anyhow!("failed to check branch '{branch}' before cleanup: {error}")
+    })? {
+        return Ok(());
+    }
+
+    if branch_is_merged_into(repo_root, branch, "main")? {
+        git_cmd::branch_delete(repo_root, branch)
+            .map_err(|error| anyhow::anyhow!("failed to delete branch '{branch}': {error}"))?;
+        info!(
+            member = name,
+            branch = %branch,
+            "deleted branch for topology-removed member"
+        );
+        return Ok(());
+    }
+
+    let archive_branch = archived_removed_member_branch_name(repo_root, branch)?;
+    git_cmd::branch_rename(repo_root, branch, &archive_branch).map_err(|error| {
+        anyhow::anyhow!("failed to archive branch '{branch}' as '{archive_branch}': {error}")
+    })?;
+    warn!(
+        member = name,
+        branch = %branch,
+        archive_branch = %archive_branch,
+        "archived unmerged branch for topology-removed member"
+    );
+    Ok(())
+}
+
+fn archived_removed_member_branch_name(repo_root: &Path, branch: &str) -> Result<String> {
+    let mut candidate = format!("archived/removed-members/{branch}");
+    let mut counter = 1usize;
+    while git_cmd::show_ref_exists(repo_root, &candidate).map_err(|error| {
+        anyhow::anyhow!("failed to check archive branch '{candidate}' before cleanup: {error}")
+    })? {
+        counter += 1;
+        candidate = format!("archived/removed-members/{branch}-{counter}");
+    }
+    Ok(candidate)
 }
 
 // ---------------------------------------------------------------------------

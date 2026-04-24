@@ -936,6 +936,20 @@ impl TeamDaemon {
             if reason == "task no longer claimed by this engineer" {
                 self.record_task_release_by(task_id, &engineer);
             }
+            if !self
+                .config
+                .members
+                .iter()
+                .any(|member| member.name == engineer)
+                && let Err(error) = self.cleanup_removed_member_worktree(&engineer)
+            {
+                warn!(
+                    engineer = %engineer,
+                    task_id,
+                    error = %error,
+                    "state reconciliation failed to clean worktree for stale unconfigured owner"
+                );
+            }
             self.record_orchestrator_action(format!(
                 "state reconciliation: {} stale active task #{} for {} ({})",
                 if release_claim {
@@ -1216,6 +1230,13 @@ impl TeamDaemon {
                 // reclaim/re-route before it auto-dispatches to a peer.
                 self.record_task_rescue(task.id);
             }
+        }
+
+        if let Err(error) = self.cleanup_unconfigured_member_worktrees() {
+            warn!(
+                error = %error,
+                "state reconciliation failed to clean unconfigured member worktrees"
+            );
         }
 
         Ok(())
@@ -4390,6 +4411,49 @@ thread 'tmux::tests::split_window_horizontal_creates_new_pane' panicked at src/t
 
         daemon.reconcile_active_tasks().unwrap();
         assert_eq!(daemon.active_task_id("eng-1"), Some(10));
+    }
+
+    #[test]
+    fn reconcile_active_tasks_removes_transient_executor_worktree_after_reassignment() {
+        let _path_lock = PATH_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "executor-reassignment-cleanup");
+        let manager = manager_member("manager", None);
+        let engineer = engineer_member("eng-1-1", Some("manager"), true);
+        let mut daemon = TestDaemonBuilder::new(repo.as_path())
+            .members(vec![manager, engineer])
+            .states(HashMap::from([("eng-1-1".to_string(), MemberState::Idle)]))
+            .build();
+
+        let executor_worktree = repo.join(".batty").join("worktrees").join("executor-1");
+        std::fs::create_dir_all(executor_worktree.parent().unwrap()).unwrap();
+        git_ok(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "executor-1/681",
+                executor_worktree.to_str().unwrap(),
+                "main",
+            ],
+        );
+        write_owned_task_file(&repo, 681, "reassigned-task", "in-progress", "eng-1-1");
+
+        daemon.reconcile_active_tasks().unwrap();
+
+        assert!(!daemon.active_tasks.contains_key("executor-1"));
+        assert_eq!(daemon.active_task_id("eng-1-1"), Some(681));
+        assert!(!executor_worktree.exists());
+        assert!(
+            !crate::team::git_cmd::show_ref_exists(&repo, "executor-1/681").unwrap(),
+            "executor task branch should be removed after reassignment cleanup"
+        );
+        let worktrees = git_stdout(&repo, &["worktree", "list", "--porcelain"]);
+        assert!(
+            !worktrees.contains("executor-1"),
+            "git worktree list should not retain executor worktree:\n{worktrees}"
+        );
     }
 
     #[test]
