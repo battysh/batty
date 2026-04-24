@@ -12,17 +12,17 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/battysh/batty/actions"><img src="https://img.shields.io/github/actions/workflow/status/battysh/batty/ci.yml?style=for-the-badge&label=CI" alt="CI"></a>
+  <a href="https://github.com/battysh/batty/actions?utm_source=crates-io&utm_medium=readme&utm_campaign=0.11.x"><img src="https://img.shields.io/github/actions/workflow/status/battysh/batty/ci.yml?style=for-the-badge&label=CI" alt="CI"></a>
   <a href="https://crates.io/crates/batty-cli"><img src="https://img.shields.io/crates/v/batty-cli?style=for-the-badge" alt="crates.io"></a>
   <a href="https://crates.io/crates/batty-cli"><img src="https://img.shields.io/crates/d/batty-cli?style=for-the-badge&label=downloads" alt="Downloads"></a>
-  <a href="https://github.com/battysh/batty/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue?style=for-the-badge" alt="MIT License"></a>
+  <a href="https://github.com/battysh/batty/blob/main/LICENSE?utm_source=crates-io&utm_medium=readme&utm_campaign=0.11.x"><img src="https://img.shields.io/badge/license-MIT-blue?style=for-the-badge" alt="MIT License"></a>
   <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/built_with-Rust-dea584?style=for-the-badge&logo=rust" alt="Built with Rust"></a>
 </p>
 
 <p align="center">
   <a href="#quick-start">Quick Start</a> &middot;
   <a href="https://battysh.github.io/batty/">Docs</a> &middot;
-  <a href="https://github.com/battysh/batty">GitHub</a>
+  <a href="https://github.com/battysh/batty?utm_source=crates-io&utm_medium=readme&utm_campaign=0.11.x">GitHub</a>
 </p>
 
 ______________________________________________________________________
@@ -385,8 +385,8 @@ Pre-configured alerts:
 - [Examples](examples/) — Ready-to-run team configs
 - [Use Cases](USECASES.md)
 - [Contributing](CONTRIBUTING.md)
-- [Good First Issues](https://github.com/battysh/batty/labels/good%20first%20issue)
-- [GitHub](https://github.com/battysh/batty)
+- [Good First Issues](https://github.com/battysh/batty/labels/good%20first%20issue?utm_source=crates-io&utm_medium=readme&utm_campaign=0.11.x)
+- [GitHub](https://github.com/battysh/batty?utm_source=crates-io&utm_medium=readme&utm_campaign=0.11.x)
 
 ## License
 
