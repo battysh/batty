@@ -16,6 +16,7 @@ pub(crate) enum SupervisoryPressure {
     TriageBacklog,
     IdleActiveRecovery,
     DispatchGap,
+    PlanningBacklog,
     ReviewNudge,
     IdleNudge,
     RecoveryUpdate,
@@ -30,11 +31,12 @@ impl SupervisoryPressure {
             Self::TriageBacklog => 1,
             Self::IdleActiveRecovery => 2,
             Self::DispatchGap => 3,
-            Self::ReviewNudge => 4,
-            Self::IdleNudge => 5,
-            Self::RecoveryUpdate => 6,
-            Self::ResolvedUpdate => 7,
-            Self::StatusUpdate => 8,
+            Self::PlanningBacklog => 4,
+            Self::ReviewNudge => 5,
+            Self::IdleNudge => 6,
+            Self::RecoveryUpdate => 7,
+            Self::ResolvedUpdate => 8,
+            Self::StatusUpdate => 9,
         }
     }
 
@@ -45,6 +47,7 @@ impl SupervisoryPressure {
                 | Self::TriageBacklog
                 | Self::IdleActiveRecovery
                 | Self::DispatchGap
+                | Self::PlanningBacklog
         )
     }
 
@@ -54,6 +57,7 @@ impl SupervisoryPressure {
             Self::TriageBacklog => "direct-report packets",
             Self::IdleActiveRecovery => "idle active lanes",
             Self::DispatchGap => "dispatch gap",
+            Self::PlanningBacklog => "planning inbox",
             Self::ReviewNudge => "review nudge",
             Self::IdleNudge => "idle nudge",
             Self::RecoveryUpdate => "recovery update",
@@ -68,6 +72,7 @@ impl SupervisoryPressure {
             Self::TriageBacklog => "direct_report_packets",
             Self::IdleActiveRecovery => "idle_active_lanes",
             Self::DispatchGap => "dispatch_gap",
+            Self::PlanningBacklog => "planning_inbox",
             Self::ReviewNudge => "review_nudge",
             Self::IdleNudge => "idle_nudge",
             Self::RecoveryUpdate => "recovery_update",
@@ -82,6 +87,7 @@ impl SupervisoryPressure {
             Self::TriageBacklog => format!("direct-report packets ({count})"),
             Self::IdleActiveRecovery => format!("idle active lanes ({count})"),
             Self::DispatchGap => format!("dispatch gap ({count})"),
+            Self::PlanningBacklog => format!("planning inbox ({count})"),
             Self::ReviewNudge => format!("review nudge ({count})"),
             Self::IdleNudge => format!("idle nudge ({count})"),
             Self::RecoveryUpdate => format!("recovery update ({count})"),
@@ -162,6 +168,11 @@ pub(crate) fn classify_supervisory_pressure_normalized(body: &str) -> Option<Sup
         || body.starts_with("architect utilization")
     {
         Some(classify_recovery_pressure(body))
+    } else if body.starts_with("board needs replenishment:")
+        || body.contains("create concrete tasks from `planning/roadmap.md`")
+        || body.contains("create tasks from planning/roadmap.md")
+    {
+        Some(SupervisoryPressure::PlanningBacklog)
     } else if body.contains("dispatch queue") || body.contains("dispatch fallback") {
         Some(SupervisoryPressure::DispatchGap)
     } else if is_idle_nudge_normalized(body) {
@@ -490,6 +501,16 @@ mod tests {
                 "Utilization recovery needed: 2 idle engineer(s) have no active task and 2 dispatchable task(s) are available."
             )),
             Some(SupervisoryPressure::DispatchGap)
+        );
+    }
+
+    #[test]
+    fn classify_planning_backlog_pressure() {
+        assert_eq!(
+            classify_supervisory_pressure_normalized(&normalized_body(
+                "Board needs replenishment: 2 idle engineers, 0 todo tasks. Create tasks from planning/roadmap.md."
+            )),
+            Some(SupervisoryPressure::PlanningBacklog)
         );
     }
 
