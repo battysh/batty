@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::team::config::TeamConfig;
 use crate::team::daemon::verification::run_automatic_verification;
 use crate::team::events::{EventSink, TeamEvent};
+use crate::team::github_feedback::{GithubReleaseFeedbackItem, GithubReleaseFeedbackSummary};
 
 const RELEASES_DIR: &str = ".batty/releases";
 const RELEASE_HISTORY_FILE: &str = "history.jsonl";
@@ -74,6 +75,7 @@ pub struct ReleaseReadinessReport {
     pub recently_merged_task_ids: Vec<String>,
     pub verification_command: Option<String>,
     pub verification_summary: Option<String>,
+    pub github_feedback: GithubReleaseFeedbackSummary,
     pub blockers: Vec<String>,
 }
 
@@ -224,6 +226,7 @@ fn generate_release_readiness_with_verifier(
         recently_merged_task_ids: collect_recently_merged_task_ids(project_root, 10)?,
         verification_command: None,
         verification_summary: None,
+        github_feedback: GithubReleaseFeedbackSummary::default(),
         blockers: Vec::new(),
     };
 
@@ -273,6 +276,29 @@ fn generate_release_readiness_with_verifier(
         Err(error) => report
             .blockers
             .push(format!("git_ref_lookup_failed: {error}")),
+    }
+
+    match crate::team::github_feedback::summarize_release_github_feedback(
+        project_root,
+        report.current_commit.as_deref(),
+    ) {
+        Ok(github_feedback) => {
+            if !github_feedback.failing.is_empty() {
+                report.blockers.push(format!(
+                    "github_feedback_failed: {} failing GitHub check(s) for {}",
+                    github_feedback.failing.len(),
+                    github_feedback
+                        .current_commit
+                        .as_deref()
+                        .map(short_git_ref)
+                        .unwrap_or("unknown HEAD")
+                ));
+            }
+            report.github_feedback = github_feedback;
+        }
+        Err(error) => report
+            .blockers
+            .push(format!("github_feedback_unavailable: {error}")),
     }
 
     if let Some(tag) = report.proposed_tag.as_deref() {
@@ -886,6 +912,9 @@ fn render_release_readiness_report(report: &ReleaseReadinessReport) -> String {
         out.push_str(&format!("- Verification Summary: {summary}\n"));
     }
 
+    out.push_str("\n## GitHub Verification Feedback\n\n");
+    render_github_feedback_section(&mut out, &report.github_feedback);
+
     out.push_str("\n## Recently Merged Tasks\n\n");
     if report.recently_merged_task_ids.is_empty() {
         out.push_str("- none recorded\n");
@@ -907,6 +936,98 @@ fn render_release_readiness_report(report: &ReleaseReadinessReport) -> String {
     }
 
     out
+}
+
+fn render_github_feedback_section(out: &mut String, feedback: &GithubReleaseFeedbackSummary) {
+    if let Some(commit) = feedback.current_commit.as_deref() {
+        out.push_str(&format!("- Current Commit: {commit}\n"));
+    }
+    if feedback.clean {
+        out.push_str(
+            "- Current Feedback: clean (no failing or warning GitHub feedback for HEAD)\n",
+        );
+    } else {
+        out.push_str("- Current Feedback: attention needed\n");
+    }
+
+    out.push_str("\n### Failing Checks\n\n");
+    render_github_feedback_items(out, &feedback.failing, "none");
+
+    out.push_str("\n### Warning-Only Feedback\n\n");
+    render_github_feedback_items(out, &feedback.warnings, "none");
+
+    out.push_str("\n### Stale Feedback\n\n");
+    if feedback.stale.is_empty() {
+        out.push_str("- none\n");
+    } else {
+        for item in &feedback.stale {
+            out.push_str("- ");
+            out.push_str(&format_github_feedback_item(item));
+            out.push_str(" (stale: not for HEAD");
+            if let Some(current_commit) = feedback.current_commit.as_deref() {
+                out.push_str(&format!(" {}", short_git_ref(current_commit)));
+            }
+            out.push_str(")\n");
+        }
+    }
+}
+
+fn render_github_feedback_items(
+    out: &mut String,
+    items: &[GithubReleaseFeedbackItem],
+    empty_label: &str,
+) {
+    if items.is_empty() {
+        out.push_str("- ");
+        out.push_str(empty_label);
+        out.push('\n');
+        return;
+    }
+    for item in items {
+        out.push_str("- ");
+        out.push_str(&format_github_feedback_item(item));
+        out.push('\n');
+    }
+}
+
+fn format_github_feedback_item(item: &GithubReleaseFeedbackItem) -> String {
+    let commit = item
+        .commit
+        .as_deref()
+        .map(short_git_ref)
+        .unwrap_or("unknown");
+    let mut line = format!("{}: {} on {}", item.check_name, item.status, commit);
+    if let Some(age_secs) = item.age_secs {
+        line.push_str(&format!(" ({})", format_release_feedback_age(age_secs)));
+    }
+    if let Some(details) = item
+        .details
+        .as_deref()
+        .filter(|details| !details.is_empty())
+    {
+        line.push_str(&format!(" - {details}"));
+    }
+    if let Some(next_action) = item
+        .next_action
+        .as_deref()
+        .filter(|next_action| !next_action.is_empty())
+    {
+        line.push_str(&format!(" Next: {next_action}"));
+    }
+    line
+}
+
+fn format_release_feedback_age(age_secs: u64) -> String {
+    match age_secs {
+        0..=59 => format!("{age_secs}s old"),
+        60..=3_599 => format!("{}m old", age_secs / 60),
+        3_600..=86_399 => format!("{}h old", age_secs / 3_600),
+        _ => format!("{}d old", age_secs / 86_400),
+    }
+}
+
+fn short_git_ref(value: &str) -> &str {
+    value.get(..7).unwrap_or(value)
 }
 
 fn render_attempt_report(record: &ReleaseRecord) -> String {
@@ -1206,6 +1327,23 @@ mod tests {
         .unwrap();
     }
 
+    fn write_github_feedback(repo: &Path, check_name: &str, status: &str, commit: &str, ts: u64) {
+        crate::team::github_feedback::write_github_feedback_record(
+            repo,
+            &crate::team::github_feedback::GithubVerificationRecord {
+                task_id: 723,
+                branch: Some("main".to_string()),
+                commit: Some(commit.to_string()),
+                check_name: check_name.to_string(),
+                status: status.to_string(),
+                next_action: Some("inspect GitHub checks".to_string()),
+                details: Some("GitHub reported feedback".to_string()),
+                ts: Some(ts),
+            },
+        )
+        .unwrap();
+    }
+
     #[test]
     fn release_fails_when_changelog_entry_is_missing() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1295,10 +1433,81 @@ mod tests {
         assert!(report.current_commit.is_some());
         assert!(markdown.contains("# Release Readiness"));
         assert!(markdown.contains("- Status: ready"));
+        assert!(markdown.contains("## GitHub Verification Feedback"));
+        assert!(markdown.contains(
+            "- Current Feedback: clean (no failing or warning GitHub feedback for HEAD)"
+        ));
         assert!(markdown.contains("- #704"));
         assert!(markdown.contains("- Verification Summary: cargo test passed"));
         assert_eq!(git_output(tmp.path(), &["tag", "--list", "v0.10.0"]), "");
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn release_readiness_blocks_on_failing_github_feedback_for_head() {
+        let tmp = init_repo();
+        let head = git_output(tmp.path(), &["rev-parse", "HEAD"]);
+        write_github_feedback(tmp.path(), "ci/test", "failure", &head, 1_000);
+        let verifier = passing_verifier(Arc::new(AtomicUsize::new(0)));
+
+        let (report, markdown) =
+            generate_release_readiness_with_verifier(tmp.path(), None, &verifier).unwrap();
+
+        assert!(!report.ready());
+        assert_eq!(report.github_feedback.failing.len(), 1);
+        assert_eq!(
+            report.github_feedback.failing[0].commit.as_deref(),
+            Some(head.as_str())
+        );
+        assert!(
+            report
+                .blockers
+                .iter()
+                .any(|blocker| blocker.starts_with("github_feedback_failed:"))
+        );
+        assert!(markdown.contains("### Failing Checks"));
+        assert!(markdown.contains("ci/test: failure on"));
+        assert!(markdown.contains(&head[..7]));
+    }
+
+    #[test]
+    fn release_readiness_reports_warning_only_github_feedback_without_blocking() {
+        let tmp = init_repo();
+        let head = git_output(tmp.path(), &["rev-parse", "HEAD"]);
+        write_github_feedback(tmp.path(), "ci/lint", "warning", &head, 1_000);
+        let verifier = passing_verifier(Arc::new(AtomicUsize::new(0)));
+
+        let (report, markdown) =
+            generate_release_readiness_with_verifier(tmp.path(), None, &verifier).unwrap();
+
+        assert!(report.ready());
+        assert_eq!(report.github_feedback.warnings.len(), 1);
+        assert!(report.github_feedback.failing.is_empty());
+        assert!(markdown.contains("### Warning-Only Feedback"));
+        assert!(markdown.contains("ci/lint: warning on"));
+    }
+
+    #[test]
+    fn release_readiness_marks_non_head_github_feedback_stale() {
+        let tmp = init_repo();
+        let head = git_output(tmp.path(), &["rev-parse", "HEAD"]);
+        write_github_feedback(tmp.path(), "ci/old", "failure", "deadbee", 1_000);
+        let verifier = passing_verifier(Arc::new(AtomicUsize::new(0)));
+
+        let (report, markdown) =
+            generate_release_readiness_with_verifier(tmp.path(), None, &verifier).unwrap();
+
+        assert!(report.ready());
+        assert!(report.github_feedback.failing.is_empty());
+        assert_eq!(report.github_feedback.stale.len(), 1);
+        assert_eq!(
+            report.github_feedback.stale[0].commit.as_deref(),
+            Some("deadbee")
+        );
+        assert!(report.github_feedback.stale[0].age_secs.is_some());
+        assert!(markdown.contains("ci/old: failure on deadbee"));
+        assert!(markdown.contains("stale: not for HEAD"));
+        assert!(markdown.contains(&head[..7]));
     }
 
     #[test]
@@ -1359,6 +1568,13 @@ mod tests {
             recently_merged_task_ids: vec!["704".to_string(), "706".to_string()],
             verification_command: Some("cargo test".to_string()),
             verification_summary: Some("ok".to_string()),
+            github_feedback: GithubReleaseFeedbackSummary {
+                current_commit: Some("abc123".to_string()),
+                clean: true,
+                failing: Vec::new(),
+                warnings: Vec::new(),
+                stale: Vec::new(),
+            },
             blockers: vec!["dirty_main: 1 uncommitted change(s)".to_string()],
         };
 
@@ -1375,6 +1591,15 @@ mod tests {
 - Commits Since Previous Tag: 2\n\
 - Verification Command: cargo test\n\
 - Verification Summary: ok\n\n\
+## GitHub Verification Feedback\n\n\
+- Current Commit: abc123\n\
+- Current Feedback: clean (no failing or warning GitHub feedback for HEAD)\n\n\
+### Failing Checks\n\n\
+- none\n\n\
+### Warning-Only Feedback\n\n\
+- none\n\n\
+### Stale Feedback\n\n\
+- none\n\n\
 ## Recently Merged Tasks\n\n\
 - #704\n\
 - #706\n\n\
