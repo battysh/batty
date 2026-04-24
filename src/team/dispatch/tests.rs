@@ -765,7 +765,8 @@ fn stabilization_delay_prevents_premature_dispatch() {
         .idle_started_at
         .insert("eng-1".to_string(), Instant::now() - Duration::from_secs(5));
 
-    daemon.maybe_auto_dispatch().unwrap();
+    daemon.enqueue_dispatch_candidates().unwrap();
+    daemon.process_dispatch_queue().unwrap();
 
     assert_eq!(daemon.dispatch_queue.len(), 1);
     assert_eq!(daemon.dispatch_queue[0].validation_failures, 0);
@@ -806,7 +807,8 @@ fn wip_gate_blocks_double_assignment() {
         Instant::now() - Duration::from_secs(60),
     );
 
-    daemon.maybe_auto_dispatch().unwrap();
+    daemon.enqueue_dispatch_candidates().unwrap();
+    daemon.process_dispatch_queue().unwrap();
 
     assert_eq!(daemon.dispatch_queue.len(), 1);
     assert_eq!(daemon.dispatch_queue[0].validation_failures, 1);
@@ -849,7 +851,8 @@ fn dispatch_guard_blocks_claimed_todo_assignment() {
         Instant::now() - Duration::from_secs(60),
     );
 
-    daemon.maybe_auto_dispatch().unwrap();
+    daemon.enqueue_dispatch_candidates().unwrap();
+    daemon.process_dispatch_queue().unwrap();
 
     assert_eq!(daemon.dispatch_queue.len(), 1);
     assert_eq!(daemon.dispatch_queue[0].validation_failures, 1);
@@ -930,7 +933,8 @@ fn worktree_gate_blocks_dirty_worktrees() {
         Instant::now() - Duration::from_secs(60),
     );
 
-    daemon.maybe_auto_dispatch().unwrap();
+    daemon.enqueue_dispatch_candidates().unwrap();
+    daemon.process_dispatch_queue().unwrap();
 
     // Dirty idle worktrees are left untouched and re-queued with an
     // actionable preservation blocker instead of being auto-mutated.
@@ -1911,6 +1915,105 @@ fn round_robin_allocation_ignores_profile_scoring() {
 
     assert_eq!(daemon.dispatch_queue.len(), 1);
     assert_eq!(daemon.dispatch_queue[0].engineer, "eng-1");
+}
+
+#[test]
+fn dispatch_queue_prefers_original_owner_for_verification_retry_rework() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_task_file(
+        tmp.path(),
+        "042-retry.md",
+        "---\nid: 42\ntitle: retry rework\nstatus: in-progress\npriority: high\nclaimed_by: eng-1\nclass: standard\ntests_passed: false\noutcome: verification_retry_required\nartifacts:\n  - artifacts/retry-42.log\n---\n\nFix failed verification.\n",
+    );
+
+    let members = vec![
+        manager_member("manager", None),
+        engineer_member("eng-1", Some("manager"), false),
+        engineer_member("eng-2", Some("manager"), false),
+    ];
+    let mut daemon = TestDaemonBuilder::new(tmp.path())
+        .members(members)
+        .workflow_policy(WorkflowPolicy {
+            allocation: AllocationPolicy {
+                strategy: AllocationStrategy::RoundRobin,
+                ..AllocationPolicy::default()
+            },
+            ..WorkflowPolicy::default()
+        })
+        .board(BoardConfig {
+            auto_dispatch: true,
+            dispatch_stabilization_delay_secs: 0,
+            ..BoardConfig::default()
+        })
+        .states(HashMap::from([
+            ("eng-1".to_string(), MemberState::Idle),
+            ("eng-2".to_string(), MemberState::Idle),
+        ]))
+        .build();
+    daemon.last_auto_dispatch = Instant::now() - Duration::from_secs(30);
+    daemon.idle_started_at.insert(
+        "eng-1".to_string(),
+        Instant::now() - Duration::from_secs(60),
+    );
+    daemon.idle_started_at.insert(
+        "eng-2".to_string(),
+        Instant::now() - Duration::from_secs(60),
+    );
+
+    daemon.enqueue_dispatch_candidates().unwrap();
+
+    assert_eq!(daemon.dispatch_queue.len(), 1);
+    assert_eq!(daemon.dispatch_queue[0].task_id, 42);
+    assert_eq!(daemon.dispatch_queue[0].engineer, "eng-1");
+}
+
+#[test]
+fn dispatch_queue_sends_idle_peer_to_normal_work_before_retry_rework() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_task_file(
+        tmp.path(),
+        "042-retry.md",
+        "---\nid: 42\ntitle: retry rework\nstatus: in-progress\npriority: high\nclaimed_by: eng-1\nclass: standard\ntests_passed: false\noutcome: verification_retry_required\nartifacts:\n  - artifacts/retry-42.log\n---\n\nFix failed verification.\n",
+    );
+    write_open_task_file(tmp.path(), 101, "normal-work", "todo");
+    write_owned_task_file(tmp.path(), 777, "busy-owner", "in-progress", "eng-1");
+
+    let members = vec![
+        manager_member("manager", None),
+        engineer_member("eng-1", Some("manager"), false),
+        engineer_member("eng-2", Some("manager"), false),
+    ];
+    let mut daemon = TestDaemonBuilder::new(tmp.path())
+        .members(members)
+        .workflow_policy(WorkflowPolicy {
+            allocation: AllocationPolicy {
+                strategy: AllocationStrategy::RoundRobin,
+                ..AllocationPolicy::default()
+            },
+            ..WorkflowPolicy::default()
+        })
+        .board(BoardConfig {
+            auto_dispatch: true,
+            dispatch_stabilization_delay_secs: 0,
+            ..BoardConfig::default()
+        })
+        .states(HashMap::from([
+            ("eng-1".to_string(), MemberState::Working),
+            ("eng-2".to_string(), MemberState::Idle),
+        ]))
+        .build();
+    daemon.active_tasks.insert("eng-1".to_string(), 777);
+    daemon.last_auto_dispatch = Instant::now() - Duration::from_secs(30);
+    daemon.idle_started_at.insert(
+        "eng-2".to_string(),
+        Instant::now() - Duration::from_secs(60),
+    );
+
+    daemon.enqueue_dispatch_candidates().unwrap();
+
+    assert_eq!(daemon.dispatch_queue.len(), 1);
+    assert_eq!(daemon.dispatch_queue[0].task_id, 101);
+    assert_eq!(daemon.dispatch_queue[0].engineer, "eng-2");
 }
 
 // -- dispatch_priority_rank tests --

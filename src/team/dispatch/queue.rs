@@ -470,6 +470,7 @@ fn available_dispatch_tasks(
     excluded_tags: &[String],
     non_engineer_assignees: &HashSet<String>,
     rescued_task_ids: &HashSet<u32>,
+    verification_retry_task_ids: &HashSet<u32>,
 ) -> Result<Vec<crate::task::Task>> {
     let tasks = crate::task::load_tasks_from_dir(&board_dir.join("tasks"))?;
     let task_status_by_id: HashMap<u32, String> = tasks
@@ -479,8 +480,11 @@ fn available_dispatch_tasks(
 
     let mut available: Vec<crate::task::Task> = tasks
         .into_iter()
-        .filter(|task| matches!(task.status.as_str(), "backlog" | "todo"))
-        .filter(|task| task.claimed_by.is_none())
+        .filter(|task| {
+            matches!(task.status.as_str(), "backlog" | "todo")
+                || verification_retry_task_ids.contains(&task.id)
+        })
+        .filter(|task| task.claimed_by.is_none() || verification_retry_task_ids.contains(&task.id))
         .filter(|task| task.blocked.is_none())
         .filter(|task| task.blocked_on.is_none())
         .filter(|task| !task.is_schedule_blocked())
@@ -577,7 +581,66 @@ fn task_has_excluded_tag(task: &crate::task::Task, excluded_tags: &[String]) -> 
     })
 }
 
+fn verification_retry_required_metadata(
+    task: &crate::task::Task,
+) -> Option<crate::team::board::WorkflowMetadata> {
+    let metadata = crate::team::board::read_workflow_metadata(&task.source_path).ok()?;
+    (metadata.tests_passed == Some(false)
+        && metadata.outcome.as_deref() == Some("verification_retry_required")
+        && !metadata.artifacts.is_empty())
+    .then_some(metadata)
+}
+
+fn verification_retry_assignment_context(task: &crate::task::Task) -> Option<String> {
+    let metadata = verification_retry_required_metadata(task)?;
+    let mut lines = vec![
+        "Verification retry required.".to_string(),
+        "Outcome: verification_retry_required.".to_string(),
+    ];
+    if let Some(owner) = task.claimed_by.as_deref() {
+        lines.push(format!("Previous owner: {owner}."));
+    }
+    if let Some(artifact) = metadata.artifacts.last() {
+        lines.push(format!("Latest verification artifact: {artifact}."));
+    }
+    Some(lines.join("\n"))
+}
+
 impl TeamDaemon {
+    fn verification_retry_dispatchable_task_ids(
+        &self,
+        board_dir: &Path,
+        allow_peer_pickup: bool,
+    ) -> Result<HashSet<u32>> {
+        Ok(crate::task::load_tasks_from_dir(&board_dir.join("tasks"))?
+            .into_iter()
+            .filter(|task| self.verification_retry_dispatchable_task(task, allow_peer_pickup))
+            .map(|task| task.id)
+            .collect())
+    }
+
+    fn verification_retry_dispatchable_task(
+        &self,
+        task: &crate::task::Task,
+        allow_peer_pickup: bool,
+    ) -> bool {
+        if verification_retry_required_metadata(task).is_none() {
+            return false;
+        }
+        let Some(owner) = task.claimed_by.as_deref() else {
+            return true;
+        };
+        if self.active_tasks.get(owner) == Some(&task.id)
+            && self.states.get(owner) == Some(&MemberState::Working)
+        {
+            return false;
+        }
+        self.idle_engineer_names()
+            .iter()
+            .any(|engineer| engineer == owner)
+            || allow_peer_pickup
+    }
+
     fn serialize_overlapping_candidate(
         &mut self,
         board_dir: &Path,
@@ -688,12 +751,23 @@ impl TeamDaemon {
         board_dir: &Path,
         queued_task_ids: &HashSet<u32>,
     ) -> Result<Option<crate::task::Task>> {
+        let normal_available = available_dispatch_tasks(
+            board_dir,
+            queued_task_ids,
+            &self.config.team_config.board.dispatch_excluded_tags,
+            &self.non_engineer_member_names(),
+            &self.rescued_task_ids(),
+            &HashSet::new(),
+        )?;
+        let allow_peer_pickup =
+            normal_available.is_empty() && !self.idle_engineer_names().is_empty();
         Ok(available_dispatch_tasks(
             board_dir,
             queued_task_ids,
             &self.config.team_config.board.dispatch_excluded_tags,
             &self.non_engineer_member_names(),
             &self.rescued_task_ids(),
+            &self.verification_retry_dispatchable_task_ids(board_dir, allow_peer_pickup)?,
         )?
         .into_iter()
         .next())
@@ -844,7 +918,6 @@ impl TeamDaemon {
             .filter(|(_, record)| record.dispatch_blocked(rescue_base_cooldown))
             .map(|(task_id, _)| *task_id)
             .collect();
-
         let mut queued_task_ids: HashSet<u32> = self
             .dispatch_queue
             .iter()
@@ -890,6 +963,17 @@ impl TeamDaemon {
             }
         }
 
+        let allow_peer_retry_pickup = available_dispatch_tasks(
+            &board_dir,
+            &queued_task_ids,
+            &self.config.team_config.board.dispatch_excluded_tags,
+            &non_engineer_names,
+            &rescued_task_ids,
+            &HashSet::new(),
+        )?
+        .is_empty()
+            && !self.idle_engineer_names().is_empty();
+
         // Tasks whose only eligible engineer(s) are currently blocked (already
         // in `recent_dispatches` or #697 release-excluded). Treat them as
         // unavailable for the remainder of this enqueue pass so the outer
@@ -903,12 +987,15 @@ impl TeamDaemon {
             let mut unavailable_task_ids = queued_task_ids.clone();
             unavailable_task_ids.extend(file_locked_task_ids.iter().copied());
             unavailable_task_ids.extend(eligibility_excluded_task_ids.iter().copied());
+            let verification_retry_task_ids =
+                self.verification_retry_dispatchable_task_ids(&board_dir, allow_peer_retry_pickup)?;
             let available_tasks = available_dispatch_tasks(
                 &board_dir,
                 &unavailable_task_ids,
                 &self.config.team_config.board.dispatch_excluded_tags,
                 &non_engineer_names,
                 &rescued_task_ids,
+                &verification_retry_task_ids,
             )?;
             if available_tasks.is_empty() {
                 break;
@@ -984,6 +1071,22 @@ impl TeamDaemon {
                 manual_cooldown,
                 &profiles,
             );
+            let retry_previous_owner = self
+                .verification_retry_dispatchable_task(&task, allow_peer_retry_pickup)
+                .then(|| task.claimed_by.clone())
+                .flatten();
+            let mut ranked_engineers = ranked_engineers;
+            if let Some(owner) = retry_previous_owner.as_deref() {
+                ranked_engineers
+                    .retain(|engineer_name| engineer_name == owner || allow_peer_retry_pickup);
+                if let Some(index) = ranked_engineers
+                    .iter()
+                    .position(|engineer_name| engineer_name == owner)
+                {
+                    let owner = ranked_engineers.remove(index);
+                    ranked_engineers.insert(0, owner);
+                }
+            }
             let Some(engineer_name) = ranked_engineers.into_iter().find(|engineer_name| {
                 !self
                     .recent_dispatches
@@ -1025,9 +1128,10 @@ impl TeamDaemon {
             .map(|task| (task.id, task.status.clone()))
             .collect();
         Ok(tasks.into_iter().find(|task| {
+            let retry_dispatchable = self.verification_retry_dispatchable_task(task, true);
             task.id == entry.task_id
-                && matches!(task.status.as_str(), "backlog" | "todo")
-                && task.claimed_by.is_none()
+                && (matches!(task.status.as_str(), "backlog" | "todo") || retry_dispatchable)
+                && (task.claimed_by.is_none() || retry_dispatchable)
                 && task.blocked.is_none()
                 && task.blocked_on.is_none()
                 && !task.is_schedule_blocked()
@@ -1126,8 +1230,11 @@ impl TeamDaemon {
                 continue;
             };
 
-            // Skip if the task is already in-progress
-            if task.status == "in-progress" {
+            let retry_dispatchable = self.verification_retry_dispatchable_task(&task, true);
+            // Skip if the task is already in-progress, except retry-required
+            // rework that was intentionally left in-progress to preserve its
+            // failed verification metadata.
+            if task.status == "in-progress" && !retry_dispatchable {
                 info!(
                     engineer = %entry.engineer,
                     task_id = task.id,
@@ -1170,7 +1277,14 @@ impl TeamDaemon {
 
             let active_count =
                 self.engineer_active_board_item_count(&board_dir, &entry.engineer)?;
-            if active_count > 0 {
+            let retry_same_owner =
+                retry_dispatchable && task.claimed_by.as_deref() == Some(entry.engineer.as_str());
+            let effective_active_count = if retry_same_owner {
+                active_count.saturating_sub(1)
+            } else {
+                active_count
+            };
+            if effective_active_count > 0 {
                 // Try to reassign to an idle engineer with no active items
                 let retained_engineers: HashSet<&str> =
                     retained.iter().map(|e| e.engineer.as_str()).collect();
@@ -1200,7 +1314,7 @@ impl TeamDaemon {
                 entry.validation_failures += 1;
                 entry.last_failure = Some(format!(
                     "Dispatch guard blocked assignment for '{}' with {} active board item(s); no idle alternative",
-                    entry.engineer, active_count
+                    entry.engineer, effective_active_count
                 ));
                 if entry.validation_failures >= DISPATCH_QUEUE_FAILURE_LIMIT {
                     // Drop silently — will be re-queued by auto-dispatch when
@@ -1220,12 +1334,12 @@ impl TeamDaemon {
             if !check_wip_limit(
                 &self.config.team_config.workflow_policy,
                 RoleType::Engineer,
-                active_count,
+                effective_active_count,
             ) {
                 entry.validation_failures += 1;
                 entry.last_failure = Some(format!(
                     "WIP gate blocked dispatch for '{}' with {} active board task(s)",
-                    entry.engineer, active_count
+                    entry.engineer, effective_active_count
                 ));
                 warn!(
                     engineer = %entry.engineer,
@@ -1440,6 +1554,12 @@ impl TeamDaemon {
 
             let assignment_message =
                 format!("Task #{}: {}\n\n{}", task.id, task.title, task.description);
+            let assignment_message =
+                if let Some(context) = verification_retry_assignment_context(&task) {
+                    format!("{assignment_message}\n\n{context}")
+                } else {
+                    assignment_message
+                };
             match self.assign_task_with_task_id(&entry.engineer, &assignment_message, Some(task.id))
             {
                 Ok(_) => {

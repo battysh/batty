@@ -153,6 +153,8 @@ impl AgentHealthSummary {
 #[derive(Debug, Clone, Default, Deserialize)]
 struct PersistedDaemonHealthState {
     #[serde(default)]
+    states: HashMap<String, MemberState>,
+    #[serde(default)]
     active_tasks: HashMap<String, u32>,
     #[serde(default)]
     retry_counts: HashMap<String, u32>,
@@ -248,6 +250,10 @@ pub(crate) struct StatusTaskEntry {
     pub(crate) branch_mismatch: Option<String>,
     pub(crate) next_action: Option<String>,
     pub(crate) test_summary: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) latest_artifact: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) failed_test_state: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -1832,6 +1838,63 @@ pub(crate) fn format_owned_tasks_summary(task_ids: &[u32]) -> String {
     }
 }
 
+pub(crate) fn format_failed_test_task(task: &StatusTaskEntry) -> Option<String> {
+    let summary = task.test_summary.as_deref()?;
+    let owner = task.claimed_by.as_deref().unwrap_or("unclaimed");
+    let artifact = task.latest_artifact.as_deref().unwrap_or("none");
+    let state = task.failed_test_state.as_deref().unwrap_or("owner-locked");
+    Some(format!(
+        "#{} {} (owner: {}; artifact: {}; {}): {}",
+        task.id, task.title, owner, artifact, state, summary
+    ))
+}
+
+fn verification_retry_rework(metadata: &crate::team::board::WorkflowMetadata) -> bool {
+    metadata.tests_passed == Some(false)
+        && metadata.outcome.as_deref() == Some("verification_retry_required")
+        && !metadata.artifacts.is_empty()
+}
+
+fn failed_test_summary(metadata: &crate::team::board::WorkflowMetadata) -> Option<String> {
+    metadata
+        .test_results
+        .clone()
+        .filter(|results| results.failed > 0)
+        .map(|results| results.failure_summary())
+        .or_else(|| {
+            (metadata.tests_passed == Some(false)).then(|| {
+                if metadata.outcome.as_deref() == Some("verification_retry_required") {
+                    "verification retry required".to_string()
+                } else {
+                    "tests failed".to_string()
+                }
+            })
+        })
+}
+
+fn current_owner_active_on_task(
+    task: &task::Task,
+    daemon_state: &PersistedDaemonHealthState,
+) -> bool {
+    let Some(owner) = task.claimed_by.as_deref() else {
+        return false;
+    };
+    daemon_state.active_tasks.get(owner) == Some(&task.id)
+        && daemon_state.states.get(owner) == Some(&MemberState::Working)
+}
+
+fn failed_test_state(
+    task: &task::Task,
+    retry_rework: bool,
+    daemon_state: &PersistedDaemonHealthState,
+) -> String {
+    if retry_rework && !current_owner_active_on_task(task, daemon_state) {
+        "dispatchable rework".to_string()
+    } else {
+        "owner-locked".to_string()
+    }
+}
+
 pub(crate) fn board_status_task_queues(
     project_root: &Path,
 ) -> Result<(Vec<StatusTaskEntry>, Vec<StatusTaskEntry>)> {
@@ -1853,15 +1916,21 @@ pub(crate) fn board_status_task_queues(
     let github_feedback =
         crate::team::github_feedback::summarize_github_feedback_for_tasks(project_root, &tasks)
             .unwrap_or_default();
+    let daemon_state = load_persisted_daemon_health_state(&daemon_state_path(project_root))
+        .unwrap_or_default()
+        .unwrap_or_default();
     for task in &tasks {
         let inferred = infer_runtime_task_metadata(project_root, task);
         let branch_mismatch = task_branch_mismatch(project_root, task, &inferred);
         let review_state = super::review::classify_review_task(project_root, task, &tasks);
-        let mut test_summary = crate::team::board::read_workflow_metadata(&task.source_path)
-            .ok()
-            .and_then(|metadata| metadata.test_results)
-            .filter(|results| results.failed > 0)
-            .map(|results| results.failure_summary());
+        let workflow_metadata = crate::team::board::read_workflow_metadata(&task.source_path).ok();
+        let latest_artifact = workflow_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.artifacts.last().cloned());
+        let retry_rework = workflow_metadata
+            .as_ref()
+            .is_some_and(verification_retry_rework);
+        let mut test_summary = workflow_metadata.as_ref().and_then(failed_test_summary);
         let mut blocked_on = task.blocked_on.clone();
         let mut next_action = match review_state {
             ReviewQueueState::Current => task.next_action.clone(),
@@ -1876,6 +1945,9 @@ pub(crate) fn board_status_task_queues(
         {
             test_summary = Some(feedback.status_summary());
         }
+        let failed_test_state = test_summary
+            .as_ref()
+            .map(|_| failed_test_state(task, retry_rework, &daemon_state));
         let entry = StatusTaskEntry {
             id: task.id,
             title: task.title.clone(),
@@ -1893,6 +1965,8 @@ pub(crate) fn board_status_task_queues(
             branch_mismatch,
             next_action,
             test_summary,
+            latest_artifact,
+            failed_test_state,
         };
 
         match task.status.as_str() {
@@ -4739,6 +4813,8 @@ mod tests {
             branch_mismatch: None,
             next_action: None,
             test_summary: None,
+            latest_artifact: None,
+            failed_test_state: None,
         }])
         .unwrap();
 
@@ -5027,7 +5103,7 @@ mod tests {
         fs::create_dir_all(&tasks_dir).unwrap();
         fs::write(
             tasks_dir.join("041-active.md"),
-            "---\nid: 41\ntitle: Active task\nstatus: in-progress\npriority: high\nclaimed_by: eng-1\nclass: standard\ntests_run: true\ntests_passed: false\ntest_results:\n  framework: cargo\n  total: 3\n  passed: 2\n  failed: 1\n  ignored: 0\n  failures:\n    - test_name: parser::it_works\n      message: assertion failed\n      location: src/parser.rs:12:5\n---\n",
+            "---\nid: 41\ntitle: Active task\nstatus: in-progress\npriority: high\nclaimed_by: eng-1\nclass: standard\ntests_run: true\ntests_passed: false\nartifacts:\n  - artifacts/retry-41.log\noutcome: verification_retry_required\ntest_results:\n  framework: cargo\n  total: 3\n  passed: 2\n  failed: 1\n  ignored: 0\n  failures:\n    - test_name: parser::it_works\n      message: assertion failed\n      location: src/parser.rs:12:5\n---\n",
         )
         .unwrap();
 
@@ -5038,6 +5114,169 @@ mod tests {
         assert_eq!(
             active_tasks[0].test_summary.as_deref(),
             Some("1 tests failed: parser::it_works (assertion failed at src/parser.rs:12:5)")
+        );
+        assert_eq!(
+            active_tasks[0].latest_artifact.as_deref(),
+            Some("artifacts/retry-41.log")
+        );
+        assert_eq!(
+            active_tasks[0].failed_test_state.as_deref(),
+            Some("dispatchable rework")
+        );
+        assert_eq!(
+            format_failed_test_task(&active_tasks[0]).as_deref(),
+            Some(
+                "#41 Active task (owner: eng-1; artifact: artifacts/retry-41.log; dispatchable rework): 1 tests failed: parser::it_works (assertion failed at src/parser.rs:12:5)"
+            )
+        );
+    }
+
+    #[test]
+    fn board_status_task_queues_marks_active_owner_retry_owner_locked() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = tmp
+            .path()
+            .join(".batty")
+            .join("team_config")
+            .join("board")
+            .join("tasks");
+        fs::create_dir_all(&tasks_dir).unwrap();
+        fs::write(
+            tasks_dir.join("041-active.md"),
+            "---\nid: 41\ntitle: Active task\nstatus: in-progress\npriority: high\nclaimed_by: eng-1\nclass: standard\ntests_run: true\ntests_passed: false\nartifacts:\n  - artifacts/retry-41.log\noutcome: verification_retry_required\ntest_results:\n  framework: cargo\n  total: 3\n  passed: 2\n  failed: 1\n  ignored: 0\n  failures:\n    - test_name: parser::it_works\n---\n",
+        )
+        .unwrap();
+        let daemon_state = serde_json::json!({
+            "states": {"eng-1": "working"},
+            "active_tasks": {"eng-1": 41}
+        });
+        fs::create_dir_all(tmp.path().join(".batty")).unwrap();
+        fs::write(
+            daemon_state_path(tmp.path()),
+            serde_json::to_vec_pretty(&daemon_state).unwrap(),
+        )
+        .unwrap();
+
+        let (active_tasks, review_queue) = board_status_task_queues(tmp.path()).unwrap();
+
+        assert!(review_queue.is_empty());
+        assert_eq!(
+            active_tasks[0].failed_test_state.as_deref(),
+            Some("owner-locked")
+        );
+        assert_eq!(
+            format_failed_test_task(&active_tasks[0]).as_deref(),
+            Some(
+                "#41 Active task (owner: eng-1; artifact: artifacts/retry-41.log; owner-locked): 1 tests failed: parser::it_works"
+            )
+        );
+    }
+
+    #[test]
+    fn board_status_task_queues_surfaces_retry_artifact_without_test_results() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = tmp
+            .path()
+            .join(".batty")
+            .join("team_config")
+            .join("board")
+            .join("tasks");
+        fs::create_dir_all(&tasks_dir).unwrap();
+        fs::write(
+            tasks_dir.join("728-active.md"),
+            "---\nid: 728\ntitle: Verification retry\nstatus: in-progress\npriority: high\nclaimed_by: eng-1\nclass: standard\ntests_run: true\ntests_passed: false\nartifacts:\n  - artifacts/retry-728.log\noutcome: verification_retry_required\n---\n",
+        )
+        .unwrap();
+        let daemon_state = serde_json::json!({
+            "states": {"eng-1": "working", "eng-2": "idle"},
+            "active_tasks": {"eng-1": 777}
+        });
+        fs::create_dir_all(tmp.path().join(".batty")).unwrap();
+        fs::write(
+            daemon_state_path(tmp.path()),
+            serde_json::to_vec_pretty(&daemon_state).unwrap(),
+        )
+        .unwrap();
+
+        let (active_tasks, review_queue) = board_status_task_queues(tmp.path()).unwrap();
+
+        assert!(review_queue.is_empty());
+        assert_eq!(
+            active_tasks[0].test_summary.as_deref(),
+            Some("verification retry required")
+        );
+        assert_eq!(
+            active_tasks[0].latest_artifact.as_deref(),
+            Some("artifacts/retry-728.log")
+        );
+        assert_eq!(
+            active_tasks[0].failed_test_state.as_deref(),
+            Some("dispatchable rework")
+        );
+        assert_eq!(
+            format_failed_test_task(&active_tasks[0]).as_deref(),
+            Some(
+                "#728 Verification retry (owner: eng-1; artifact: artifacts/retry-728.log; dispatchable rework): verification retry required"
+            )
+        );
+    }
+
+    #[test]
+    fn board_status_task_queues_labels_failed_tests_owner_locked_without_retry_artifact() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = tmp
+            .path()
+            .join(".batty")
+            .join("team_config")
+            .join("board")
+            .join("tasks");
+        fs::create_dir_all(&tasks_dir).unwrap();
+        fs::write(
+            tasks_dir.join("041-active.md"),
+            "---\nid: 41\ntitle: Active task\nstatus: in-progress\npriority: high\nclaimed_by: eng-1\nclass: standard\ntests_run: true\ntests_passed: false\ntest_results:\n  framework: cargo\n  total: 1\n  passed: 0\n  failed: 1\n  ignored: 0\n  failures:\n    - test_name: parser::it_works\n---\n",
+        )
+        .unwrap();
+
+        let (active_tasks, review_queue) = board_status_task_queues(tmp.path()).unwrap();
+
+        assert!(review_queue.is_empty());
+        assert_eq!(
+            active_tasks[0].failed_test_state.as_deref(),
+            Some("owner-locked")
+        );
+        assert_eq!(
+            format_failed_test_task(&active_tasks[0]).as_deref(),
+            Some(
+                "#41 Active task (owner: eng-1; artifact: none; owner-locked): 1 tests failed: parser::it_works"
+            )
+        );
+    }
+
+    #[test]
+    fn session_failed_tests_formatter_includes_owner_artifact_and_state() {
+        let task = StatusTaskEntry {
+            id: 728,
+            title: "Verification retry".to_string(),
+            status: "in-progress".to_string(),
+            priority: "high".to_string(),
+            claimed_by: Some("eng-1".to_string()),
+            review_owner: None,
+            blocked_on: None,
+            branch: Some("eng-1/728".to_string()),
+            worktree_path: None,
+            commit: None,
+            branch_mismatch: None,
+            next_action: None,
+            test_summary: Some("cargo test failed".to_string()),
+            latest_artifact: Some("artifacts/728.log".to_string()),
+            failed_test_state: Some("dispatchable rework".to_string()),
+        };
+
+        assert_eq!(
+            format_failed_test_task(&task).as_deref(),
+            Some(
+                "#728 Verification retry (owner: eng-1; artifact: artifacts/728.log; dispatchable rework): cargo test failed"
+            )
         );
     }
 
@@ -5173,6 +5412,8 @@ mod tests {
                 branch_mismatch: None,
                 next_action: None,
                 test_summary: Some("1 tests failed: parser::it_works".to_string()),
+                latest_artifact: Some("artifacts/failed-tests.log".to_string()),
+                failed_test_state: Some("dispatchable rework".to_string()),
             }],
             review_queue: vec![StatusTaskEntry {
                 id: 42,
@@ -5188,6 +5429,8 @@ mod tests {
                 branch_mismatch: None,
                 next_action: Some("review now".to_string()),
                 test_summary: None,
+                latest_artifact: None,
+                failed_test_state: None,
             }],
             optional_subsystems: None,
             engineer_profiles: None,

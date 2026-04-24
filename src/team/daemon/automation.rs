@@ -287,6 +287,14 @@ fn select_authoritative_owned_task<'a>(
     })
 }
 
+fn verification_retry_required_task(task: &crate::task::Task) -> bool {
+    crate::team::board::read_workflow_metadata(&task.source_path).is_ok_and(|metadata| {
+        metadata.tests_passed == Some(false)
+            && metadata.outcome.as_deref() == Some("verification_retry_required")
+            && !metadata.artifacts.is_empty()
+    })
+}
+
 fn authoritative_task_branch(engineer: &str, task: &crate::task::Task) -> String {
     task.branch
         .clone()
@@ -1365,8 +1373,9 @@ impl TeamDaemon {
             .collect();
 
         let authoritative_id = if claimed.len() > 1 {
-            select_authoritative_multi_claim_task(&claimed)
-                .map(|task| task.id)
+            self.active_task_id(engineer)
+                .filter(|task_id| claimed.iter().any(|task| task.id == *task_id))
+                .or_else(|| select_authoritative_multi_claim_task(&claimed).map(|task| task.id))
                 .expect("claimed tasks is not empty")
         } else if let [task_id] = branch_matches.as_slice() {
             *task_id
@@ -1404,6 +1413,9 @@ impl TeamDaemon {
                 .copied()
                 .filter(|task| task.id != authoritative_id)
             {
+                if verification_retry_required_task(task) {
+                    continue;
+                }
                 warn!(
                     engineer,
                     task_id = task.id,
@@ -3437,6 +3449,20 @@ printf 'Created task #%s\n' \"$id\"
             task_id,
         )
         .unwrap()
+    }
+
+    fn mark_verification_retry_required(project_root: &Path, task_id: u32, artifact: &str) {
+        let task_path = board_task_path(project_root, task_id);
+        update_task_frontmatter(&task_path, |mapping| {
+            mapping.insert(yaml_key("tests_run"), serde_yaml::Value::Bool(true));
+            mapping.insert(yaml_key("tests_passed"), serde_yaml::Value::Bool(false));
+            set_optional_string(mapping, "outcome", Some("verification_retry_required"));
+            mapping.insert(
+                yaml_key("artifacts"),
+                serde_yaml::Value::Sequence(vec![serde_yaml::Value::String(artifact.to_string())]),
+            );
+        })
+        .unwrap();
     }
 
     const SINGLE_TASK_RESPONSE: &str = r#"---
@@ -7559,6 +7585,133 @@ thread 'tmux::tests::split_window_horizontal_creates_new_pane' panicked at src/t
         assert_eq!(daemon.dispatch_queue.len(), 1);
         assert_eq!(daemon.dispatch_queue[0].task_id, 42);
         assert_eq!(daemon.dispatch_queue[0].engineer, "eng-2");
+    }
+
+    #[test]
+    fn automation_failed_tests_verification_retry_required_peer_pickup() {
+        use crate::shim::protocol::{Command, socketpair};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "automation-failed-tests-retry-peer");
+        write_owned_task_file(&repo, 42, "failed-tests-retry", "in-progress", "eng-1");
+        write_owned_task_file(&repo, 777, "owner-other-work", "in-progress", "eng-1");
+        mark_verification_retry_required(&repo, 42, "artifacts/retry-42.log");
+        update_task_frontmatter(&board_task_path(&repo, 42), |mapping| {
+            set_optional_string(mapping, "branch", Some("eng-1/42"));
+            set_optional_string(mapping, "worktree_path", Some(".batty/worktrees/eng-1"));
+        })
+        .unwrap();
+
+        let mut daemon = TestDaemonBuilder::new(repo.as_path())
+            .members(vec![
+                manager_member("manager", None),
+                engineer_member("eng-1", Some("manager"), false),
+                engineer_member("eng-2", Some("manager"), false),
+            ])
+            .board(BoardConfig {
+                auto_dispatch: true,
+                dispatch_stabilization_delay_secs: 0,
+                ..BoardConfig::default()
+            })
+            .states(HashMap::from([
+                ("eng-1".to_string(), MemberState::Working),
+                ("eng-2".to_string(), MemberState::Idle),
+            ]))
+            .build();
+        daemon.active_tasks.insert("eng-1".to_string(), 777);
+        daemon.config.team_config.use_shim = true;
+        let (parent_sock, child_sock) = socketpair().unwrap();
+        let parent_channel = crate::shim::protocol::Channel::new(parent_sock);
+        let mut child_channel = crate::shim::protocol::Channel::new(child_sock);
+        let mut handle = super::super::agent_handle::AgentHandle::new(
+            "eng-2".to_string(),
+            parent_channel,
+            12345,
+            "codex".to_string(),
+            "codex".to_string(),
+            repo.clone(),
+        );
+        handle.apply_state_change(crate::shim::protocol::ShimState::Idle);
+        daemon.shim_handles.insert("eng-2".to_string(), handle);
+        daemon.last_auto_dispatch = Instant::now() - Duration::from_secs(30);
+        daemon.idle_started_at.insert(
+            "eng-2".to_string(),
+            Instant::now() - Duration::from_secs(60),
+        );
+
+        daemon.enqueue_dispatch_candidates().unwrap();
+
+        assert_eq!(daemon.dispatch_queue.len(), 1);
+        assert_eq!(daemon.dispatch_queue[0].task_id, 42);
+        assert_eq!(daemon.dispatch_queue[0].engineer, "eng-2");
+
+        daemon.process_dispatch_queue().unwrap();
+
+        assert!(daemon.dispatch_queue.is_empty());
+        assert_eq!(daemon.active_tasks.get("eng-2"), Some(&42));
+        let task = crate::task::Task::from_file(&board_task_path(&repo, 42)).unwrap();
+        assert_eq!(task.claimed_by.as_deref(), Some("eng-2"));
+        assert_eq!(task.branch.as_deref(), Some("eng-1/42"));
+        assert_eq!(
+            task.worktree_path.as_deref(),
+            Some(".batty/worktrees/eng-1")
+        );
+        let metadata =
+            crate::team::board::read_workflow_metadata(&board_task_path(&repo, 42)).unwrap();
+        assert_eq!(metadata.artifacts, vec!["artifacts/retry-42.log"]);
+
+        let command = child_channel.recv().unwrap().unwrap();
+        match command {
+            Command::SendMessage { body, .. } => {
+                assert!(body.contains("Previous owner: eng-1."));
+                assert!(body.contains("Latest verification artifact: artifacts/retry-42.log."));
+            }
+            other => panic!("expected SendMessage, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn automation_failed_tests_verification_retry_waits_while_normal_work_dispatchable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "automation-failed-tests-retry-normal-work");
+        write_owned_task_file(&repo, 42, "failed-tests-retry", "in-progress", "eng-1");
+        write_owned_task_file(&repo, 777, "owner-other-work", "in-progress", "eng-1");
+        write_open_task_file(&repo, 50, "normal-work", "todo");
+        mark_verification_retry_required(&repo, 42, "artifacts/retry-42.log");
+
+        let mut daemon = TestDaemonBuilder::new(repo.as_path())
+            .members(vec![
+                manager_member("manager", None),
+                engineer_member("eng-1", Some("manager"), false),
+                engineer_member("eng-2", Some("manager"), false),
+                engineer_member("eng-3", Some("manager"), false),
+            ])
+            .board(BoardConfig {
+                auto_dispatch: true,
+                dispatch_stabilization_delay_secs: 0,
+                ..BoardConfig::default()
+            })
+            .states(HashMap::from([
+                ("eng-1".to_string(), MemberState::Working),
+                ("eng-2".to_string(), MemberState::Idle),
+                ("eng-3".to_string(), MemberState::Idle),
+            ]))
+            .build();
+        daemon.active_tasks.insert("eng-1".to_string(), 777);
+        daemon.last_auto_dispatch = Instant::now() - Duration::from_secs(30);
+        daemon.idle_started_at.insert(
+            "eng-2".to_string(),
+            Instant::now() - Duration::from_secs(60),
+        );
+        daemon.idle_started_at.insert(
+            "eng-3".to_string(),
+            Instant::now() - Duration::from_secs(60),
+        );
+
+        daemon.enqueue_dispatch_candidates().unwrap();
+
+        assert_eq!(daemon.dispatch_queue.len(), 1);
+        assert_eq!(daemon.dispatch_queue[0].task_id, 50);
     }
 
     #[test]
