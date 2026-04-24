@@ -224,6 +224,11 @@ impl TeamDaemon {
                 detail = %detail,
                 "skipping daemon auto-merge request"
             );
+            if reason == AutoMergeSkipReason::MissingPacket
+                && detail.contains("verification_retry_required")
+            {
+                self.redispatch_verification_retry_required(request, &detail)?;
+            }
             self.record_orchestrator_action(format!(
                 "merge queue: skipped auto-merge for task #{} ({reason}: {detail})",
                 request.task_id,
@@ -606,6 +611,74 @@ fn merge_request_skip_reason(
     }
 
     Ok(None)
+}
+
+impl TeamDaemon {
+    fn redispatch_verification_retry_required(
+        &mut self,
+        request: &MergeRequest,
+        detail: &str,
+    ) -> Result<()> {
+        let board_dir = self.board_dir();
+        crate::team::task_cmd::transition_task_with_attribution(
+            &board_dir,
+            request.task_id,
+            "in-progress",
+            crate::team::task_cmd::StatusTransitionAttribution::daemon(
+                "daemon.merge_queue.verification_retry",
+            ),
+        )?;
+        crate::team::task_cmd::assign_task_owners(
+            &board_dir,
+            request.task_id,
+            Some(&request.engineer),
+            Some(""),
+        )?;
+
+        let message = format!(
+            "Task #{} requires another verification pass.\n\nBatty could not merge the previous completion because {detail}.\n\nContinue on branch `{}` in `{}` and fix the verification failure before reporting completion again.",
+            request.task_id,
+            request.branch,
+            request.worktree_dir.display()
+        );
+        let can_deliver_assignment = (self.config.team_config.use_shim
+            && self.shim_handles.contains_key(&request.engineer))
+            || self.config.pane_map.contains_key(&request.engineer);
+        if can_deliver_assignment {
+            match self.assign_task_with_task_id_as(
+                "batty",
+                &request.engineer,
+                &message,
+                Some(request.task_id),
+            ) {
+                Ok(_) => {
+                    self.record_orchestrator_action(format!(
+                        "merge queue: re-dispatched verification retry for task #{} to {}",
+                        request.task_id, request.engineer
+                    ));
+                    return Ok(());
+                }
+                Err(error) => {
+                    warn!(
+                        task_id = request.task_id,
+                        engineer = %request.engineer,
+                        error = %error,
+                        "verification retry assignment launch failed; falling back to inbox delivery"
+                    );
+                }
+            }
+        }
+
+        self.queue_message("batty", &request.engineer, &message)?;
+        self.active_tasks
+            .insert(request.engineer.clone(), request.task_id);
+        self.mark_member_working(&request.engineer);
+        self.record_orchestrator_action(format!(
+            "merge queue: queued verification retry for task #{} to {}",
+            request.task_id, request.engineer
+        ));
+        Ok(())
+    }
 }
 
 fn dirty_main_review_merge_block_detail(root_dirty: &RootDirtyState) -> Option<String> {
@@ -1192,6 +1265,31 @@ mod tests {
         .unwrap();
     }
 
+    fn write_retry_required_metadata(project_root: &Path, request: &MergeRequest, title: &str) {
+        let task_path = project_root
+            .join(".batty")
+            .join("team_config")
+            .join("board")
+            .join("tasks")
+            .join(format!("{:03}-{title}.md", request.task_id));
+        write_workflow_metadata(
+            &task_path,
+            &WorkflowMetadata {
+                branch: Some(request.branch.clone()),
+                worktree_path: Some(request.worktree_dir.to_string_lossy().into_owned()),
+                commit: Some("abc1234".to_string()),
+                changed_paths: vec!["src/lib.rs".to_string()],
+                tests_run: Some(true),
+                tests_passed: Some(false),
+                test_results: None,
+                artifacts: Vec::new(),
+                outcome: Some("verification_retry_required".to_string()),
+                review_blockers: Vec::new(),
+            },
+        )
+        .unwrap();
+    }
+
     fn current_head(repo_dir: &Path) -> String {
         String::from_utf8(
             Command::new("git")
@@ -1204,6 +1302,50 @@ mod tests {
         .unwrap()
         .trim()
         .to_string()
+    }
+
+    #[test]
+    fn verification_retry_required_merge_queue_redispatches_review_task() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "batty-merge-queue-retry-test");
+        write_task_file(&repo, 42, "retry-required-task", "review");
+
+        let retry_request = request(42);
+        write_retry_required_metadata(&repo, &retry_request, "retry-required-task");
+
+        let members = vec![
+            manager_member("manager", None),
+            engineer_member("eng-1", Some("manager"), false),
+        ];
+        let mut daemon = make_test_daemon(&repo, members);
+        daemon.set_member_state_for_test("eng-1", MemberState::Idle);
+        daemon.enqueue_merge_request(retry_request);
+
+        daemon.process_merge_queue().unwrap();
+
+        let task_path = repo
+            .join(".batty")
+            .join("team_config")
+            .join("board")
+            .join("tasks")
+            .join("042-retry-required-task.md");
+        let task = crate::task::Task::from_file(&task_path).unwrap();
+        assert_eq!(task.status, "in-progress");
+        assert_eq!(task.claimed_by.as_deref(), Some("eng-1"));
+        assert_eq!(task.review_owner, None);
+        assert_eq!(daemon.active_task_id("eng-1"), Some(42));
+        assert_eq!(
+            daemon.member_state_for_test("eng-1"),
+            Some(MemberState::Working)
+        );
+
+        let messages =
+            crate::team::inbox::pending_messages(&crate::team::inbox::inboxes_root(&repo), "eng-1")
+                .unwrap();
+        assert!(messages.iter().any(|message| {
+            message.body.contains("requires another verification pass")
+                && message.body.contains("verification_retry_required")
+        }));
     }
 
     #[test]

@@ -115,6 +115,39 @@ fn verification_fix_message(
     body
 }
 
+fn can_deliver_assignment(daemon: &TeamDaemon, engineer: &str) -> bool {
+    (daemon.config.team_config.use_shim && daemon.shim_handles.contains_key(engineer))
+        || daemon.config.pane_map.contains_key(engineer)
+}
+
+fn deliver_verification_retry(
+    daemon: &mut TeamDaemon,
+    engineer: &str,
+    task_id: u32,
+    message: &str,
+) -> Result<()> {
+    if can_deliver_assignment(daemon, engineer) {
+        match daemon.assign_task_with_task_id_as("batty", engineer, message, Some(task_id)) {
+            Ok(_) => {
+                daemon.record_orchestrator_action(format!(
+                    "verification retry: re-dispatched task #{task_id} to {engineer}"
+                ));
+                return Ok(());
+            }
+            Err(error) => {
+                warn!(
+                    engineer,
+                    task_id,
+                    error = %error,
+                    "verification retry re-dispatch failed; falling back to inbox delivery"
+                );
+            }
+        }
+    }
+
+    daemon.queue_message("batty", engineer, message)
+}
+
 fn verification_retry_budget(max_iterations: u32) -> u32 {
     max_iterations.clamp(1, 3)
 }
@@ -814,7 +847,7 @@ pub(crate) fn handle_engineer_completion(daemon: &mut TeamDaemon, engineer: &str
             &verification_run.file_paths,
             &verification_run.output,
         );
-        daemon.queue_message("batty", engineer, &engineer_message)?;
+        deliver_verification_retry(daemon, engineer, task_id, &engineer_message)?;
 
         if should_escalate && let Some(ref manager_name) = manager_name {
             daemon.record_verification_max_iterations_reached(
@@ -1786,7 +1819,9 @@ fn multi_repo_diff_stat_from_trunk(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::shim::protocol::{Command, ShimState, socketpair};
     use crate::team::config::AutoMergePolicy;
+    use crate::team::daemon::agent_handle::AgentHandle;
     use crate::team::events::read_events;
     use crate::team::hierarchy::MemberInstance;
     use crate::team::inbox;
@@ -2393,6 +2428,79 @@ mod tests {
         let snapshot = std::fs::read_to_string(snapshot_path).unwrap();
         assert!(snapshot.contains("\"phase\": \"fixing\""));
         assert!(snapshot.contains("smoke_test"));
+    }
+
+    #[test]
+    fn automation_failed_tests_verification_retry_required_relaunches_assignment() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "batty-retry-redispatch-test");
+        write_task_file(&repo, 42, "failing-test-task");
+        let board_dir = repo.join(".batty").join("team_config").join("board");
+        let team_config_dir = repo.join(".batty").join("team_config");
+        let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
+        setup_engineer_worktree(
+            &repo,
+            &worktree_dir,
+            &engineer_base_branch_name("eng-1"),
+            &team_config_dir,
+        )
+        .unwrap();
+        let worktree_path = worktree_dir
+            .strip_prefix(&repo)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        checkout_worktree_branch_from_trunk(&worktree_dir, "eng-1/42", "main").unwrap();
+        crate::team::task_cmd::assign_task_owners(&board_dir, 42, Some("eng-1"), None).unwrap();
+        crate::team::task_cmd::set_task_assignment_context(
+            &board_dir,
+            42,
+            Some("eng-1/42"),
+            Some(&worktree_path),
+        )
+        .unwrap();
+
+        std::fs::write(
+            worktree_dir.join("src").join("lib.rs"),
+            "#[cfg(test)]\nmod tests {\n    #[test]\n    fn test_dispatch_wip_guard() {\n        assert_eq!(2, 3);\n    }\n}\n",
+        )
+        .unwrap();
+        git_ok(&worktree_dir, &["add", "src/lib.rs"]);
+        git_ok(&worktree_dir, &["commit", "-m", "keep failing retry"]);
+
+        let mut daemon = setup_completion_daemon(&repo, "eng-1");
+        daemon.config.team_config.use_shim = true;
+        let (parent_sock, child_sock) = socketpair().unwrap();
+        let parent_channel = crate::shim::protocol::Channel::new(parent_sock);
+        let mut child_channel = crate::shim::protocol::Channel::new(child_sock);
+        let mut handle = AgentHandle::new(
+            "eng-1".to_string(),
+            parent_channel,
+            12345,
+            "codex".to_string(),
+            "codex".to_string(),
+            repo.clone(),
+        );
+        handle.apply_state_change(ShimState::Idle);
+        daemon.shim_handles.insert("eng-1".to_string(), handle);
+        daemon.set_active_task_for_test("eng-1", 42);
+        daemon.set_member_state_for_test("eng-1", MemberState::Working);
+
+        handle_engineer_completion(&mut daemon, "eng-1").unwrap();
+
+        let command = child_channel.recv().unwrap().unwrap();
+        match command {
+            Command::SendMessage { from, body, .. } => {
+                assert_eq!(from, "batty");
+                assert!(body.contains("Fix attempt 1/3"));
+                assert!(
+                    body.contains("Verification failed because the test command did not pass.")
+                );
+            }
+            other => panic!("expected verification retry SendMessage, got {other:?}"),
+        }
+        assert_eq!(daemon.active_task_id("eng-1"), Some(42));
+        assert_eq!(current_worktree_branch(&worktree_dir).unwrap(), "eng-1/42");
     }
 
     #[test]

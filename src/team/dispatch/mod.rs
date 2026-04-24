@@ -77,12 +77,17 @@ impl TeamDaemon {
         let Some(board_task) = tasks.into_iter().find(|candidate| candidate.id == task_id) else {
             return task.to_string();
         };
-        crate::team::learnings::augment_assignment_message(
+        let rendered = crate::team::learnings::augment_assignment_message(
             &self.config.project_root,
             &board_task,
             sender,
         )
-        .unwrap_or_else(|_| task.to_string())
+        .unwrap_or_else(|_| task.to_string());
+        if is_verification_retry_assignment(task) {
+            format!("{}\n\nTask context:\n{}", task.trim(), rendered)
+        } else {
+            rendered
+        }
     }
 
     fn maybe_refresh_assignment_worktree(
@@ -726,6 +731,12 @@ impl TeamDaemon {
         self.last_auto_dispatch = Instant::now();
         Ok(())
     }
+}
+
+fn is_verification_retry_assignment(task: &str) -> bool {
+    task.contains("Fix attempt")
+        || task.contains("requires another verification pass")
+        || task.contains("verification_retry_required")
 }
 
 pub(super) fn summarize_assignment(task: &str) -> String {
