@@ -14,6 +14,22 @@ use super::test_results::{self, TestRunOutput};
 
 const SHARED_CARGO_CONFIG_MARKER: &str = "# Managed by Batty: shared cargo target";
 const WORKTREE_EXCLUDE_MARKER: &str = "# Managed by Batty worktree ignores";
+
+/// Resolve the default branch for a repo (mainline/main/master/trunk). Falls
+/// back to "main" for legacy compatibility. Patched for Amazon GitFarm which
+/// uses "mainline".
+fn default_branch(repo: &Path) -> String {
+    git_cmd::default_branch_name(repo).unwrap_or_else(|| "main".to_string())
+}
+
+fn effective_trunk_branch(repo: &Path, trunk_branch: &str) -> String {
+    if trunk_branch == "main" {
+        default_branch(repo)
+    } else {
+        trunk_branch.to_string()
+    }
+}
+
 pub(crate) const ADDITIVE_CONFLICT_AUTO_RESOLVE_FENCE: &[&str] =
     &["src/team/task_loop.rs", "src/team/review.rs"];
 const MIN_REVIEW_READY_PRODUCTION_ADDITIONS: usize = 10;
@@ -326,8 +342,9 @@ pub(crate) fn setup_engineer_worktree_from_trunk(
 
     if !worktree_dir.exists() {
         let path = worktree_dir.to_string_lossy().to_string();
+        let start_point = effective_trunk_branch(project_root, trunk_branch);
         match retry_git(|| {
-            git_cmd::worktree_add(project_root, worktree_dir, branch_name, trunk_branch)
+            git_cmd::worktree_add(project_root, worktree_dir, branch_name, &start_point)
         }) {
             Ok(_) => {}
             Err(git_cmd::GitError::Permanent { stderr, .. })
@@ -397,7 +414,7 @@ pub(crate) fn prepare_engineer_assignment_worktree_from_trunk(
         &base_branch,
         trunk_branch,
     )?;
-    ensure_task_branch_namespace_available(project_root, engineer_name)?;
+    ensure_task_branch_namespace_available(project_root, engineer_name, trunk_branch)?;
 
     if worktree_has_user_changes(worktree_dir)? {
         auto_clean_worktree(worktree_dir)?;
@@ -409,7 +426,11 @@ pub(crate) fn prepare_engineer_assignment_worktree_from_trunk(
     if previous_branch != base_branch
         && previous_branch != task_branch
         && !previous_branch_is_engineer_owned
-        && !branch_is_merged_into(project_root, &previous_branch, trunk_branch)?
+        && !branch_is_merged_into(
+            project_root,
+            &previous_branch,
+            &effective_trunk_branch(project_root, trunk_branch),
+        )?
     {
         bail!(
             "engineer worktree '{}' is on unmerged branch '{}'",
@@ -426,7 +447,11 @@ pub(crate) fn prepare_engineer_assignment_worktree_from_trunk(
     if previous_branch != base_branch
         && previous_branch != task_branch
         && previous_branch_is_engineer_owned
-        && branch_is_merged_into(project_root, &previous_branch, trunk_branch)?
+        && branch_is_merged_into(
+            project_root,
+            &previous_branch,
+            &effective_trunk_branch(project_root, trunk_branch),
+        )?
     {
         delete_branch(project_root, &previous_branch)?;
     }
@@ -542,9 +567,28 @@ pub(crate) fn worktree_commits_behind_trunk(
     worktree_dir: &Path,
     trunk_branch: &str,
 ) -> Result<u32> {
+    // Multi-repo mode: aggregate staleness as the MAX behind-count across sub-repos.
+    if !git_cmd::is_git_repo(worktree_dir) {
+        let sub_repos = git_cmd::discover_sub_repos(worktree_dir);
+        if !sub_repos.is_empty() {
+            let mut max_behind: u32 = 0;
+            for repo in sub_repos {
+                let default = effective_trunk_branch(&repo, trunk_branch);
+                let behind = map_git_error(
+                    retry_git(|| git_cmd::rev_list_count(&repo, &format!("HEAD..{default}"))),
+                    &format!("failed to measure sub-repo worktree staleness against {default}"),
+                )?;
+                if behind > max_behind {
+                    max_behind = behind;
+                }
+            }
+            return Ok(max_behind);
+        }
+    }
+    let default = effective_trunk_branch(worktree_dir, trunk_branch);
     map_git_error(
-        retry_git(|| git_cmd::rev_list_count(worktree_dir, &format!("HEAD..{trunk_branch}"))),
-        &format!("failed to measure worktree staleness against {trunk_branch}"),
+        retry_git(|| git_cmd::rev_list_count(worktree_dir, &format!("HEAD..{default}"))),
+        &format!("failed to measure worktree staleness against {default}"),
     )
 }
 
@@ -658,13 +702,20 @@ pub(crate) fn refresh_engineer_worktree_from_trunk(
     }
 
     if map_git_error(
-        retry_git(|| git_cmd::merge_base_is_ancestor(project_root, trunk_branch, branch_name)),
+        retry_git(|| {
+            git_cmd::merge_base_is_ancestor(
+                project_root,
+                &effective_trunk_branch(project_root, trunk_branch),
+                branch_name,
+            )
+        }),
         &format!("failed to compare worktree branch with {trunk_branch}"),
     )? {
         return Ok(WorktreeRefreshAction::Unchanged);
     }
 
-    let rebase_result = retry_git(|| git_cmd::rebase(worktree_dir, trunk_branch));
+    let rebase_target = effective_trunk_branch(worktree_dir, trunk_branch);
+    let rebase_result = retry_git(|| git_cmd::rebase(worktree_dir, &rebase_target));
     if rebase_result.is_ok() {
         info!(
             worktree = %worktree_dir.display(),
@@ -748,7 +799,11 @@ fn maybe_migrate_legacy_engineer_worktree(
     }
 
     checkout_worktree_branch_from_trunk(worktree_dir, base_branch, trunk_branch)?;
-    if branch_is_merged_into(project_root, engineer_name, trunk_branch)? {
+    if branch_is_merged_into(
+        project_root,
+        engineer_name,
+        &effective_trunk_branch(project_root, trunk_branch),
+    )? {
         delete_branch(project_root, engineer_name)?;
         info!(
             branch = engineer_name,
@@ -771,7 +826,11 @@ fn maybe_migrate_legacy_engineer_worktree(
     Ok(())
 }
 
-fn ensure_task_branch_namespace_available(project_root: &Path, engineer_name: &str) -> Result<()> {
+fn ensure_task_branch_namespace_available(
+    project_root: &Path,
+    engineer_name: &str,
+    trunk_branch: &str,
+) -> Result<()> {
     if !branch_exists(project_root, engineer_name)? {
         return Ok(());
     }
@@ -783,7 +842,11 @@ fn ensure_task_branch_namespace_available(project_root: &Path, engineer_name: &s
         );
     }
 
-    if branch_is_merged_into(project_root, engineer_name, "main")? {
+    if branch_is_merged_into(
+        project_root,
+        engineer_name,
+        &effective_trunk_branch(project_root, trunk_branch),
+    )? {
         delete_branch(project_root, engineer_name)?;
         info!(
             branch = engineer_name,
@@ -993,6 +1056,39 @@ pub(crate) fn worktree_has_user_changes(worktree_dir: &Path) -> Result<bool> {
 }
 
 pub(crate) fn current_worktree_user_change_paths(worktree_dir: &Path) -> Result<Vec<String>> {
+    // Multi-repo mode: worktree root isn't a git repo itself, it holds per-package
+    // git worktrees underneath. Iterate sub-repos and aggregate (mirrors preflight.rs
+    // and discover_sub_repos elsewhere). Single-repo path unchanged.
+    if !git_cmd::is_git_repo(worktree_dir) {
+        let sub_repos = git_cmd::discover_sub_repos(worktree_dir);
+        if sub_repos.is_empty() {
+            // Not a git repo and no git sub-repos — nothing we can inspect.
+            // Fall through to single-repo path to surface the original error.
+        } else {
+            let mut aggregated = Vec::new();
+            for repo in sub_repos {
+                let status = map_git_error(
+                    retry_git(|| {
+                        git_cmd::run_git(&repo, USER_WORKTREE_STATUS_ARGS)
+                            .map(|output| output.stdout)
+                    }),
+                    "failed to inspect sub-repo worktree status",
+                )?;
+                let repo_name = repo
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                for path in parse_status_paths(&status) {
+                    if repo_name.is_empty() {
+                        aggregated.push(path);
+                    } else {
+                        aggregated.push(format!("{repo_name}/{path}"));
+                    }
+                }
+            }
+            return Ok(aggregated);
+        }
+    }
     let status = map_git_error(
         retry_git(|| {
             git_cmd::run_git(worktree_dir, USER_WORKTREE_STATUS_ARGS).map(|output| output.stdout)
@@ -1654,8 +1750,9 @@ pub(crate) fn checkout_worktree_branch_from_trunk(
     branch_name: &str,
     trunk_branch: &str,
 ) -> Result<()> {
+    let start = effective_trunk_branch(worktree_dir, trunk_branch);
     map_git_error(
-        retry_git(|| git_cmd::checkout_new_branch(worktree_dir, branch_name, trunk_branch)),
+        retry_git(|| git_cmd::checkout_new_branch(worktree_dir, branch_name, &start)),
         &format!("failed to switch worktree to branch '{branch_name}'"),
     )
 }
