@@ -1866,11 +1866,13 @@ mod tests {
         git_ok(&sub_worktree, &["commit", "-m", "change subrepo file"]);
 
         let changed =
-            multi_repo_files_changed_from_main(&worktree_root, &["repo".to_string()]).unwrap();
+            multi_repo_files_changed_from_trunk(&worktree_root, &["repo".to_string()], "main")
+                .unwrap();
         let code_changed =
-            multi_repo_code_files_changed_from_main(&worktree_root, &["repo".to_string()]).unwrap();
+            multi_repo_code_files_changed_from_trunk(&worktree_root, &["repo".to_string()], "main")
+                .unwrap();
         let diff_stat =
-            multi_repo_diff_stat_from_main(&worktree_root, &["repo".to_string()]).unwrap();
+            multi_repo_diff_stat_from_trunk(&worktree_root, &["repo".to_string()], "main").unwrap();
 
         assert!(
             changed > 0,

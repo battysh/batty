@@ -1,6 +1,6 @@
 use super::*;
-use crate::team::task_loop::setup_engineer_worktree_from_trunk;
 use crate::team::config::{ClaudeAuth, ClaudeAuthMode};
+use crate::team::task_loop::setup_engineer_worktree_from_trunk;
 use crate::team::watcher::{SessionTrackerConfig, discover_claude_session_file};
 use crate::team::workspace::setup_workspace_worktree;
 use crate::team::{layout, shim_events_log_path, shim_log_path, shim_logs_dir};
