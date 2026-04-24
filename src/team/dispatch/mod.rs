@@ -399,6 +399,7 @@ impl TeamDaemon {
         let short_cmd = write_launch_script(
             engineer,
             agent_name,
+            member.as_ref().and_then(|m| m.model.as_deref()),
             &claude_auth,
             &assignment_body,
             role_context.as_deref(),

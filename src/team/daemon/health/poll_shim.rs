@@ -896,6 +896,7 @@ impl TeamDaemon {
             let agent_cmd = write_launch_script(
                 member_name,
                 agent_name,
+                member.model.as_deref(),
                 &claude_auth,
                 &prompt,
                 Some(&role_context),
@@ -936,6 +937,7 @@ impl TeamDaemon {
         let agent_cmd = write_launch_script(
             member_name,
             agent_name_idle,
+            member.model.as_deref(),
             &claude_auth,
             &prompt,
             Some(&prompt),

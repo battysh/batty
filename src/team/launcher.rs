@@ -196,6 +196,7 @@ impl TeamDaemon {
         let short_cmd = write_launch_script(
             &member.name,
             agent_name,
+            member.model.as_deref(),
             &claude_auth,
             &prompt_text,
             Some(&role_prompt),
@@ -577,6 +578,7 @@ pub(super) fn strip_nudge_section(prompt: &str) -> String {
 pub(super) fn write_launch_script(
     member_name: &str,
     agent_name: &str,
+    model: Option<&str>,
     claude_auth: &ClaudeAuth,
     prompt: &str,
     role_context: Option<&str>,
@@ -599,13 +601,20 @@ pub(super) fn write_launch_script(
     };
     let launch_dir_str = launch_dir.to_string_lossy();
 
-    let adapter = agent::adapter_from_name(agent_name)
-        .unwrap_or_else(|| agent::adapter_from_name("claude").unwrap());
+    let adapter: Box<dyn agent::AgentAdapter> = if matches!(agent_name, "kiro" | "kiro-cli") {
+        Box::new(agent::kiro::KiroCliAdapter::new_with_model(
+            None,
+            model.map(str::to_string),
+        ))
+    } else {
+        agent::adapter_from_name(agent_name)
+            .unwrap_or_else(|| agent::adapter_from_name("claude").unwrap())
+    };
 
     // For kiro, write a per-member agent config so the prompt is loaded as a
     // system prompt via --agent rather than passed as user input.
     let effective_prompt = if matches!(agent_name, "kiro" | "kiro-cli") {
-        agent::kiro::write_kiro_agent_config(member_name, prompt, &launch_dir)?
+        agent::kiro::write_kiro_agent_config(member_name, prompt, &launch_dir, model)?
     } else {
         prompt.to_string()
     };
@@ -1121,6 +1130,7 @@ mod tests {
         let cmd = write_launch_script(
             "arch-1",
             "claude",
+            None,
             &default_claude_auth(),
             "plan the project",
             None,
@@ -1156,6 +1166,7 @@ mod tests {
         let cmd = write_launch_script(
             "mgr-1",
             "claude",
+            None,
             &default_claude_auth(),
             "You are the manager.",
             None,
@@ -1185,6 +1196,7 @@ mod tests {
         write_launch_script(
             "eng-1",
             "claude",
+            None,
             &default_claude_auth(),
             "idle role prompt",
             None,
@@ -1219,6 +1231,7 @@ mod tests {
         write_launch_script(
             "eng-1",
             "codex",
+            None,
             &default_claude_auth(),
             "role context",
             Some("role context"),
@@ -1254,6 +1267,7 @@ mod tests {
         let cmd = write_launch_script(
             "codex-active-test",
             "codex",
+            None,
             &default_claude_auth(),
             "work the task",
             Some("role context"),
@@ -1295,6 +1309,7 @@ mod tests {
         write_launch_script(
             "eng-sdk",
             "codex",
+            None,
             &default_claude_auth(),
             "role context",
             Some("role context"),
@@ -1330,6 +1345,7 @@ mod tests {
         write_launch_script(
             "eng-1-1",
             "claude",
+            None,
             &default_claude_auth(),
             "role prompt",
             None,
@@ -1344,6 +1360,7 @@ mod tests {
         write_launch_script(
             "eng-1-2",
             "claude",
+            None,
             &default_claude_auth(),
             "role prompt",
             None,
@@ -1382,6 +1399,7 @@ mod tests {
         write_launch_script(
             "eng-2",
             "claude",
+            None,
             &default_claude_auth(),
             "fix the user's bug",
             None,
@@ -1403,6 +1421,7 @@ mod tests {
         write_launch_script(
             "architect",
             "claude",
+            None,
             &default_claude_auth(),
             "ignored",
             None,
@@ -1426,6 +1445,7 @@ mod tests {
         write_launch_script(
             "architect-auth-oauth",
             "claude",
+            None,
             &default_claude_auth(),
             "ignored",
             None,
@@ -1447,6 +1467,7 @@ mod tests {
         write_launch_script(
             "architect-auth-api-key",
             "claude",
+            None,
             &ClaudeAuth {
                 mode: ClaudeAuthMode::ApiKey,
                 env: Vec::new(),
@@ -1472,6 +1493,7 @@ mod tests {
         write_launch_script(
             "architect-auth-custom",
             "claude",
+            None,
             &ClaudeAuth {
                 mode: ClaudeAuthMode::Custom,
                 env: vec![
@@ -1506,6 +1528,7 @@ mod tests {
         write_launch_script(
             "eng-1",
             "codex",
+            None,
             &default_claude_auth(),
             "ignored",
             Some("role context"),
@@ -1534,6 +1557,7 @@ mod tests {
         write_launch_script(
             "eng-kiro",
             "kiro",
+            None,
             &default_claude_auth(),
             "idle role prompt",
             None,
@@ -1554,12 +1578,39 @@ mod tests {
     }
 
     #[test]
+    fn launch_script_kiro_agent_config_uses_configured_model() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path();
+        write_launch_script(
+            "eng-kiro-model",
+            "kiro",
+            Some("claude-sonnet-4.5"),
+            &default_claude_auth(),
+            "idle role prompt",
+            None,
+            project,
+            project,
+            true,
+            false,
+            None,
+            false,
+        )
+        .unwrap();
+
+        let config_path = project.join(".kiro/agents/batty-eng-kiro-model.json");
+        let content: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(config_path).unwrap()).unwrap();
+        assert_eq!(content["model"], "claude-sonnet-4.5");
+    }
+
+    #[test]
     fn launch_script_active_kiro_uses_agent_config() {
         let tmp = tempfile::tempdir().unwrap();
         let project = tmp.path();
         write_launch_script(
             "eng-kiro-active",
             "kiro",
+            None,
             &default_claude_auth(),
             "solve the bug",
             None,
