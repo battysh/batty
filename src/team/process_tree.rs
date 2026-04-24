@@ -64,10 +64,8 @@ fn targets_project_root(command: &str, project_root: &Path) -> bool {
             tokens.next().map(|s| s.to_string())
         } else if let Some(v) = token.strip_prefix("--project-root=") {
             Some(v.to_string())
-        } else if let Some(v) = token.strip_prefix("--cwd=") {
-            Some(v.to_string())
         } else {
-            None
+            token.strip_prefix("--cwd=").map(|v| v.to_string())
         };
 
         if let Some(value) = value {
