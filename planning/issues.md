@@ -198,6 +198,8 @@ fatal: Not a valid object name eng-main/<eng>
 
 **Fix direction:** Daemon should read phase-gate config from roadmap and suppress idle-nudges when the gate explicitly blocks dispatch. Or expose a `nudge_replenish_disabled` file primitive (already partially exists as marker file) to the manager prompt.
 
+**Status:** Fixed in Task #692. Utilization recovery now suppresses architect nudges when no engineer-dispatchable tasks exist and the remaining unassigned open work explicitly declares a phase gate in its blocker/tag/description. The suppression is written to logs/orchestrator activity so it is distinguishable from a stalled daemon, and runnable ungated work still triggers utilization recovery.
+
 ---
 
 ## P2-3 — `brazil-build` cross-package deps don't resolve inside worktrees
