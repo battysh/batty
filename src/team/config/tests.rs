@@ -31,6 +31,7 @@ fn parse_minimal_config() {
     assert_eq!(config.roles[0].role_type, RoleType::Architect);
     assert_eq!(config.roles[2].instances, 3);
     assert_eq!(config.workflow_mode, WorkflowMode::Legacy);
+    assert_eq!(config.workspace_type, WorkspaceType::Generic);
     assert!(config.orchestrator_pane);
     assert_eq!(
         config.event_log_max_bytes,
@@ -46,6 +47,19 @@ fn parse_minimal_config() {
     assert_eq!(config.workflow_policy.aged_todo_hours, 48);
     assert_eq!(config.workflow_policy.stale_review_hours, 1);
     assert!(!config.workflow_policy.file_level_locks);
+}
+
+#[test]
+fn parse_config_with_brazil_workspace_type() {
+    let yaml = minimal_yaml().replacen(
+        "name: test-team",
+        "name: test-team\nworkspace_type: brazil",
+        1,
+    );
+
+    let config: TeamConfig = serde_yaml::from_str(&yaml).unwrap();
+
+    assert_eq!(config.workspace_type, WorkspaceType::Brazil);
 }
 
 #[test]

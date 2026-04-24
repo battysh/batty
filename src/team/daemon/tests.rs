@@ -211,6 +211,7 @@ fn daemon_registers_per_role_nudge_intervals_from_prompt_sections() {
         project_root: tmp.path().to_path_buf(),
         team_config: TeamConfig {
             name: "test".to_string(),
+            workspace_type: crate::team::config::WorkspaceType::Generic,
             agent: None,
             workflow_mode: WorkflowMode::Hybrid,
             board: BoardConfig::default(),
@@ -716,6 +717,7 @@ fn test_auto_dispatch_filters_idle_engineers_only() {
         project_root: tmp.path().to_path_buf(),
         team_config: TeamConfig {
             name: "test".to_string(),
+            workspace_type: crate::team::config::WorkspaceType::Generic,
             agent: None,
             workflow_mode: WorkflowMode::Hybrid,
             workflow_policy: WorkflowPolicy::default(),
@@ -1156,6 +1158,7 @@ fn daemon_lifecycle_happy_path_exercises_decomposed_modules() {
         project_root: repo.clone(),
         team_config: TeamConfig {
             name: "test".to_string(),
+            workspace_type: crate::team::config::WorkspaceType::Generic,
             agent: None,
             workflow_mode: WorkflowMode::Legacy,
             workflow_policy: WorkflowPolicy::default(),
@@ -3644,6 +3647,7 @@ fn resume_decision_logged_to_orchestrator() {
         project_root: tmp.path().to_path_buf(),
         team_config: TeamConfig {
             name: "test".to_string(),
+            workspace_type: crate::team::config::WorkspaceType::Generic,
             agent: None,
             workflow_mode: WorkflowMode::Hybrid,
             workflow_policy: WorkflowPolicy::default(),
@@ -3920,6 +3924,7 @@ fn spawn_all_agents_resume_reports_missing_sessions_across_primary_roles() {
         project_root: tmp.path().to_path_buf(),
         team_config: TeamConfig {
             name: "test".to_string(),
+            workspace_type: crate::team::config::WorkspaceType::Generic,
             agent: None,
             workflow_mode: WorkflowMode::Legacy,
             workflow_policy: WorkflowPolicy::default(),
@@ -4077,6 +4082,7 @@ fn prepare_member_launch_injects_handoff_for_active_task() {
         project_root: tmp.path().to_path_buf(),
         team_config: TeamConfig {
             name: "test".to_string(),
+            workspace_type: crate::team::config::WorkspaceType::Generic,
             agent: None,
             workflow_mode: WorkflowMode::Hybrid,
             board: BoardConfig::default(),
@@ -4353,6 +4359,7 @@ fn git_repo_enables_worktrees() {
 fn clean_room_test_daemon(project_root: &Path) -> TeamDaemon {
     let team_config = TeamConfig {
         name: "clean-room".to_string(),
+        workspace_type: crate::team::config::WorkspaceType::Generic,
         agent: None,
         workflow_mode: WorkflowMode::Legacy,
         board: BoardConfig::default(),

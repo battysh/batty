@@ -10,6 +10,7 @@ use tracing::{info, warn};
 use super::super::*;
 use crate::team::prompt_compose::{render_member_prompt, resolve_prompt_context};
 use crate::team::task_loop::git_has_unresolved_conflicts;
+use crate::team::workspace::workspace_repo_targets;
 
 const SHARED_TARGET_DISK_THRESHOLD_PCT: u8 = 80;
 const SHARED_TARGET_CLEANUP_INTERVAL: Duration = Duration::from_secs(900);
@@ -78,43 +79,13 @@ fn claude_oauth_healthy(credentials_path: &Path) -> bool {
     expires_at_ms.saturating_sub(now_ms) > 300_000
 }
 
-#[derive(Debug, Clone)]
-struct WorktreeRepoTarget {
-    label: Option<String>,
-    path: PathBuf,
-}
-
-fn worktree_repo_targets(
-    worktree_path: &Path,
-    is_multi_repo: bool,
-    sub_repo_names: &[String],
-) -> Vec<WorktreeRepoTarget> {
-    if !is_multi_repo {
-        return vec![WorktreeRepoTarget {
-            label: None,
-            path: worktree_path.to_path_buf(),
-        }];
-    }
-
-    sub_repo_names
-        .iter()
-        .filter_map(|name| {
-            let path = worktree_path.join(name);
-            path.is_dir().then(|| WorktreeRepoTarget {
-                label: Some(name.clone()),
-                path,
-            })
-        })
-        .collect()
-}
-
 fn workspace_uncommitted_diff_lines(
     worktree_path: &Path,
     is_multi_repo: bool,
     sub_repo_names: &[String],
 ) -> Result<usize> {
     let mut total = 0usize;
-    for repo in worktree_repo_targets(worktree_path, is_multi_repo, sub_repo_names) {
+    for repo in workspace_repo_targets(worktree_path, is_multi_repo, sub_repo_names) {
         total += super::uncommitted_diff_lines(&repo.path).with_context(|| match &repo.label {
             Some(label) => format!(
                 "failed to measure uncommitted diff in sub-repo '{label}' under {}",
@@ -232,7 +203,7 @@ impl TeamDaemon {
             let base = format!("eng-main/{}", name);
 
             for repo in
-                worktree_repo_targets(&worktree_path, self.is_multi_repo, &self.sub_repo_names)
+                workspace_repo_targets(&worktree_path, self.is_multi_repo, &self.sub_repo_names)
             {
                 let repo_name = repo.label.as_deref().unwrap_or("root");
                 let repo_path = &repo.path;

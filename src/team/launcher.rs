@@ -1,7 +1,7 @@
 use super::*;
 use crate::team::config::{ClaudeAuth, ClaudeAuthMode};
-use crate::team::task_loop::setup_multi_repo_worktree;
 use crate::team::watcher::{SessionTrackerConfig, discover_claude_session_file};
+use crate::team::workspace::setup_workspace_worktree;
 use crate::team::{layout, shim_events_log_path, shim_log_path, shim_logs_dir};
 use tracing::debug;
 
@@ -53,17 +53,13 @@ impl TeamDaemon {
         }
 
         let team_config_dir = self.config.project_root.join(".batty").join("team_config");
-        let wt_dir = self
-            .config
-            .project_root
-            .join(".batty")
-            .join("worktrees")
-            .join(&member.name);
+        let wt_dir = self.worktree_dir(&member.name);
         let branch_name = engineer_base_branch_name(&member.name);
 
         let result = if self.is_multi_repo {
-            setup_multi_repo_worktree(
+            setup_workspace_worktree(
                 &self.config.project_root,
+                self.config.team_config.workspace_type,
                 &wt_dir,
                 &branch_name,
                 &team_config_dir,

@@ -8,6 +8,7 @@ see [reference/config.md](reference/config.md).
 
 ```yaml
 name: my-project
+workspace_type: generic
 agent: claude
 workflow_mode: hybrid
 use_shim: true
@@ -171,6 +172,14 @@ roles:
 ## `board`
 
 `board` controls the daemon's view of runnable work.
+
+## `workspace_type`
+
+`workspace_type` defaults to `generic`. Set `workspace_type: brazil` only for
+Brazil-style multi-repo workspaces where the project root is the workspace
+`src/` directory. In Brazil mode, engineer repos are created under sibling
+workspace roots like `.batty-brazil/<engineer>/src/<repo>` and Batty runs the
+Brazil registration hook when the local `brazil` CLI is available.
 
 - `auto_dispatch`: assign `todo` work to idle engineers automatically
 - `auto_replenish`: create planning pressure when backlog runs dry

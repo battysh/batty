@@ -52,6 +52,7 @@ use super::task_loop::{
 };
 use super::verification::VerificationState;
 use super::watcher::{SessionWatcher, WatcherState};
+use super::workspace::engineer_workspace_dir;
 use super::{AssignmentDeliveryResult, AssignmentResultStatus, now_unix, store_assignment_result};
 use crate::agent::{self, BackendHealth};
 use crate::tmux;
@@ -575,25 +576,26 @@ impl TeamDaemon {
     /// Create a new daemon from resolved config and layout.
     pub fn new(config: DaemonConfig) -> Result<Self> {
         let is_git_repo = super::git_cmd::is_git_repo(&config.project_root);
-        let (is_multi_repo, sub_repo_names) = if is_git_repo {
-            (false, Vec::new())
-        } else {
-            let subs = super::git_cmd::discover_sub_repos(&config.project_root);
-            if subs.is_empty() {
+        let (is_multi_repo, sub_repo_names) =
+            if is_git_repo && !config.team_config.workspace_type.is_brazil() {
                 (false, Vec::new())
             } else {
-                let names: Vec<String> = subs
-                    .iter()
-                    .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
-                    .collect();
-                info!(
-                    sub_repos = ?names,
-                    "Detected multi-repo project with {} sub-repos",
-                    names.len()
-                );
-                (true, names)
-            }
-        };
+                let subs = super::git_cmd::discover_sub_repos(&config.project_root);
+                if subs.is_empty() {
+                    (false, Vec::new())
+                } else {
+                    let names: Vec<String> = subs
+                        .iter()
+                        .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+                        .collect();
+                    info!(
+                        sub_repos = ?names,
+                        "Detected multi-repo project with {} sub-repos",
+                        names.len()
+                    );
+                    (true, names)
+                }
+            };
         if !is_git_repo && !is_multi_repo {
             info!("Project is not a git repository \u{2014} git operations disabled");
         }
@@ -1120,6 +1122,14 @@ impl TeamDaemon {
     }
 
     pub(super) fn worktree_dir(&self, engineer: &str) -> PathBuf {
+        if self.config.team_config.workspace_type.is_brazil() {
+            return engineer_workspace_dir(
+                &self.config.project_root,
+                self.config.team_config.workspace_type,
+                engineer,
+            );
+        }
+
         let base = self.config.project_root.join(".batty").join("worktrees");
         match self.member_barrier_group(engineer) {
             Some(group) if self.config.team_config.workflow_policy.clean_room_mode => {

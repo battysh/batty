@@ -6,6 +6,7 @@ use anyhow::{Context, Result};
 
 use super::config::RoleType;
 use super::hierarchy;
+use super::workspace::{engineer_workspace_dir, workspace_repo_targets};
 
 fn git_program() -> &'static str {
     for program in ["git", "/usr/bin/git", "/opt/homebrew/bin/git"] {
@@ -38,17 +39,25 @@ pub fn run(project_root: &Path) -> Result<String> {
 fn collect_worktree_health(project_root: &Path) -> Result<Vec<WorktreeHealth>> {
     let team_config = super::config::TeamConfig::load(&super::team_config_path(project_root))?;
     let members = hierarchy::resolve_hierarchy(&team_config)?;
-    let registered_worktrees = registered_worktree_paths(project_root)?;
+    let sub_repo_names =
+        if team_config.workspace_type.is_brazil() || !super::git_cmd::is_git_repo(project_root) {
+            discover_sub_repo_names(project_root)
+        } else {
+            Vec::new()
+        };
+    let is_multi_repo = !sub_repo_names.is_empty();
+    let registered_worktrees = if is_multi_repo {
+        registered_multi_repo_worktree_paths(project_root, &sub_repo_names)?
+    } else {
+        registered_worktree_paths(project_root)?
+    };
 
     let mut statuses = members
         .into_iter()
         .filter(|member| member.role_type == RoleType::Engineer)
         .map(|member| {
             let path = if member.use_worktrees {
-                project_root
-                    .join(".batty")
-                    .join("worktrees")
-                    .join(&member.name)
+                engineer_workspace_dir(project_root, team_config.workspace_type, &member.name)
             } else {
                 project_root.to_path_buf()
             };
@@ -57,6 +66,8 @@ fn collect_worktree_health(project_root: &Path) -> Result<Vec<WorktreeHealth>> {
                 &member.name,
                 path,
                 member.use_worktrees,
+                is_multi_repo,
+                &sub_repo_names,
                 &registered_worktrees,
             )
         })
@@ -70,21 +81,62 @@ fn inspect_worktree(
     member_name: &str,
     path: PathBuf,
     use_worktrees: bool,
+    is_multi_repo: bool,
+    sub_repo_names: &[String],
     registered_worktrees: &HashSet<PathBuf>,
 ) -> WorktreeHealth {
     let exists = path.exists();
-    let registered = !use_worktrees || registered_worktrees.contains(&path);
-    let missing_git_link = use_worktrees && !git_link_present(&path);
-    let branch = git_output(&path, &["branch", "--show-current"]);
-    let dirty = git_output(&path, &["status", "--porcelain"])
-        .is_some_and(|output| !output.trim().is_empty());
-    let conflicts = git_output(&path, &["status", "--porcelain"])
-        .is_some_and(|output| has_merge_conflicts(&output));
-    let lock_files = find_lock_files(&path);
-    let behind_main = branch
-        .as_ref()
-        .and_then(|_| behind_main_count(project_root, &path));
-
+    let targets = workspace_repo_targets(&path, is_multi_repo, sub_repo_names);
+    let registered = !use_worktrees
+        || if is_multi_repo {
+            !targets.is_empty()
+                && targets
+                    .iter()
+                    .all(|target| registered_worktrees.contains(&normalized_path(&target.path)))
+        } else {
+            registered_worktrees.contains(&normalized_path(&path))
+        };
+    let missing_git_link = use_worktrees
+        && if is_multi_repo {
+            targets.iter().any(|target| !git_link_present(&target.path))
+        } else {
+            !git_link_present(&path)
+        };
+    let status_outputs = targets
+        .iter()
+        .filter_map(|target| git_output(&target.path, &["status", "--porcelain"]))
+        .collect::<Vec<_>>();
+    let branch = summarize_branches(
+        targets
+            .iter()
+            .filter_map(|target| git_output(&target.path, &["branch", "--show-current"]))
+            .collect(),
+    );
+    let dirty = status_outputs
+        .iter()
+        .any(|output| !output.trim().is_empty());
+    let conflicts = status_outputs
+        .iter()
+        .any(|output| has_merge_conflicts(output));
+    let lock_files = targets
+        .iter()
+        .flat_map(|target| {
+            find_lock_files(&target.path)
+                .into_iter()
+                .map(|lock| match &target.label {
+                    Some(label) => format!("{label}:{lock}"),
+                    None => lock,
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    let behind_main = branch.as_ref().and_then(|_| {
+        let values = targets
+            .iter()
+            .filter_map(|target| behind_main_count(project_root, &target.path))
+            .collect::<Vec<_>>();
+        (!values.is_empty()).then(|| values.into_iter().sum())
+    });
     WorktreeHealth {
         member: member_name.to_string(),
         path,
@@ -97,6 +149,27 @@ fn inspect_worktree(
         lock_files,
         behind_main,
     }
+}
+
+fn summarize_branches(branches: Vec<String>) -> Option<String> {
+    let first = branches.first()?.clone();
+    if branches.iter().all(|branch| branch == &first) {
+        Some(first)
+    } else {
+        Some("mixed".to_string())
+    }
+}
+
+fn discover_sub_repo_names(project_root: &Path) -> Vec<String> {
+    let mut names = super::git_cmd::discover_sub_repos(project_root)
+        .into_iter()
+        .filter_map(|path| {
+            path.file_name()
+                .map(|name| name.to_string_lossy().to_string())
+        })
+        .collect::<Vec<_>>();
+    names.sort();
+    names
 }
 
 fn render_report(project_root: &Path, statuses: &[WorktreeHealth]) -> String {
@@ -187,8 +260,23 @@ fn registered_worktree_paths(project_root: &Path) -> Result<HashSet<PathBuf>> {
     let mut paths = HashSet::new();
     for line in stdout.lines() {
         if let Some(path) = line.strip_prefix("worktree ") {
-            paths.insert(PathBuf::from(path));
+            paths.insert(normalized_path(&PathBuf::from(path)));
         }
+    }
+    Ok(paths)
+}
+
+fn normalized_path(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn registered_multi_repo_worktree_paths(
+    project_root: &Path,
+    sub_repo_names: &[String],
+) -> Result<HashSet<PathBuf>> {
+    let mut paths = HashSet::new();
+    for repo_name in sub_repo_names {
+        paths.extend(registered_worktree_paths(&project_root.join(repo_name))?);
     }
     Ok(paths)
 }
@@ -279,8 +367,14 @@ fn behind_main_count(project_root: &Path, path: &Path) -> Option<u64> {
     let _ahead = parts.next()?;
     let behind = parts.next()?.parse::<u64>().ok()?;
 
-    // Only surface staleness for actual worktrees inside this repo.
-    if path.starts_with(project_root) {
+    let brazil_root = project_root
+        .parent()
+        .map(|parent| parent.join(".batty-brazil"));
+    if path.starts_with(project_root)
+        || brazil_root
+            .as_ref()
+            .is_some_and(|root| path.starts_with(root))
+    {
         Some(behind)
     } else {
         None
@@ -290,6 +384,17 @@ fn behind_main_count(project_root: &Path, path: &Path) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn git_ok(repo: &Path, args: &[&str]) {
+        assert!(
+            Command::new(git_program())
+                .args(args)
+                .current_dir(repo)
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
 
     fn init_repo() -> tempfile::TempDir {
         let tmp = tempfile::tempdir().unwrap();
@@ -389,5 +494,42 @@ mod tests {
                 .success()
         );
         assert_eq!(behind_main_count(repo.path(), repo.path()), Some(1));
+    }
+
+    #[test]
+    fn brazil_sibling_worktree_reports_registration_and_staleness() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project_root = tmp.path().join("src");
+        let repo_root = project_root.join("pkg-a");
+        let worktree_root = tmp.path().join(".batty-brazil").join("eng-1").join("src");
+        let worktree = worktree_root.join("pkg-a");
+        std::fs::create_dir_all(&repo_root).unwrap();
+        std::fs::create_dir_all(&worktree_root).unwrap();
+
+        git_ok(&repo_root, &["init", "-b", "main"]);
+        git_ok(&repo_root, &["config", "user.email", "batty@example.com"]);
+        git_ok(&repo_root, &["config", "user.name", "Batty Tests"]);
+        std::fs::write(repo_root.join("README.md"), "hello\n").unwrap();
+        git_ok(&repo_root, &["add", "README.md"]);
+        git_ok(&repo_root, &["commit", "-m", "init"]);
+        git_ok(
+            &repo_root,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "eng-1/706",
+                worktree.to_str().unwrap(),
+                "main",
+            ],
+        );
+        std::fs::write(repo_root.join("README.md"), "hello\nworld\n").unwrap();
+        git_ok(&repo_root, &["commit", "-am", "advance main"]);
+
+        let registered =
+            registered_multi_repo_worktree_paths(&project_root, &["pkg-a".to_string()]).unwrap();
+
+        assert!(registered.contains(&normalized_path(&worktree)));
+        assert_eq!(behind_main_count(&project_root, &worktree), Some(1));
     }
 }

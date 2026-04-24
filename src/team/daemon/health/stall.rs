@@ -1153,6 +1153,7 @@ mod tests {
             project_root: tmp.path().to_path_buf(),
             team_config: TeamConfig {
                 name: "test".to_string(),
+                workspace_type: crate::team::config::WorkspaceType::Generic,
                 agent: None,
                 workflow_mode: WorkflowMode::Legacy,
                 workflow_policy: WorkflowPolicy::default(),
@@ -1315,6 +1316,7 @@ mod tests {
             project_root: tmp.path().to_path_buf(),
             team_config: TeamConfig {
                 name: "test".to_string(),
+                workspace_type: crate::team::config::WorkspaceType::Generic,
                 agent: None,
                 workflow_mode: WorkflowMode::Legacy,
                 workflow_policy: WorkflowPolicy {

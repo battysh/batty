@@ -94,6 +94,7 @@ pub mod validation;
 pub mod verification;
 pub mod watcher;
 pub mod workflow;
+pub mod workspace;
 pub mod worktree_health;
 
 use std::path::{Path, PathBuf};

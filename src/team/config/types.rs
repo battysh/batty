@@ -9,6 +9,7 @@ use super::super::DEFAULT_EVENT_LOG_MAX_BYTES;
 #[derive(Debug, Clone)]
 pub struct TeamConfig {
     pub name: String,
+    pub workspace_type: WorkspaceType,
     /// Team-level default agent backend. Individual roles can override this
     /// with their own `agent` field. Resolution order:
     /// role-level agent > team-level agent > "claude" (hardcoded default).
@@ -63,6 +64,8 @@ pub struct TeamConfig {
 #[derive(Debug, Deserialize)]
 struct TeamConfigWire {
     pub name: String,
+    #[serde(default)]
+    pub workspace_type: WorkspaceType,
     #[serde(default)]
     pub agent: Option<String>,
     #[serde(default)]
@@ -127,6 +130,7 @@ impl From<TeamConfigWire> for TeamConfig {
 
         Self {
             name: wire.name,
+            workspace_type: wire.workspace_type,
             agent: wire.agent,
             workflow_mode,
             board: wire.board,
@@ -152,6 +156,20 @@ impl From<TeamConfigWire> for TeamConfig {
             retro_min_duration_secs: wire.retro_min_duration_secs,
             roles: wire.roles,
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceType {
+    #[default]
+    Generic,
+    Brazil,
+}
+
+impl WorkspaceType {
+    pub fn is_brazil(self) -> bool {
+        matches!(self, Self::Brazil)
     }
 }
 
