@@ -303,6 +303,27 @@ fn spawn_watchdog(project_root: &Path, resume: bool) -> Result<u32> {
     )
 }
 
+fn ensure_no_concurrent_batty_process() -> Result<()> {
+    match super::process_tree::concurrent_batty_process(std::process::id()) {
+        Ok(Some(process)) => {
+            bail!(
+                "daemon startup pre-flight failed: another batty process is already running \
+                 (pid {}, command '{}')",
+                process.pid,
+                process.command
+            );
+        }
+        Ok(None) => Ok(()),
+        Err(error) => {
+            warn!(
+                error = %error,
+                "skipping concurrent batty process preflight; process ancestry unavailable"
+            );
+            Ok(())
+        }
+    }
+}
+
 fn spawn_daemon_child(project_root: &Path, resume: bool) -> Result<std::process::Child> {
     use std::process::Command;
 
@@ -609,6 +630,8 @@ pub fn start_team(project_root: &Path, attach: bool) -> Result<String> {
 
     let members = hierarchy::resolve_hierarchy(&team_config)?;
     let session = format!("batty-{}", team_config.name);
+
+    ensure_no_concurrent_batty_process()?;
 
     if tmux::session_exists(&session) {
         bail!("session '{session}' already exists; use `batty attach` or `batty stop` first");
