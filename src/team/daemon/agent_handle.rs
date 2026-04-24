@@ -14,6 +14,7 @@ use crate::shim::protocol::{Channel, Command, Event, ShimState, ShutdownReason};
 pub(in crate::team) struct InFlightMessage {
     pub from: String,
     pub body: String,
+    pub message_id: Option<String>,
 }
 
 /// Per-agent handle for a shim subprocess.
@@ -104,6 +105,16 @@ impl AgentHandle {
 
     /// Send a message to the shim.
     pub fn send_message(&mut self, from: &str, body: &str) -> anyhow::Result<()> {
+        self.send_message_with_id(from, body, None)
+    }
+
+    /// Send a message to the shim with a caller-supplied delivery id.
+    pub fn send_message_with_id(
+        &mut self,
+        from: &str,
+        body: &str,
+        message_id: Option<String>,
+    ) -> anyhow::Result<()> {
         self.input_bytes = self
             .input_bytes
             .saturating_add(from.len() as u64 + body.len() as u64);
@@ -111,11 +122,12 @@ impl AgentHandle {
         self.in_flight_message = Some(InFlightMessage {
             from: from.to_string(),
             body: body.to_string(),
+            message_id: message_id.clone(),
         });
         self.channel.send(&Command::SendMessage {
             from: from.to_string(),
             body: body.to_string(),
-            message_id: None,
+            message_id,
         })
     }
 

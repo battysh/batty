@@ -2,6 +2,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use tracing::{debug, info, warn};
+use uuid::Uuid;
 
 use super::{
     DELIVERY_VERIFICATION_CAPTURE_LINES, DELIVERY_VERIFICATION_CAPTURE_LINES_RECENTLY_READY,
@@ -51,6 +52,16 @@ impl TeamDaemon {
         from: &str,
         body: &str,
     ) {
+        self.record_failed_delivery_with_id(recipient, from, body, None);
+    }
+
+    pub(in crate::team) fn record_failed_delivery_with_id(
+        &mut self,
+        recipient: &str,
+        from: &str,
+        body: &str,
+        message_id: Option<String>,
+    ) {
         if let Some(existing) = self.failed_deliveries.iter_mut().find(|delivery| {
             delivery.recipient == recipient && delivery.from == from && delivery.body == body
         }) {
@@ -58,8 +69,9 @@ impl TeamDaemon {
             return;
         }
 
+        let message_id = message_id.unwrap_or_else(|| Uuid::new_v4().to_string());
         self.failed_deliveries
-            .push(FailedDelivery::new(recipient, from, body));
+            .push(FailedDelivery::new(recipient, from, body, message_id));
         self.record_delivery_failed_with_details(
             recipient,
             from,
@@ -173,7 +185,11 @@ impl TeamDaemon {
 
             // Retry via shim channel
             let delivered = if let Some(handle) = self.shim_handles.get_mut(&delivery.recipient) {
-                match handle.send_message(&delivery.from, &delivery.body) {
+                match handle.send_message_with_id(
+                    &delivery.from,
+                    &delivery.body,
+                    Some(delivery.message_id.clone()),
+                ) {
                     Ok(()) => {
                         handle.apply_state_change(crate::shim::protocol::ShimState::Working);
                         true
@@ -486,7 +502,8 @@ mod tests {
     fn failed_delivery_retry_requeues_before_attempt_cap() {
         let tmp = tempfile::tempdir().unwrap();
         let mut daemon = failed_delivery_test_daemon(&tmp);
-        let mut delivery = FailedDelivery::new("eng-1", "manager", "Please retry this.");
+        let mut delivery =
+            FailedDelivery::new("eng-1", "manager", "Please retry this.", "msg-1".into());
         delivery.attempts = 1;
         delivery.last_attempt = Instant::now() - FAILED_DELIVERY_RETRY_DELAY;
         daemon.failed_deliveries.push(delivery);
@@ -504,7 +521,8 @@ mod tests {
     fn failed_delivery_retry_respects_attempt_cap_and_escalates() {
         let tmp = tempfile::tempdir().unwrap();
         let mut daemon = failed_delivery_test_daemon(&tmp);
-        let mut delivery = FailedDelivery::new("eng-1", "manager", "Please retry this.");
+        let mut delivery =
+            FailedDelivery::new("eng-1", "manager", "Please retry this.", "msg-1".into());
         delivery.attempts = FAILED_DELIVERY_MAX_ATTEMPTS - 1;
         delivery.last_attempt = Instant::now() - FAILED_DELIVERY_RETRY_DELAY;
         daemon.failed_deliveries.push(delivery);
@@ -597,7 +615,7 @@ mod tests {
         let mut daemon = failed_delivery_test_daemon(&tmp);
 
         // Add a failed delivery that's ready for retry (old enough)
-        let mut delivery = FailedDelivery::new("eng-1", "manager", "test message");
+        let mut delivery = FailedDelivery::new("eng-1", "manager", "test message", "msg-1".into());
         delivery.last_attempt = Instant::now() - Duration::from_secs(60);
         daemon.failed_deliveries.push(delivery);
 
@@ -618,7 +636,7 @@ mod tests {
         let mut daemon = failed_delivery_test_daemon(&tmp);
 
         // Add a failed delivery that's ready for retry
-        let mut delivery = FailedDelivery::new("eng-1", "manager", "test message");
+        let mut delivery = FailedDelivery::new("eng-1", "manager", "test message", "msg-1".into());
         delivery.last_attempt = Instant::now() - Duration::from_secs(60);
         daemon.failed_deliveries.push(delivery);
 
@@ -689,12 +707,18 @@ mod tests {
     fn clear_failed_delivery_removes_matching_entry() {
         let tmp = tempfile::tempdir().unwrap();
         let mut daemon = failed_delivery_test_daemon(&tmp);
-        daemon
-            .failed_deliveries
-            .push(FailedDelivery::new("eng-1", "manager", "msg A"));
-        daemon
-            .failed_deliveries
-            .push(FailedDelivery::new("eng-1", "manager", "msg B"));
+        daemon.failed_deliveries.push(FailedDelivery::new(
+            "eng-1",
+            "manager",
+            "msg A",
+            "msg-a".into(),
+        ));
+        daemon.failed_deliveries.push(FailedDelivery::new(
+            "eng-1",
+            "manager",
+            "msg B",
+            "msg-b".into(),
+        ));
 
         daemon.clear_failed_delivery("eng-1", "manager", "msg A");
 
@@ -706,9 +730,12 @@ mod tests {
     fn clear_failed_delivery_no_op_when_not_found() {
         let tmp = tempfile::tempdir().unwrap();
         let mut daemon = failed_delivery_test_daemon(&tmp);
-        daemon
-            .failed_deliveries
-            .push(FailedDelivery::new("eng-1", "manager", "msg A"));
+        daemon.failed_deliveries.push(FailedDelivery::new(
+            "eng-1",
+            "manager",
+            "msg A",
+            "msg-a".into(),
+        ));
 
         daemon.clear_failed_delivery("eng-1", "manager", "nonexistent");
 
@@ -762,7 +789,7 @@ mod tests {
     fn escalate_failed_delivery_sends_to_manager_inbox() {
         let tmp = tempfile::tempdir().unwrap();
         let mut daemon = failed_delivery_test_daemon(&tmp);
-        let delivery = FailedDelivery::new("eng-1", "architect", "critical update");
+        let delivery = FailedDelivery::new("eng-1", "architect", "critical update", "msg-1".into());
 
         daemon.escalate_failed_delivery(&delivery).unwrap();
 
@@ -781,7 +808,7 @@ mod tests {
     fn escalate_failed_delivery_no_crash_without_target() {
         let tmp = tempfile::tempdir().unwrap();
         let mut daemon = empty_legacy_daemon(&tmp);
-        let delivery = FailedDelivery::new("orphan", "ghost", "lost message");
+        let delivery = FailedDelivery::new("orphan", "ghost", "lost message", "msg-1".into());
 
         // Should not panic or error — just warns
         daemon.escalate_failed_delivery(&delivery).unwrap();
@@ -802,7 +829,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let mut daemon = failed_delivery_test_daemon(&tmp);
         // Create a delivery that was just attempted (not ready for retry)
-        let delivery = FailedDelivery::new("eng-1", "manager", "recent msg");
+        let delivery = FailedDelivery::new("eng-1", "manager", "recent msg", "msg-1".into());
         daemon.failed_deliveries.push(delivery);
 
         daemon.retry_failed_deliveries().unwrap();
@@ -817,7 +844,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let mut daemon = failed_delivery_test_daemon(&tmp);
         // No shim handle for eng-1 — retry delivery will fail
-        let mut delivery = FailedDelivery::new("eng-1", "manager", "no shim msg");
+        let mut delivery = FailedDelivery::new("eng-1", "manager", "no shim msg", "msg-1".into());
         // Set attempts to max - 1 so the next retry exhausts the limit and escalates
         delivery.attempts = FAILED_DELIVERY_MAX_ATTEMPTS - 1;
         delivery.last_attempt =
@@ -868,7 +895,7 @@ mod tests {
         daemon.watchers.insert("eng-1".to_string(), watcher);
 
         // Build a delivery targeting eng-1 that has used all its retry attempts.
-        let mut delivery = FailedDelivery::new("eng-1", "manager", "assignment");
+        let mut delivery = FailedDelivery::new("eng-1", "manager", "assignment", "msg-1".into());
         delivery.attempts = FAILED_DELIVERY_MAX_ATTEMPTS - 1;
         delivery.last_attempt =
             Instant::now() - FAILED_DELIVERY_RETRY_DELAY - Duration::from_secs(1);
@@ -903,7 +930,7 @@ mod tests {
         daemon.watchers.insert("eng-1".to_string(), watcher);
 
         // Build a delivery that has used all retry attempts and is due for retry.
-        let mut delivery = FailedDelivery::new("eng-1", "manager", "assignment");
+        let mut delivery = FailedDelivery::new("eng-1", "manager", "assignment", "msg-1".into());
         delivery.attempts = FAILED_DELIVERY_MAX_ATTEMPTS - 1;
         delivery.last_attempt =
             Instant::now() - FAILED_DELIVERY_RETRY_DELAY - Duration::from_secs(1);
@@ -976,9 +1003,12 @@ mod tests {
         daemon.watchers.insert("eng-1".to_string(), watcher);
 
         // Seed a failed delivery.
-        daemon
-            .failed_deliveries
-            .push(FailedDelivery::new("eng-1", "manager", "test message"));
+        daemon.failed_deliveries.push(FailedDelivery::new(
+            "eng-1",
+            "manager",
+            "test message",
+            "msg-1".into(),
+        ));
         assert_eq!(daemon.failed_deliveries.len(), 1);
 
         daemon.clear_failed_delivery("eng-1", "manager", "test message");

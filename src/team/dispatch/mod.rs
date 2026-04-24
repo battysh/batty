@@ -301,6 +301,7 @@ impl TeamDaemon {
                     .push(PendingMessage {
                         from: sender.to_string(),
                         body: assignment_body,
+                        message_id: None,
                         queued_at: Instant::now(),
                     });
                 let _ = append_shim_event_log(

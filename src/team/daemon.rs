@@ -208,6 +208,22 @@ impl RescueRecord {
     }
 }
 
+#[derive(Debug, Clone)]
+pub(super) struct PendingAckInboxMessage {
+    pub(super) id: String,
+    pub(super) from: String,
+    pub(super) age_secs: u64,
+    pub(super) sample_kind: &'static str,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct PendingShimAck {
+    pub(super) recipient: String,
+    pub(super) from: String,
+    pub(super) body: String,
+    pub(super) inbox_messages: Vec<PendingAckInboxMessage>,
+}
+
 /// #698: per-(task, engineer) release-exclusion record. Mirrors
 /// `RescueRecord` so that repeated dispatch→release cycles for the same
 /// (task, engineer) pair widen the exclusion window exponentially
@@ -390,6 +406,9 @@ pub struct TeamDaemon {
     /// Messages deferred because the target agent was still starting.
     /// Drained automatically when the agent transitions to ready.
     pub(super) pending_delivery_queue: HashMap<String, Vec<PendingMessage>>,
+    /// Shim messages accepted by the daemon-side channel but not yet
+    /// acknowledged by a MessageDelivered/DeliveryFailed event.
+    pub(super) pending_shim_acks: HashMap<String, PendingShimAck>,
     /// Per-agent shim handles (only populated when `use_shim` is true).
     pub(super) shim_handles: HashMap<String, agent_handle::AgentHandle>,
     /// #690: When each member most recently transitioned Idle→Working.
@@ -752,6 +771,7 @@ impl TeamDaemon {
             narration_rejection_counts: HashMap::new(),
             zero_diff_completion_counts: HashMap::new(),
             pending_delivery_queue: HashMap::new(),
+            pending_shim_acks: HashMap::new(),
             shim_handles: HashMap::new(),
             working_since: HashMap::new(),
             last_shim_health_check: Instant::now(),

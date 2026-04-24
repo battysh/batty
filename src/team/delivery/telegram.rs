@@ -294,6 +294,7 @@ mod tests {
             last_shared_target_cleanup: Instant::now(),
             last_disk_hygiene_check: Instant::now(),
             pending_delivery_queue: HashMap::new(),
+            pending_shim_acks: HashMap::new(),
             verification_states: HashMap::new(),
             narration_rejection_counts: HashMap::new(),
             zero_diff_completion_counts: HashMap::new(),

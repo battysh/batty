@@ -278,9 +278,7 @@ impl TeamDaemon {
                 // was only done on Event::Ready and on force-idle timeout, so
                 // a shim that went Working→Idle naturally would leave its
                 // pending queue stuck until the 600s expiry fallback fired.
-                if to == ShimState::Idle
-                    && self.pending_delivery_queue.contains_key(member_name)
-                {
+                if to == ShimState::Idle && self.pending_delivery_queue.contains_key(member_name) {
                     if let Err(error) = self.drain_pending_queue(member_name) {
                         warn!(
                             member = member_name,
@@ -348,6 +346,33 @@ impl TeamDaemon {
                 );
                 if let Some(handle) = self.shim_handles.get_mut(member_name) {
                     handle.record_activity();
+                }
+                if let Some(pending) = self.pending_shim_acks.remove(&id) {
+                    let inbox_root = inbox::inboxes_root(&self.config.project_root);
+                    for message in pending.inbox_messages {
+                        if let Err(error) =
+                            inbox::mark_delivered(&inbox_root, &pending.recipient, &message.id)
+                        {
+                            warn!(
+                                member = pending.recipient.as_str(),
+                                id = message.id.as_str(),
+                                error = %error,
+                                "failed to mark shim-acked inbox message delivered"
+                            );
+                        } else {
+                            self.record_message_routed(&message.from, &pending.recipient);
+                            self.record_notification_delivery_sample(
+                                &message.from,
+                                &pending.recipient,
+                                message.age_secs,
+                                message.sample_kind,
+                            );
+                        }
+                    }
+                    self.record_orchestrator_action(format!(
+                        "delivery: ack recipient={} message_id={id}",
+                        pending.recipient
+                    ));
                 }
                 debug!(
                     member = member_name,
@@ -668,7 +693,36 @@ impl TeamDaemon {
                 );
                 if let Some(handle) = self.shim_handles.get_mut(member_name) {
                     handle.record_activity();
+                    let failed_in_flight = handle
+                        .in_flight_message
+                        .as_ref()
+                        .and_then(|message| message.message_id.as_deref())
+                        == Some(id.as_str());
+                    if failed_in_flight {
+                        handle.clear_in_flight_message();
+                        handle.apply_state_change(ShimState::Idle);
+                    }
                 }
+                if let Some(pending) = self.pending_shim_acks.remove(&id) {
+                    if pending.inbox_messages.is_empty() {
+                        self.record_failed_delivery_with_id(
+                            &pending.recipient,
+                            &pending.from,
+                            &pending.body,
+                            Some(id.clone()),
+                        );
+                    }
+                    self.record_orchestrator_action(format!(
+                        "delivery: failure recipient={} message_id={} reason={}",
+                        pending.recipient, id, reason
+                    ));
+                }
+                self.record_delivery_failed_with_details(
+                    member_name,
+                    "shim",
+                    reason.as_str(),
+                    Some(&format!("message_id={id}")),
+                );
                 warn!(
                     member = member_name,
                     message_id = id,
@@ -959,6 +1013,7 @@ impl TeamDaemon {
             PendingMessage {
                 from: in_flight.from.clone(),
                 body: in_flight.body.clone(),
+                message_id: in_flight.message_id.clone(),
                 queued_at: std::time::Instant::now(),
             },
         );
@@ -1726,12 +1781,119 @@ mod tests {
     fn handle_shim_event_ready_sets_idle_state() {
         let tmp = tempfile::tempdir().unwrap();
         let mut daemon = TestDaemonBuilder::new(tmp.path()).build();
-        insert_mock_handle(&mut daemon, "eng-1");
+        let _child = insert_mock_handle(&mut daemon, "eng-1");
 
         daemon.handle_shim_event("eng-1", Event::Ready).unwrap();
 
         assert_eq!(daemon.states.get("eng-1"), Some(&MemberState::Idle));
         assert!(daemon.shim_handles["eng-1"].is_ready());
+    }
+
+    #[test]
+    fn handle_shim_event_message_delivered_marks_tracked_inbox_message_delivered() {
+        let tmp = tempfile::tempdir().unwrap();
+        let inbox_root = inbox::inboxes_root(tmp.path());
+        inbox::init_inbox(&inbox_root, "eng-1").unwrap();
+
+        let mut daemon = TestDaemonBuilder::new(tmp.path()).build();
+        let _child = insert_mock_handle(&mut daemon, "eng-1");
+
+        let inbox_msg = inbox::InboxMessage::new_send("manager", "eng-1", "test assignment");
+        let inbox_id = inbox::deliver_to_inbox(&inbox_root, &inbox_msg).unwrap();
+        let message_id = "shim-msg-1".to_string();
+        daemon.pending_shim_acks.insert(
+            message_id.clone(),
+            crate::team::daemon::PendingShimAck {
+                recipient: "eng-1".to_string(),
+                from: "manager".to_string(),
+                body: "test assignment".to_string(),
+                inbox_messages: vec![crate::team::daemon::PendingAckInboxMessage {
+                    id: inbox_id.clone(),
+                    from: "manager".to_string(),
+                    age_secs: 0,
+                    sample_kind: "inbox",
+                }],
+            },
+        );
+
+        daemon
+            .handle_shim_event(
+                "eng-1",
+                Event::MessageDelivered {
+                    id: message_id.clone(),
+                },
+            )
+            .unwrap();
+
+        assert!(!daemon.pending_shim_acks.contains_key(&message_id));
+        let pending = inbox::pending_messages(&inbox_root, "eng-1").unwrap();
+        assert!(
+            pending.is_empty(),
+            "acked inbox message should be marked delivered"
+        );
+        let all = inbox::all_messages(&inbox_root, "eng-1").unwrap();
+        assert!(
+            all.iter()
+                .any(|(msg, delivered)| msg.id == inbox_id && *delivered)
+        );
+    }
+
+    #[test]
+    fn handle_shim_event_delivery_failed_keeps_tracked_inbox_message_pending() {
+        let tmp = tempfile::tempdir().unwrap();
+        let inbox_root = inbox::inboxes_root(tmp.path());
+        inbox::init_inbox(&inbox_root, "eng-1").unwrap();
+
+        let mut daemon = TestDaemonBuilder::new(tmp.path()).build();
+        insert_mock_handle(&mut daemon, "eng-1");
+
+        let inbox_msg = inbox::InboxMessage::new_send("manager", "eng-1", "test assignment");
+        let inbox_id = inbox::deliver_to_inbox(&inbox_root, &inbox_msg).unwrap();
+        let message_id = "shim-msg-2".to_string();
+        daemon.pending_shim_acks.insert(
+            message_id.clone(),
+            crate::team::daemon::PendingShimAck {
+                recipient: "eng-1".to_string(),
+                from: "manager".to_string(),
+                body: "test assignment".to_string(),
+                inbox_messages: vec![crate::team::daemon::PendingAckInboxMessage {
+                    id: inbox_id.clone(),
+                    from: "manager".to_string(),
+                    age_secs: 0,
+                    sample_kind: "inbox",
+                }],
+            },
+        );
+        {
+            let handle = daemon.shim_handles.get_mut("eng-1").unwrap();
+            handle.apply_state_change(ShimState::Working);
+            handle.in_flight_message = Some(crate::team::daemon::agent_handle::InFlightMessage {
+                from: "manager".to_string(),
+                body: "test assignment".to_string(),
+                message_id: Some(message_id.clone()),
+            });
+        }
+
+        daemon
+            .handle_shim_event(
+                "eng-1",
+                Event::DeliveryFailed {
+                    id: message_id.clone(),
+                    reason: "synthetic failure".to_string(),
+                },
+            )
+            .unwrap();
+
+        assert!(!daemon.pending_shim_acks.contains_key(&message_id));
+        let pending = inbox::pending_messages(&inbox_root, "eng-1").unwrap();
+        assert_eq!(
+            pending.len(),
+            1,
+            "failed inbox message should remain pending"
+        );
+        assert_eq!(pending[0].id, inbox_id);
+        assert!(daemon.shim_handles["eng-1"].is_ready());
+        assert!(daemon.shim_handles["eng-1"].in_flight_message.is_none());
     }
 
     /// Regression: Starting→Ready race where drain_pending_queue ran
@@ -1760,6 +1922,7 @@ mod tests {
             .push(crate::team::delivery::PendingMessage {
                 from: "daemon".to_string(),
                 body: "resume work".to_string(),
+                message_id: None,
                 queued_at: std::time::Instant::now(),
             });
 
@@ -2811,6 +2974,7 @@ mod tests {
             .push(crate::team::delivery::PendingMessage {
                 from: "architect".to_string(),
                 body: "do something".to_string(),
+                message_id: None,
                 queued_at: std::time::Instant::now() - std::time::Duration::from_secs(60),
             });
 
