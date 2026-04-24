@@ -44,7 +44,7 @@ fn find_concurrent_batty_process<'a>(
         .iter()
         .filter(|process| process.pid != current_pid)
         .filter(|process| !ancestors.contains(&process.pid))
-        .filter(|process| is_batty_command(&process.command))
+        .filter(|process| is_batty_runtime_command(&process.command))
         .filter(|process| targets_project_root(&process.command, project_root))
         .min_by_key(|process| process.pid)
 }
@@ -97,17 +97,20 @@ fn ancestor_pids(current_pid: u32, processes: &[ProcessInfo]) -> HashSet<u32> {
     ancestors
 }
 
-fn is_batty_command(command: &str) -> bool {
+fn is_batty_runtime_command(command: &str) -> bool {
     let command = command.trim();
     if command.is_empty() {
         return false;
     }
 
-    let first_arg = command.split_whitespace().next().unwrap_or(command);
-    Path::new(first_arg)
+    let mut args = command.split_whitespace();
+    let first_arg = args.next().unwrap_or(command);
+    let is_batty = Path::new(first_arg)
         .file_name()
         .and_then(|name| name.to_str())
-        .is_some_and(|name| name == "batty" || name.starts_with("batty-"))
+        .is_some_and(|name| name == "batty" || name.starts_with("batty-"));
+
+    is_batty && args.any(|arg| matches!(arg, "watchdog" | "daemon" | "shim"))
 }
 
 fn read_process_table() -> Result<Vec<ProcessInfo>> {
@@ -258,14 +261,28 @@ mod tests {
     fn unrelated_batty_process_is_concurrent() {
         let processes = vec![
             proc(10, 0, "launchd"),
-            proc(20, 10, "batty"),
+            proc(20, 10, "batty daemon"),
             proc(30, 10, "zsh"),
             proc(40, 30, "batty"),
         ];
 
         assert_eq!(
             find_concurrent_batty_process(40, &processes, any_root()),
-            Some(&proc(20, 10, "batty"))
+            Some(&proc(20, 10, "batty daemon"))
+        );
+    }
+
+    #[test]
+    fn operator_batty_board_process_is_ignored() {
+        let processes = vec![
+            proc(10, 0, "launchd"),
+            proc(20, 10, "batty board"),
+            proc(40, 30, "batty start --project-root /tmp/batty-test-root"),
+        ];
+
+        assert_eq!(
+            find_concurrent_batty_process(40, &processes, any_root()),
+            None
         );
     }
 
