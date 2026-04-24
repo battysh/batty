@@ -762,13 +762,33 @@ fn move_task_to_done(
     request: &MergeRequest,
     manager_name: Option<&str>,
 ) -> bool {
-    if crate::team::task_cmd::transition_task(board_dir, request.task_id, "done").is_ok() {
+    if crate::team::task_cmd::transition_task_with_attribution(
+        board_dir,
+        request.task_id,
+        "done",
+        crate::team::task_cmd::StatusTransitionAttribution::daemon("daemon.merge_queue"),
+    )
+    .is_ok()
+    {
         persist_completed_profile(daemon, board_dir, request.task_id);
         return true;
     }
 
-    if crate::team::task_cmd::transition_task(board_dir, request.task_id, "review").is_ok()
-        && crate::team::task_cmd::cmd_review(board_dir, request.task_id, "approved", None).is_ok()
+    if crate::team::task_cmd::transition_task_with_attribution(
+        board_dir,
+        request.task_id,
+        "review",
+        crate::team::task_cmd::StatusTransitionAttribution::daemon("daemon.merge_queue"),
+    )
+    .is_ok()
+        && crate::team::task_cmd::cmd_review_with_attribution(
+            board_dir,
+            request.task_id,
+            "approved",
+            None,
+            crate::team::task_cmd::StatusTransitionAttribution::daemon("daemon.merge_queue"),
+        )
+        .is_ok()
     {
         persist_completed_profile(daemon, board_dir, request.task_id);
         return true;

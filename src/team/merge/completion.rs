@@ -328,7 +328,12 @@ fn move_task_to_review(
         return Ok(false);
     }
 
-    if let Err(error) = crate::team::task_cmd::transition_task(board_dir, task_id, "review") {
+    if let Err(error) = crate::team::task_cmd::transition_task_with_attribution(
+        board_dir,
+        task_id,
+        "review",
+        crate::team::task_cmd::StatusTransitionAttribution::daemon("daemon.merge.completion"),
+    ) {
         warn!(
             engineer,
             task_id,
@@ -339,8 +344,18 @@ fn move_task_to_review(
         // transitioning through in-progress first, then to review.
         // This prevents the stuck loop where completion fires repeatedly
         // but the state transition always fails.
-        let _ = crate::team::task_cmd::transition_task(board_dir, task_id, "in-progress");
-        if let Err(error2) = crate::team::task_cmd::transition_task(board_dir, task_id, "review") {
+        let _ = crate::team::task_cmd::transition_task_with_attribution(
+            board_dir,
+            task_id,
+            "in-progress",
+            crate::team::task_cmd::StatusTransitionAttribution::daemon("daemon.merge.completion"),
+        );
+        if let Err(error2) = crate::team::task_cmd::transition_task_with_attribution(
+            board_dir,
+            task_id,
+            "review",
+            crate::team::task_cmd::StatusTransitionAttribution::daemon("daemon.merge.completion"),
+        ) {
             warn!(
                 engineer,
                 task_id,
@@ -821,7 +836,14 @@ pub(crate) fn handle_engineer_completion(daemon: &mut TeamDaemon, engineer: &str
                 task_id.to_string(),
                 Some("verification_failed"),
             );
-            crate::team::task_cmd::transition_task(&board_dir, task_id, "blocked")?;
+            crate::team::task_cmd::transition_task_with_attribution(
+                &board_dir,
+                task_id,
+                "blocked",
+                crate::team::task_cmd::StatusTransitionAttribution::daemon(
+                    "daemon.merge.completion.verification",
+                ),
+            )?;
             let mut blocked_fields = std::collections::HashMap::new();
             blocked_fields.insert("blocked_on".to_string(), block_reason);
             crate::team::task_cmd::cmd_update(&board_dir, task_id, blocked_fields)?;

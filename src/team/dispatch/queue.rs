@@ -10,7 +10,10 @@ use tracing::{debug, info, warn};
 
 use super::super::super::policy::check_wip_limit;
 use super::super::super::task_loop::engineer_worktree_ready_for_dispatch;
-use super::super::task_cmd::{append_task_dependencies, assign_task_owners, transition_task};
+use super::super::task_cmd::{
+    StatusTransitionAttribution, append_task_dependencies, assign_task_owners,
+    transition_task_with_attribution,
+};
 use super::super::*;
 use crate::team::allocation::{
     EngineerProfile, load_engineer_profiles, predict_task_file_paths, rank_engineers_for_task,
@@ -1126,7 +1129,12 @@ impl TeamDaemon {
                         "dispatch queue: task has unmet body dependencies, skipping"
                     );
                     // Move to blocked status
-                    let _ = crate::team::task_cmd::transition_task(&board_dir, task.id, "blocked");
+                    let _ = crate::team::task_cmd::transition_task_with_attribution(
+                        &board_dir,
+                        task.id,
+                        "blocked",
+                        StatusTransitionAttribution::daemon("daemon.dispatch.queue.dependencies"),
+                    );
                     continue;
                 }
             }
@@ -1359,9 +1367,19 @@ impl TeamDaemon {
             // keep the task in the queue — don't send work that the board
             // doesn't reflect, or reconciliation will undo it in a loop.
             if task.status == "backlog" {
-                let _ = transition_task(&board_dir, task.id, "todo");
+                let _ = transition_task_with_attribution(
+                    &board_dir,
+                    task.id,
+                    "todo",
+                    StatusTransitionAttribution::daemon("daemon.dispatch.queue"),
+                );
             }
-            if let Err(e) = transition_task(&board_dir, task.id, "in-progress") {
+            if let Err(e) = transition_task_with_attribution(
+                &board_dir,
+                task.id,
+                "in-progress",
+                StatusTransitionAttribution::daemon("daemon.dispatch.queue"),
+            ) {
                 entry.validation_failures += 1;
                 entry.last_failure = Some(format!("board transition failed: {e}"));
                 warn!(

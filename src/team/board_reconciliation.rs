@@ -293,7 +293,14 @@ pub(crate) fn apply_safe_fixes(board_dir: &Path, report: &ReconciliationReport) 
                 reason,
             } => {
                 if crate::team::task_cmd::find_task_path(board_dir, *task_id).is_ok() {
-                    crate::team::task_cmd::transition_task(board_dir, *task_id, "done")?;
+                    crate::team::task_cmd::transition_task_with_attribution(
+                        board_dir,
+                        *task_id,
+                        "done",
+                        crate::team::task_cmd::StatusTransitionAttribution::daemon(
+                            "daemon.board_reconciliation.already_merged",
+                        ),
+                    )?;
                     fixes.push(AppliedFix::CompletedMergedReviewTask {
                         task_id: *task_id,
                         title: title.clone(),
@@ -307,8 +314,22 @@ pub(crate) fn apply_safe_fixes(board_dir: &Path, report: &ReconciliationReport) 
                 reasons,
             } => {
                 if crate::team::task_cmd::find_task_path(board_dir, *task_id).is_ok() {
-                    let _ = crate::team::task_cmd::transition_task(board_dir, *task_id, "in-progress");
-                    crate::team::task_cmd::transition_task(board_dir, *task_id, "todo")?;
+                    let _ = crate::team::task_cmd::transition_task_with_attribution(
+                        board_dir,
+                        *task_id,
+                        "in-progress",
+                        crate::team::task_cmd::StatusTransitionAttribution::daemon(
+                            "daemon.board_reconciliation.review_metadata",
+                        ),
+                    );
+                    crate::team::task_cmd::transition_task_with_attribution(
+                        board_dir,
+                        *task_id,
+                        "todo",
+                        crate::team::task_cmd::StatusTransitionAttribution::daemon(
+                            "daemon.board_reconciliation.review_metadata",
+                        ),
+                    )?;
                     crate::team::task_cmd::unclaim_task(board_dir, *task_id)?;
                     fixes.push(AppliedFix::RequeuedReviewTask {
                         task_id: *task_id,
@@ -319,7 +340,14 @@ pub(crate) fn apply_safe_fixes(board_dir: &Path, report: &ReconciliationReport) 
             }
             BoardFinding::BlockedTaskResolved { task_id, title, .. } => {
                 if crate::team::task_cmd::find_task_path(board_dir, *task_id).is_ok() {
-                    crate::team::task_cmd::transition_task(board_dir, *task_id, "todo")?;
+                    crate::team::task_cmd::transition_task_with_attribution(
+                        board_dir,
+                        *task_id,
+                        "todo",
+                        crate::team::task_cmd::StatusTransitionAttribution::daemon(
+                            "daemon.board_reconciliation.unblocked",
+                        ),
+                    )?;
                     fixes.push(AppliedFix::UnblockedTask {
                         task_id: *task_id,
                         title: title.clone(),
@@ -332,7 +360,14 @@ pub(crate) fn apply_safe_fixes(board_dir: &Path, report: &ReconciliationReport) 
                 owner,
             } => {
                 if crate::team::task_cmd::find_task_path(board_dir, *task_id).is_ok() {
-                    crate::team::task_cmd::transition_task(board_dir, *task_id, "todo")?;
+                    crate::team::task_cmd::transition_task_with_attribution(
+                        board_dir,
+                        *task_id,
+                        "todo",
+                        crate::team::task_cmd::StatusTransitionAttribution::daemon(
+                            "daemon.board_reconciliation.orphaned",
+                        ),
+                    )?;
                     crate::team::task_cmd::unclaim_task(board_dir, *task_id)?;
                     fixes.push(AppliedFix::RequeuedOrphanedTask {
                         task_id: *task_id,

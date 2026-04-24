@@ -274,9 +274,23 @@ impl TeamDaemon {
 
             crate::team::task_cmd::assign_task_owners(&board_dir, task_id, Some(engineer), None)?;
             if task_record.status == "backlog" {
-                crate::team::task_cmd::transition_task(&board_dir, task_id, "todo")?;
+                crate::team::task_cmd::transition_task_with_attribution(
+                    &board_dir,
+                    task_id,
+                    "todo",
+                    crate::team::task_cmd::StatusTransitionAttribution::bridge(
+                        "bridge.telegram.assign",
+                    ),
+                )?;
             }
-            crate::team::task_cmd::transition_task(&board_dir, task_id, "in-progress")?;
+            crate::team::task_cmd::transition_task_with_attribution(
+                &board_dir,
+                task_id,
+                "in-progress",
+                crate::team::task_cmd::StatusTransitionAttribution::bridge(
+                    "bridge.telegram.assign",
+                ),
+            )?;
 
             let inbox_id = crate::team::messaging::assign_task(
                 &self.config.project_root,
@@ -320,8 +334,13 @@ impl TeamDaemon {
         }
 
         crate::team::messaging::merge_worktree(&self.config.project_root, &engineer)?;
-        crate::team::task_cmd::cmd_review_structured(
-            &board_dir, task_id, "approve", None, "telegram",
+        crate::team::task_cmd::cmd_review_structured_with_attribution(
+            &board_dir,
+            task_id,
+            "approve",
+            None,
+            "telegram",
+            crate::team::task_cmd::StatusTransitionAttribution::bridge("bridge.telegram.merge"),
         )?;
         let test_summary = test_run.results.summary.clone().unwrap_or_else(|| {
             format!(

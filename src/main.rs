@@ -2,10 +2,10 @@ use anyhow::{Context, Result, bail};
 use batty_cli::{
     agent,
     cli::{
-        self, AutoMergeAction, BoardCommand, Cli, Command, DepsFormatArg, DiscordCommand,
-        GrafanaCommand, InboxCommand, NudgeCommand, OpenClawCommand, OpenClawEventTopicArg,
-        OpenClawFollowUpCommand, ProjectCommand, ResearchCommand, ResearchFormatArg,
-        ResearchKeepPolicyArg, ReviewDispositionArg, TaskCommand, TaskStateArg,
+        self, ActivityCommand, AutoMergeAction, BoardCommand, Cli, Command, DepsFormatArg,
+        DiscordCommand, GrafanaCommand, InboxCommand, NudgeCommand, OpenClawCommand,
+        OpenClawEventTopicArg, OpenClawFollowUpCommand, ProjectCommand, ResearchCommand,
+        ResearchFormatArg, ResearchKeepPolicyArg, ReviewDispositionArg, TaskCommand, TaskStateArg,
     },
     env_file, project_registry, release, team,
 };
@@ -1039,6 +1039,17 @@ fn main() -> Result<()> {
                     cron.as_deref(),
                     clear,
                 )?,
+            }
+        }
+
+        Command::Activity { command } => {
+            let board_dir = team::team_config_dir(&root).join("board");
+            match command {
+                ActivityCommand::AnnotateStatus { task_id, source } => {
+                    team::task_cmd::annotate_latest_status_activity_from_cli(
+                        &board_dir, task_id, &source,
+                    )?;
+                }
             }
         }
 

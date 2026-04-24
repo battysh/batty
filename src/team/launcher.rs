@@ -657,19 +657,44 @@ pub(super) fn write_launch_script(
         .join("team_config")
         .join("board");
     let real_kanban = resolve_binary("kanban-md");
+    let real_batty = resolve_binary("batty");
     let kanban_wrapper = wrapper_dir.join("kanban-md");
     std::fs::write(
         &kanban_wrapper,
         format!(
-            "#!/bin/bash\nexec '{}' --dir '{}' \"$@\"\n",
+            "#!/bin/bash\n\
+             real_kanban='{}'\n\
+             real_batty='{}'\n\
+             board_dir='{}'\n\
+             output=$(\"$real_kanban\" --dir \"$board_dir\" \"$@\")\n\
+             status=$?\n\
+             if [ -n \"$output\" ]; then printf '%s\\n' \"$output\"; fi\n\
+             if [ \"$status\" -eq 0 ]; then\n\
+               task_id=''\n\
+               source=''\n\
+               case \"${{1:-}}\" in\n\
+                 move)\n\
+                   task_id=\"${{2:-}}\"\n\
+                   source='kanban-md.move'\n\
+                   ;;\n\
+                 pick)\n\
+                   task_id=$(printf '%s\\n' \"$output\" | sed -n 's/.*[Pp]icked.*task #\\([0-9][0-9]*\\).*/\\1/p' | head -n 1)\n\
+                   source='kanban-md.pick'\n\
+                   ;;\n\
+               esac\n\
+               if [[ \"$task_id\" =~ ^[0-9]+$ ]] && [ -n \"$source\" ]; then\n\
+                 \"$real_batty\" activity annotate-status \"$task_id\" --source \"$source\" >/dev/null 2>&1 || true\n\
+               fi\n\
+             fi\n\
+             exit \"$status\"\n",
             real_kanban,
+            real_batty,
             board_dir.to_string_lossy()
         ),
     )
     .ok();
     set_executable(&kanban_wrapper);
 
-    let real_batty = resolve_binary("batty");
     let batty_wrapper = wrapper_dir.join("batty");
     std::fs::write(
         &batty_wrapper,
@@ -1178,12 +1203,10 @@ mod tests {
             .join("kanban-md");
         let content = std::fs::read_to_string(&wrapper_path).unwrap();
         let board_dir = project.join(".batty").join("team_config").join("board");
-        let expected = format!(
-            "exec '{}' --dir '{}' \"$@\"",
-            resolve_binary("kanban-md"),
-            board_dir.display()
-        );
-        assert!(content.contains(&expected));
+        assert!(content.contains(&format!("real_kanban='{}'", resolve_binary("kanban-md"))));
+        assert!(content.contains(&format!("board_dir='{}'", board_dir.display())));
+        assert!(content.contains("\"$real_kanban\" --dir \"$board_dir\" \"$@\""));
+        assert!(content.contains("activity annotate-status"));
         assert!(!content.contains("\"$@\" --dir"));
     }
 

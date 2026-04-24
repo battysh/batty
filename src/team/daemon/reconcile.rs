@@ -285,7 +285,12 @@ impl TeamDaemon {
             }
 
             if task.status == "in-progress" || task.status == "review" {
-                task_cmd::transition_task(&board_dir, task.id, "todo")?;
+                task_cmd::transition_task_with_attribution(
+                    &board_dir,
+                    task.id,
+                    "todo",
+                    task_cmd::StatusTransitionAttribution::daemon("daemon.reconcile.topology"),
+                )?;
             }
             task_cmd::unclaim_task(&board_dir, task.id)?;
             self.record_orchestrator_action(format!(

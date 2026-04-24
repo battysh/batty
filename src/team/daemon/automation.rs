@@ -633,7 +633,14 @@ impl TeamDaemon {
                         .to_string()
                 }
             };
-            crate::team::task_cmd::reclaim_task_claim(&self.board_dir(), task.id, &next_action)?;
+            crate::team::task_cmd::reclaim_task_claim_with_attribution(
+                &self.board_dir(),
+                task.id,
+                &next_action,
+                crate::team::task_cmd::StatusTransitionAttribution::daemon(
+                    "daemon.automation.claim_ttl",
+                ),
+            )?;
             self.clear_active_task(engineer);
             self.emit_event(TeamEvent::task_claim_expired(
                 engineer,
@@ -1037,18 +1044,41 @@ impl TeamDaemon {
                     task.id
                 );
                 if preserve_block {
-                    let _ = crate::team::task_cmd::transition_task_preserving_block(
+                    let _ =
+                        crate::team::task_cmd::transition_task_preserving_block_with_attribution(
+                            &board_dir,
+                            task.id,
+                            "in-progress",
+                            crate::team::task_cmd::StatusTransitionAttribution::daemon(
+                                "daemon.automation.orphan_review_rescue",
+                            ),
+                        );
+                    let _ =
+                        crate::team::task_cmd::transition_task_preserving_block_with_attribution(
+                            &board_dir,
+                            task.id,
+                            "todo",
+                            crate::team::task_cmd::StatusTransitionAttribution::daemon(
+                                "daemon.automation.orphan_review_rescue",
+                            ),
+                        );
+                } else {
+                    let _ = crate::team::task_cmd::transition_task_with_attribution(
                         &board_dir,
                         task.id,
                         "in-progress",
+                        crate::team::task_cmd::StatusTransitionAttribution::daemon(
+                            "daemon.automation.orphan_review_rescue",
+                        ),
                     );
-                    let _ = crate::team::task_cmd::transition_task_preserving_block(
-                        &board_dir, task.id, "todo",
+                    let _ = crate::team::task_cmd::transition_task_with_attribution(
+                        &board_dir,
+                        task.id,
+                        "todo",
+                        crate::team::task_cmd::StatusTransitionAttribution::daemon(
+                            "daemon.automation.orphan_review_rescue",
+                        ),
                     );
-                } else {
-                    let _ =
-                        crate::team::task_cmd::transition_task(&board_dir, task.id, "in-progress");
-                    let _ = crate::team::task_cmd::transition_task(&board_dir, task.id, "todo");
                 }
                 let _ = crate::team::task_cmd::unclaim_task(&board_dir, task.id);
                 // #684 / #686: same exponential-backoff dispatch-cooldown
@@ -1099,10 +1129,13 @@ impl TeamDaemon {
                         "orphan-rescue cascade detected — moving task #{} to blocked for manager triage",
                         task.id
                     );
-                    match crate::team::task_cmd::block_task_with_reason(
+                    match crate::team::task_cmd::block_task_with_reason_and_attribution(
                         &board_dir,
                         task.id,
                         &block_reason,
+                        crate::team::task_cmd::StatusTransitionAttribution::daemon(
+                            "daemon.automation.orphan_rescue_cascade",
+                        ),
                     ) {
                         Ok(()) => {
                             if let Some(manager) = first_manager_name(&self.config.members) {
@@ -1158,11 +1191,24 @@ impl TeamDaemon {
                     task.id
                 );
                 if preserve_block {
-                    let _ = crate::team::task_cmd::transition_task_preserving_block(
-                        &board_dir, task.id, "todo",
-                    );
+                    let _ =
+                        crate::team::task_cmd::transition_task_preserving_block_with_attribution(
+                            &board_dir,
+                            task.id,
+                            "todo",
+                            crate::team::task_cmd::StatusTransitionAttribution::daemon(
+                                "daemon.automation.orphan_in_progress_rescue",
+                            ),
+                        );
                 } else {
-                    let _ = crate::team::task_cmd::transition_task(&board_dir, task.id, "todo");
+                    let _ = crate::team::task_cmd::transition_task_with_attribution(
+                        &board_dir,
+                        task.id,
+                        "todo",
+                        crate::team::task_cmd::StatusTransitionAttribution::daemon(
+                            "daemon.automation.orphan_in_progress_rescue",
+                        ),
+                    );
                 }
                 // #684 / #686: hold the task off the dispatch queue with an
                 // exponentially-growing cooldown on repeated rescues so the
@@ -1293,11 +1339,14 @@ impl TeamDaemon {
                     authoritative_task_id = authoritative_id,
                     "state reconciliation: releasing excess claimed task"
                 );
-                crate::team::task_cmd::reclaim_task_claim(
+                crate::team::task_cmd::reclaim_task_claim_with_attribution(
                     board_dir,
                     task.id,
                     &format!(
                         "Reclaimed during reconciliation while {engineer} retained authoritative task #{authoritative_id}."
+                    ),
+                    crate::team::task_cmd::StatusTransitionAttribution::daemon(
+                        "daemon.automation.multi_claim_reconcile",
                     ),
                 )?;
                 released_excess_claims = true;
@@ -1494,7 +1543,14 @@ impl TeamDaemon {
             "persistent orphaned in-progress branch mismatch exceeded retry limit; moving task back to todo"
         );
         let board_dir = self.board_dir();
-        let _ = crate::team::task_cmd::transition_task(&board_dir, task.id, "todo");
+        let _ = crate::team::task_cmd::transition_task_with_attribution(
+            &board_dir,
+            task.id,
+            "todo",
+            crate::team::task_cmd::StatusTransitionAttribution::daemon(
+                "daemon.automation.branch_mismatch_recovery",
+            ),
+        );
         let _ = crate::team::task_cmd::unclaim_task(&board_dir, task.id);
         self.clear_active_task(engineer);
         self.retry_counts.remove(&retry_key);
@@ -1668,7 +1724,14 @@ impl TeamDaemon {
                 }
 
                 // Transition to blocked
-                let _ = super::super::task_cmd::transition_task(&board_dir, task.id, "blocked");
+                let _ = super::super::task_cmd::transition_task_with_attribution(
+                    &board_dir,
+                    task.id,
+                    "blocked",
+                    super::super::task_cmd::StatusTransitionAttribution::daemon(
+                        "daemon.automation.stale_review",
+                    ),
+                );
                 let _ = super::super::task_cmd::cmd_update(
                     &board_dir,
                     task.id,
@@ -2017,8 +2080,13 @@ impl TeamDaemon {
             .collect::<Vec<_>>();
 
         for (task_id, title, dependencies, recipient) in unblocked_tasks {
-            task_cmd::cmd_transition(&board_dir, task_id, "todo")
-                .with_context(|| format!("failed to auto-unblock task #{task_id}"))?;
+            task_cmd::transition_task_with_attribution(
+                &board_dir,
+                task_id,
+                "todo",
+                task_cmd::StatusTransitionAttribution::daemon("daemon.automation.auto_unblock"),
+            )
+            .with_context(|| format!("failed to auto-unblock task #{task_id}"))?;
 
             let dependency_list = dependencies
                 .iter()
