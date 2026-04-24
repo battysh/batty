@@ -15,6 +15,7 @@ const RELEASES_DIR: &str = ".batty/releases";
 const RELEASE_HISTORY_FILE: &str = "history.jsonl";
 const RELEASE_LATEST_JSON: &str = "latest.json";
 const RELEASE_LATEST_MARKDOWN: &str = "latest.md";
+const RELEASE_PUBLISH_HANDOFF_MARKDOWN: &str = "publish-handoff.md";
 const RELEASE_READINESS_JSON: &str = "readiness.json";
 const RELEASE_READINESS_MARKDOWN: &str = "readiness.md";
 
@@ -150,6 +151,7 @@ pub fn cmd_release(project_root: &Path, requested_tag: Option<&str>) -> Result<(
         Ok((record, report_markdown)) => {
             persist_release_record(project_root, &record)?;
             write_latest_report(project_root, &report_markdown)?;
+            let publish_handoff_path = write_publish_handoff(project_root, &record)?;
             emit_release_record(project_root, &record)?;
             println!(
                 "Release succeeded: {} -> {}",
@@ -159,6 +161,7 @@ pub fn cmd_release(project_root: &Path, requested_tag: Option<&str>) -> Result<(
             if let Some(path) = record.notes_path.as_deref() {
                 println!("Release notes: {path}");
             }
+            println!("Publish handoff: {}", publish_handoff_path.display());
             println!(
                 "Verification: {}",
                 record
@@ -1121,6 +1124,48 @@ fn write_latest_report(project_root: &Path, report_markdown: &str) -> Result<()>
     Ok(())
 }
 
+fn write_publish_handoff(project_root: &Path, record: &ReleaseRecord) -> Result<PathBuf> {
+    let dir = releases_dir(project_root);
+    fs::create_dir_all(&dir).with_context(|| format!("failed to create {}", dir.display()))?;
+    let path = dir.join(RELEASE_PUBLISH_HANDOFF_MARKDOWN);
+    fs::write(&path, render_publish_handoff(record))
+        .with_context(|| format!("failed to write {}", path.display()))?;
+    Ok(path)
+}
+
+fn render_publish_handoff(record: &ReleaseRecord) -> String {
+    let tag = record.tag.as_deref().unwrap_or("unknown-tag");
+    let git_ref = record.git_ref.as_deref().unwrap_or("unknown-ref");
+    let branch = record.branch.as_deref().unwrap_or("unknown-branch");
+    let notes_path = record.notes_path.as_deref().unwrap_or("not recorded");
+    let verification_command = record
+        .verification_command
+        .as_deref()
+        .unwrap_or("not recorded");
+    let verification_summary = record
+        .verification_summary
+        .as_deref()
+        .unwrap_or("not recorded");
+
+    format!(
+        "# Release Publish Handoff\n\n\
+- Tag: {tag}\n\
+- Git Ref: {git_ref}\n\
+- Branch: {branch}\n\
+- Release Notes: {notes_path}\n\
+- Verification Command: {verification_command}\n\
+- Verification Summary: {verification_summary}\n\n\
+## Guardrail\n\n\
+Batty created only the local release record and annotated tag. It did not push branches, push tags, or publish packages.\n\n\
+## Manual Publish Commands\n\n\
+```sh\n\
+git push origin {branch}\n\
+git push origin {tag}\n\
+```\n\n\
+Run these commands only after inspecting the release record, release notes, and the intended remote.\n"
+    )
+}
+
 fn persist_release_record(project_root: &Path, record: &ReleaseRecord) -> Result<()> {
     let dir = releases_dir(project_root);
     fs::create_dir_all(&dir).with_context(|| format!("failed to create {}", dir.display()))?;
@@ -1707,6 +1752,82 @@ mod tests {
         assert!(events.contains("\"event\":\"release_succeeded\""));
         assert!(events.contains("\"version\":\"0.10.0\""));
         assert!(events.contains("\"git_ref\""));
+    }
+
+    #[test]
+    fn release_handoff_writes_manual_publish_steps_after_green_release() {
+        let tmp = init_repo();
+        let verifier = passing_verifier(Arc::new(AtomicUsize::new(0)));
+        let (record, _) = run_release_with_verifier(tmp.path(), None, &verifier).unwrap();
+
+        let handoff_path = write_publish_handoff(tmp.path(), &record).unwrap();
+        let handoff = fs::read_to_string(&handoff_path).unwrap();
+
+        assert_eq!(
+            handoff_path,
+            tmp.path()
+                .join(".batty")
+                .join("releases")
+                .join("publish-handoff.md")
+        );
+        assert!(handoff.contains("# Release Publish Handoff"));
+        assert!(handoff.contains("- Tag: v0.10.0"));
+        assert!(handoff.contains("- Branch: main"));
+        assert!(handoff.contains("- Verification Summary: cargo test passed"));
+        assert!(handoff.contains("Batty created only the local release record and annotated tag"));
+        assert!(handoff.contains("git push origin main"));
+        assert!(handoff.contains("git push origin v0.10.0"));
+    }
+
+    #[test]
+    fn release_handoff_is_not_created_when_validation_fails() {
+        let tmp = init_repo();
+        let verifier = StubVerifier {
+            result: ReleaseVerification {
+                command: "cargo test".to_string(),
+                passed: false,
+                summary: "tests failed".to_string(),
+                details: Some("suite::fails".to_string()),
+            },
+            calls: Arc::new(AtomicUsize::new(0)),
+        };
+
+        let error = run_release_with_verifier(tmp.path(), None, &verifier).unwrap_err();
+        assert_eq!(error.record.reason, "verification_failed");
+        assert!(
+            !tmp.path()
+                .join(".batty")
+                .join("releases")
+                .join("publish-handoff.md")
+                .exists()
+        );
+    }
+
+    #[test]
+    fn release_handoff_renders_without_publish_side_effects() {
+        let record = ReleaseRecord {
+            ts: "2026-04-24T00:00:00Z".to_string(),
+            package_name: Some("batty".to_string()),
+            version: Some("0.11.0".to_string()),
+            tag: Some("v0.11.0".to_string()),
+            git_ref: Some("abc123".to_string()),
+            branch: Some("main".to_string()),
+            previous_tag: Some("v0.10.0".to_string()),
+            commits_since_previous: Some(3),
+            verification_command: Some("cargo test".to_string()),
+            verification_summary: Some("cargo test passed".to_string()),
+            success: true,
+            reason: "created annotated tag `v0.11.0` from clean green main".to_string(),
+            details: None,
+            notes_path: Some(".batty/releases/v0.11.0.md".to_string()),
+        };
+
+        let handoff = render_publish_handoff(&record);
+
+        assert!(handoff.contains("It did not push branches, push tags, or publish packages."));
+        assert!(handoff.contains("git push origin main"));
+        assert!(handoff.contains("git push origin v0.11.0"));
+        assert!(handoff.contains("Run these commands only after inspecting"));
     }
 
     #[test]
