@@ -15,7 +15,8 @@ use super::daemon_mgmt::{
     resume_marker_path,
 };
 use super::{
-    config, estimation, events, hierarchy, now_unix, status, team_config_path, team_events_path,
+    config, estimation, events, hierarchy, now_unix, status, team_config_dir, team_config_path,
+    team_events_path,
 };
 use crate::tmux;
 
@@ -598,6 +599,90 @@ fn migration_validation_notes(
     }
 }
 
+fn board_layout_failure(reason: &str, team_name: &str) -> String {
+    format!(
+        "{reason}\n\
+         Expected Batty board convention: `.batty/team_config/board/config.yml` with \
+         `tasks_dir: tasks`, and task files under `.batty/team_config/board/tasks/`.\n\
+         New board fix: `kanban-md init --dir .batty/team_config/board --name \"{team_name}\"`.\n\
+         Existing nested kanban-md board fix: `mv .batty/team_config/board/kanban/tasks \
+         .batty/team_config/board/tasks && mv .batty/team_config/board/kanban/config.yml \
+         .batty/team_config/board/config.yml`.\n\
+         Config key fix: set `tasks_dir: tasks` in `.batty/team_config/board/config.yml`."
+    )
+}
+
+fn validate_board_layout(project_root: &Path, team_config: &config::TeamConfig) -> Result<()> {
+    let board_dir = team_config_dir(project_root).join("board");
+    let config_path = board_dir.join("config.yml");
+    let tasks_dir = board_dir.join("tasks");
+    let nested_board_dir = board_dir.join("kanban");
+    let nested_config_path = nested_board_dir.join("config.yml");
+    let nested_tasks_dir = nested_board_dir.join("tasks");
+
+    if !board_dir.is_dir() {
+        bail!(
+            "{}",
+            board_layout_failure(
+                &format!("missing Batty board directory at {}", board_dir.display()),
+                &team_config.name,
+            )
+        );
+    }
+
+    if !tasks_dir.is_dir() {
+        let reason = if nested_tasks_dir.is_dir() || nested_config_path.is_file() {
+            format!(
+                "misplaced kanban-md board layout detected under {}; Batty reads task files from {}",
+                nested_board_dir.display(),
+                tasks_dir.display()
+            )
+        } else {
+            format!("missing Batty tasks directory at {}", tasks_dir.display())
+        };
+        bail!("{}", board_layout_failure(&reason, &team_config.name));
+    }
+
+    if !config_path.is_file() {
+        let reason = if nested_config_path.is_file() {
+            format!(
+                "misplaced kanban-md config detected at {}; Batty expects {}",
+                nested_config_path.display(),
+                config_path.display()
+            )
+        } else {
+            format!("missing kanban-md config at {}", config_path.display())
+        };
+        bail!("{}", board_layout_failure(&reason, &team_config.name));
+    }
+
+    let content = std::fs::read_to_string(&config_path)
+        .with_context(|| format!("failed to read {}", config_path.display()))?;
+    let value: serde_yaml::Value = serde_yaml::from_str(&content)
+        .with_context(|| format!("failed to parse {}", config_path.display()))?;
+    let tasks_dir_value = value
+        .as_mapping()
+        .and_then(|mapping| mapping.get(serde_yaml::Value::String("tasks_dir".to_string())))
+        .and_then(serde_yaml::Value::as_str);
+
+    if tasks_dir_value != Some("tasks") {
+        let found = tasks_dir_value.unwrap_or("(missing)");
+        bail!(
+            "{}",
+            board_layout_failure(
+                &format!(
+                    "{} sets tasks_dir to `{}`; Batty requires `tasks`",
+                    config_path.display(),
+                    found
+                ),
+                &team_config.name,
+            )
+        );
+    }
+
+    Ok(())
+}
+
 /// Validate team config without launching.
 pub fn validate_team(project_root: &Path, verbose: bool) -> Result<()> {
     let config_path = team_config_path(project_root);
@@ -623,6 +708,8 @@ pub fn validate_team(project_root: &Path, verbose: bool) -> Result<()> {
     } else {
         team_config.validate()?;
     }
+
+    validate_board_layout(project_root, &team_config)?;
 
     let workflow_mode_is_explicit = workflow_mode_declared(&config_path)?;
 
@@ -742,6 +829,34 @@ mod tests {
         std::fs::write(team_config_path(project_root), yaml).unwrap();
     }
 
+    fn write_minimal_team_config(project_root: &std::path::Path) {
+        write_team_config(
+            project_root,
+            r#"
+name: test
+roles:
+  - name: engineer
+    role_type: engineer
+    agent: codex
+"#,
+        );
+    }
+
+    fn write_board_config(board_dir: &std::path::Path, tasks_dir: &str) {
+        std::fs::create_dir_all(board_dir).unwrap();
+        std::fs::write(
+            board_dir.join("config.yml"),
+            format!("version: 10\nboard:\n  name: test\ntasks_dir: {tasks_dir}\nnext_id: 1\n"),
+        )
+        .unwrap();
+    }
+
+    fn write_valid_batty_board(project_root: &std::path::Path) {
+        let board_dir = team_config_dir(project_root).join("board");
+        std::fs::create_dir_all(board_dir.join("tasks")).unwrap();
+        write_board_config(&board_dir, "tasks");
+    }
+
     #[test]
     fn workflow_mode_declared_detects_absent_field() {
         let tmp = tempfile::tempdir().unwrap();
@@ -775,6 +890,67 @@ roles:
         );
 
         assert!(workflow_mode_declared(&team_config_path(tmp.path())).unwrap());
+    }
+
+    #[test]
+    fn validate_team_accepts_batty_board_layout() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_minimal_team_config(tmp.path());
+        write_valid_batty_board(tmp.path());
+
+        validate_team(tmp.path(), false).unwrap();
+    }
+
+    #[test]
+    fn validate_team_rejects_missing_board_tasks() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_minimal_team_config(tmp.path());
+        let board_dir = team_config_dir(tmp.path()).join("board");
+        write_board_config(&board_dir, "tasks");
+
+        let err = validate_team(tmp.path(), false).unwrap_err().to_string();
+
+        assert!(err.contains("missing Batty tasks directory"), "{err}");
+        assert!(err.contains(".batty/team_config/board/tasks"), "{err}");
+        assert!(
+            err.contains("kanban-md init --dir .batty/team_config/board"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn validate_team_rejects_nested_kanban_md_default_layout() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_minimal_team_config(tmp.path());
+        let nested_board_dir = team_config_dir(tmp.path()).join("board").join("kanban");
+        std::fs::create_dir_all(nested_board_dir.join("tasks")).unwrap();
+        write_board_config(&nested_board_dir, "tasks");
+
+        let err = validate_team(tmp.path(), false).unwrap_err().to_string();
+
+        assert!(err.contains("misplaced kanban-md board layout"), "{err}");
+        assert!(err.contains(".batty/team_config/board/kanban"), "{err}");
+        assert!(
+            err.contains("mv .batty/team_config/board/kanban/tasks"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn validate_team_rejects_config_tasks_dir_mismatch() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_minimal_team_config(tmp.path());
+        let board_dir = team_config_dir(tmp.path()).join("board");
+        std::fs::create_dir_all(board_dir.join("tasks")).unwrap();
+        write_board_config(&board_dir, "kanban/tasks");
+
+        let err = validate_team(tmp.path(), false).unwrap_err().to_string();
+
+        assert!(err.contains("sets tasks_dir to `kanban/tasks`"), "{err}");
+        assert!(
+            err.contains("Config key fix: set `tasks_dir: tasks`"),
+            "{err}"
+        );
     }
 
     #[test]
