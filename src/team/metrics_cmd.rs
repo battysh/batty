@@ -27,6 +27,7 @@ pub struct DashboardMetrics {
     pub notification_isolation_count: i64,
     pub avg_notification_delivery_latency_secs: Option<f64>,
     pub merge_queue_depth: i64,
+    pub non_engineer_stalls: Vec<telemetry_db::NonEngineerStallMetricRow>,
 
     // Cycle time
     pub avg_cycle_time_secs: Option<f64>,
@@ -195,6 +196,7 @@ pub fn query_dashboard(conn: &Connection) -> Result<DashboardMetrics> {
     }
 
     m.merge_queue_depth = telemetry_db::query_merge_queue_depth(conn)?;
+    m.non_engineer_stalls = telemetry_db::query_non_engineer_stall_metrics(conn)?;
 
     m.cycle_time_by_priority = telemetry_db::query_average_cycle_time_by_priority(conn)?;
     m.engineer_throughput = telemetry_db::query_engineer_throughput(conn)?;
@@ -357,6 +359,26 @@ pub fn format_dashboard(m: &DashboardMetrics) -> String {
         "  Notification Latency: {}\n",
         notification_latency
     ));
+
+    if !m.non_engineer_stalls.is_empty() {
+        out.push_str("\nNon-Engineer Stall SLOs\n");
+        out.push_str(&"-".repeat(60));
+        out.push('\n');
+        out.push_str(&format!(
+            "  {:<16} {:<9} {:<28} {:>5} {:>8}\n",
+            "ROLE", "LANE", "SIGNAL", "COUNT", "MAX"
+        ));
+        for row in &m.non_engineer_stalls {
+            out.push_str(&format!(
+                "  {:<16} {:<9} {:<28} {:>5} {:>8}\n",
+                row.role,
+                row.lane,
+                row.signal,
+                row.count,
+                format_duration(row.max_stall_secs as f64)
+            ));
+        }
+    }
 
     if !m.cycle_time_by_priority.is_empty() {
         out.push_str("\nAverage Cycle Time By Priority\n");
@@ -606,6 +628,15 @@ mod tests {
         // A failure
         telemetry_db::insert_event(&conn, &TeamEvent::pane_death("eng-1")).unwrap();
 
+        let mut stall = TeamEvent::stall_detected_with_reason(
+            "manager",
+            None,
+            600,
+            Some("supervisory_stalled_manager_dispatch_gap"),
+        );
+        stall.task = Some("supervisory::manager".to_string());
+        telemetry_db::insert_event(&conn, &stall).unwrap();
+
         conn
     }
 
@@ -672,6 +703,9 @@ mod tests {
 
         // Agents present
         assert_eq!(m.agent_rows.len(), 2);
+        assert_eq!(m.non_engineer_stalls.len(), 1);
+        assert_eq!(m.non_engineer_stalls[0].role, "manager");
+        assert_eq!(m.non_engineer_stalls[0].signal, "dispatch_gap_pressure");
     }
 
     #[test]
@@ -796,6 +830,14 @@ mod tests {
             notification_isolation_count: 3,
             avg_notification_delivery_latency_secs: Some(12.0),
             merge_queue_depth: 2,
+            non_engineer_stalls: vec![telemetry_db::NonEngineerStallMetricRow {
+                role: "manager".to_string(),
+                lane: "manager".to_string(),
+                signal: "dispatch_gap_pressure".to_string(),
+                count: 2,
+                last_seen_at: 1_744_000_000,
+                max_stall_secs: 600,
+            }],
             latest_release: Some(crate::release::ReleaseRecord {
                 ts: "2026-04-10T12:00:00Z".to_string(),
                 package_name: Some("batty".to_string()),
@@ -905,6 +947,8 @@ mod tests {
         assert!(text.contains("Merge Queue Depth: 2"));
         assert!(text.contains("Notification Isolation: 3"));
         assert!(text.contains("Notification Latency: 12s"));
+        assert!(text.contains("Non-Engineer Stall SLOs"));
+        assert!(text.contains("dispatch_gap_pressure"));
         assert!(text.contains("Latest Release"));
         assert!(text.contains("v0.10.0 abc123 (success)"));
 
