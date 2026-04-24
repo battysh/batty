@@ -1149,6 +1149,7 @@ mod tests {
                 unhealthy_members: vec!["eng-1".to_string()],
             },
             workflow_metrics: Some(status::WorkflowMetrics {
+                board_state: status::WorkflowBoardState::RunnableBoard,
                 runnable_count: 3,
                 implementation_runnable_count: 3,
                 blocked_count: 1,

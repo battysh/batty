@@ -41,6 +41,26 @@ pub fn compose_planning_prompt(
     project_goals: &[String],
     project_name: &str,
 ) -> String {
+    compose_planning_prompt_with_blockers(
+        idle_engineer_count,
+        board_summary,
+        recent_completions,
+        roadmap_context,
+        project_goals,
+        project_name,
+        &[],
+    )
+}
+
+pub fn compose_planning_prompt_with_blockers(
+    idle_engineer_count: usize,
+    board_summary: &str,
+    recent_completions: &[String],
+    roadmap_context: &[String],
+    project_goals: &[String],
+    project_name: &str,
+    blocked_task_summaries: &[String],
+) -> String {
     let dispatchable_count = board_summary
         .split(',')
         .find_map(|part| part.trim().strip_prefix("dispatchable_tasks="))
@@ -90,6 +110,28 @@ pub fn compose_planning_prompt(
             .join("\n")
     };
 
+    let blocker_section = if blocked_task_summaries.is_empty() {
+        String::new()
+    } else {
+        let blocked_tasks = blocked_task_summaries
+            .iter()
+            .map(|task| format!("- {task}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!(
+            "Blocked work requiring unblock tasks:\n{blocked_tasks}\n\n\
+Unblock task directive:\n\
+- Propose executable unblock tasks, not generic feature work.\n\
+- Each proposed task must name the blocked task id it unblocks or advances.\n\
+- Prefer concrete dependency-clearing, missing-artifact, failing-test, decision, or investigation work.\n\n"
+        )
+    };
+    let task_kind = if blocked_task_summaries.is_empty() {
+        "task(s)"
+    } else {
+        "executable unblock task(s)"
+    };
+
     format!(
         "You are planning the next execution wave for the project `{project_name}`.\n\n\
 Tact summary:\n{}\n\n\
@@ -97,9 +139,10 @@ Current board state:\n\
 - Idle engineers available: {idle_engineer_count}\n\
 - Recently completed work:\n{completions}\n\n\
 Board summary:\n{board_summary}\n\n\
+{blocker_section}\
 Roadmap context:\n{roadmap}\n\n\
 Project goals:\n{goals}\n\n\
-Propose exactly {requested_count} task(s). Each task must be feature-sized, self-contained, \
+Propose exactly {requested_count} {task_kind}. Each task must be feature-sized, self-contained, \
 and ready to hand directly to an engineer. Include concrete file paths and explicit acceptance \
 criteria in each task body.\n\n\
 Expected response format:\n{PLANNING_RESPONSE_FORMAT}",
@@ -190,6 +233,28 @@ mod tests {
         let prompt = compose_planning_prompt(0, "board text", &[], &[], &[], "Batty");
         assert!(prompt.contains("Idle engineers available: 0"));
         assert!(prompt.contains("Propose exactly 0 task(s)."));
+    }
+
+    #[test]
+    fn compose_with_blockers_requests_unblock_tasks() {
+        let prompt = compose_planning_prompt_with_blockers(
+            2,
+            "todo=0, blocked=2, dispatchable_tasks=0, planning_state=blocked-only-board",
+            &[],
+            &[],
+            &[],
+            "Batty",
+            &[
+                "#737 Convert blocked-only planning cycles: waiting on executable unblock work"
+                    .to_string(),
+                "#740 Restore dispatch: unmet dependency #739 (blocked)".to_string(),
+            ],
+        );
+
+        assert!(prompt.contains("Blocked work requiring unblock tasks:"));
+        assert!(prompt.contains("#737 Convert blocked-only planning cycles"));
+        assert!(prompt.contains("Propose exactly 2 executable unblock task(s)."));
+        assert!(prompt.contains("Each proposed task must name the blocked task id"));
     }
 
     #[test]

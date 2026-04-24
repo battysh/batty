@@ -179,6 +179,7 @@ pub(crate) struct OptionalSubsystemStatus {
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize)]
 pub struct WorkflowMetrics {
+    pub board_state: WorkflowBoardState,
     pub runnable_count: u32,
     pub implementation_runnable_count: u32,
     pub blocked_count: u32,
@@ -206,6 +207,29 @@ pub struct WorkflowMetrics {
     pub review_nudge_count: u32,
     pub review_escalation_count: u32,
     pub avg_review_latency_secs: Option<f64>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum WorkflowBoardState {
+    #[default]
+    EmptyBoard,
+    BlockedOnlyBoard,
+    ReviewBacklogGated,
+    RunnableBoard,
+    ActiveBoard,
+}
+
+impl WorkflowBoardState {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::EmptyBoard => "empty-board",
+            Self::BlockedOnlyBoard => "blocked-only-board",
+            Self::ReviewBacklogGated => "review-backlog-gated",
+            Self::RunnableBoard => "runnable-board",
+            Self::ActiveBoard => "active-board",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -2186,6 +2210,7 @@ fn compute_metrics_with_telemetry_and_aging(
     };
 
     Ok(WorkflowMetrics {
+        board_state: board_metrics.board_state,
         runnable_count: board_metrics.runnable_count,
         implementation_runnable_count: board_metrics.implementation_runnable_count,
         blocked_count: board_metrics.blocked_count,
@@ -2225,6 +2250,7 @@ pub fn compute_metrics_with_events(
 
 /// Board-only metrics (no event/review data).
 struct BoardMetrics {
+    board_state: WorkflowBoardState,
     runnable_count: u32,
     implementation_runnable_count: u32,
     blocked_count: u32,
@@ -2249,6 +2275,7 @@ fn compute_board_metrics(
     let tasks_dir = board_dir.join("tasks");
     if !tasks_dir.is_dir() {
         return Ok(BoardMetrics {
+            board_state: WorkflowBoardState::EmptyBoard,
             runnable_count: 0,
             implementation_runnable_count: 0,
             blocked_count: 0,
@@ -2269,6 +2296,7 @@ fn compute_board_metrics(
     let tasks = load_board_tasks_for_status(board_dir, "compute_board_metrics")?;
     if tasks.is_empty() {
         return Ok(BoardMetrics {
+            board_state: WorkflowBoardState::EmptyBoard,
             runnable_count: 0,
             implementation_runnable_count: 0,
             blocked_count: 0,
@@ -2345,6 +2373,12 @@ fn compute_board_metrics(
     let top_runnable_tasks = top_runnable_task_summaries(&dispatchable_tasks, 3);
     let blocked_dispatch_reasons =
         blocked_dispatch_reason_summaries(&tasks, &dispatchable_task_ids, 3);
+    let board_state = classify_workflow_board_state(
+        &tasks,
+        runnable_count,
+        blocked_count,
+        actionable_review_count,
+    );
     let aging = project_root_from_board_dir(board_dir)
         .and_then(|project_root| {
             crate::team::board::compute_task_aging(board_dir, project_root, thresholds).ok()
@@ -2352,6 +2386,7 @@ fn compute_board_metrics(
         .unwrap_or_default();
 
     Ok(BoardMetrics {
+        board_state,
         runnable_count,
         implementation_runnable_count: engineer_runnable_count,
         blocked_count,
@@ -2367,6 +2402,34 @@ fn compute_board_metrics(
         oldest_review_age_secs,
         oldest_assignment_age_secs,
     })
+}
+
+fn classify_workflow_board_state(
+    tasks: &[task::Task],
+    runnable_count: u32,
+    blocked_count: u32,
+    actionable_review_count: u32,
+) -> WorkflowBoardState {
+    if tasks
+        .iter()
+        .all(|task| matches!(task.status.as_str(), "done" | "archived"))
+    {
+        return WorkflowBoardState::EmptyBoard;
+    }
+
+    if runnable_count > 0 {
+        return WorkflowBoardState::RunnableBoard;
+    }
+
+    if actionable_review_count > 0 {
+        return WorkflowBoardState::ReviewBacklogGated;
+    }
+
+    if blocked_count > 0 {
+        return WorkflowBoardState::BlockedOnlyBoard;
+    }
+
+    WorkflowBoardState::ActiveBoard
 }
 
 #[derive(Default)]
@@ -2572,6 +2635,7 @@ pub fn format_metrics(metrics: &WorkflowMetrics) -> String {
 
     format!(
         "Workflow Metrics\n\
+Board State: {}\n\
 Runnable: {}\n\
 Implementation Runnable: {}\n\
 Blocked: {}\n\
@@ -2589,6 +2653,7 @@ Review Pipeline\n\
 Queue: {} | Avg Latency: {} | Auto-merge Rate: {} | Rework Rate: {}\n\
 Auto: {} | Manual: {} | Rework: {} | Nudges: {} | Escalations: {}\n\
 Merge Modes: direct ok {} / fail {} | isolated ok {} / fail {}",
+        metrics.board_state.as_str(),
         metrics.runnable_count,
         metrics.implementation_runnable_count,
         metrics.blocked_count,
@@ -4006,6 +4071,7 @@ mod tests {
 
         let metrics = compute_metrics(&board_dir(tmp.path()), &[]).unwrap();
         assert_eq!(metrics, WorkflowMetrics::default());
+        assert_eq!(metrics.board_state, WorkflowBoardState::EmptyBoard);
     }
 
     #[test]
@@ -4065,6 +4131,7 @@ mod tests {
         )
         .unwrap();
 
+        assert_eq!(metrics.board_state, WorkflowBoardState::RunnableBoard);
         assert_eq!(metrics.runnable_count, 1);
         assert_eq!(metrics.implementation_runnable_count, 1);
         assert_eq!(metrics.blocked_count, 1);
@@ -4150,24 +4217,83 @@ mod tests {
     #[test]
     fn format_metrics_distinguishes_no_work_from_review_bottleneck() {
         let no_work = format_metrics(&WorkflowMetrics::default());
+        assert!(no_work.contains("Board State: empty-board"));
         assert!(no_work.contains("Implementation Work: no executable implementation work"));
 
         let review_bottleneck = format_metrics(&WorkflowMetrics {
+            board_state: WorkflowBoardState::ReviewBacklogGated,
             in_review_count: 1,
             actionable_review_count: 1,
             ..WorkflowMetrics::default()
         });
+        assert!(review_bottleneck.contains("Board State: review-backlog-gated"));
         assert!(
             review_bottleneck.contains("Implementation Work: review backlog is the bottleneck")
         );
 
         let runnable = format_metrics(&WorkflowMetrics {
+            board_state: WorkflowBoardState::RunnableBoard,
             runnable_count: 1,
             implementation_runnable_count: 1,
             actionable_review_count: 1,
             ..WorkflowMetrics::default()
         });
+        assert!(runnable.contains("Board State: runnable-board"));
         assert!(runnable.contains("Implementation Work: executable implementation work available"));
+    }
+
+    #[test]
+    fn compute_metrics_distinguishes_blocked_only_board() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_board_task(
+            tmp.path(),
+            "737-blocked.md",
+            "id: 737\ntitle: Blocked only\nstatus: blocked\npriority: high\nblocked_on: missing unblock task\n",
+        );
+
+        let metrics = compute_metrics(&board_dir(tmp.path()), &[engineer("eng-1")]).unwrap();
+
+        assert_eq!(metrics.board_state, WorkflowBoardState::BlockedOnlyBoard);
+        assert_eq!(metrics.runnable_count, 0);
+        assert_eq!(metrics.blocked_count, 1);
+        assert!(format_metrics(&metrics).contains("Board State: blocked-only-board"));
+    }
+
+    #[test]
+    fn compute_metrics_distinguishes_review_backlog_gated_board() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_board_task(
+            tmp.path(),
+            "041-review.md",
+            "id: 41\ntitle: Needs review\nstatus: review\npriority: high\nclaimed_by: eng-1\n",
+        );
+
+        let metrics = compute_metrics(&board_dir(tmp.path()), &[engineer("eng-1")]).unwrap();
+
+        assert_eq!(metrics.board_state, WorkflowBoardState::ReviewBacklogGated);
+        assert_eq!(metrics.runnable_count, 0);
+        assert_eq!(metrics.actionable_review_count, 1);
+    }
+
+    #[test]
+    fn compute_metrics_prefers_runnable_state_for_mixed_blocked_and_runnable_board() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_board_task(
+            tmp.path(),
+            "001-runnable.md",
+            "id: 1\ntitle: Runnable\nstatus: todo\npriority: high\n",
+        );
+        write_board_task(
+            tmp.path(),
+            "002-blocked.md",
+            "id: 2\ntitle: Blocked\nstatus: blocked\npriority: high\nblocked_on: external dependency\n",
+        );
+
+        let metrics = compute_metrics(&board_dir(tmp.path()), &[engineer("eng-1")]).unwrap();
+
+        assert_eq!(metrics.board_state, WorkflowBoardState::RunnableBoard);
+        assert_eq!(metrics.runnable_count, 1);
+        assert_eq!(metrics.blocked_count, 1);
     }
 
     #[test]
