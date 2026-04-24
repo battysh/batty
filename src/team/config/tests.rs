@@ -22,10 +22,31 @@ roles:
 "#
 }
 
+fn git(repo: &std::path::Path, args: &[&str]) {
+    let output = std::process::Command::new("git")
+        .args([
+            "-c",
+            "user.name=Batty Test",
+            "-c",
+            "user.email=batty@example.com",
+        ])
+        .args(args)
+        .current_dir(repo)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git {:?} failed: {}",
+        args,
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 #[test]
 fn parse_minimal_config() {
     let config: TeamConfig = serde_yaml::from_str(minimal_yaml()).unwrap();
     assert_eq!(config.name, "test-team");
+    assert_eq!(config.trunk_branch(), "main");
     assert_eq!(config.workflow_mode, WorkflowMode::Legacy);
     assert_eq!(config.roles.len(), 3);
     assert_eq!(config.roles[0].role_type, RoleType::Architect);
@@ -47,6 +68,49 @@ fn parse_minimal_config() {
     assert_eq!(config.workflow_policy.aged_todo_hours, 48);
     assert_eq!(config.workflow_policy.stale_review_hours, 1);
     assert!(!config.workflow_policy.file_level_locks);
+}
+
+#[test]
+fn parse_config_with_mainline_trunk_branch() {
+    let yaml = minimal_yaml().replacen(
+        "name: test-team",
+        "name: test-team\ntrunk_branch: mainline",
+        1,
+    );
+
+    let config: TeamConfig = serde_yaml::from_str(&yaml).unwrap();
+
+    assert_eq!(config.trunk_branch(), "mainline");
+}
+
+#[test]
+fn validate_trunk_branch_exists_accepts_configured_mainline() {
+    let tmp = tempfile::tempdir().unwrap();
+    git(tmp.path(), &["init"]);
+    git(tmp.path(), &["checkout", "-b", "mainline"]);
+    std::fs::write(tmp.path().join("README.md"), "hello\n").unwrap();
+    git(tmp.path(), &["add", "README.md"]);
+    git(tmp.path(), &["commit", "-m", "init"]);
+
+    validate_trunk_branch_exists(tmp.path(), "mainline").unwrap();
+}
+
+#[test]
+fn validate_trunk_branch_exists_reports_missing_configured_branch() {
+    let tmp = tempfile::tempdir().unwrap();
+    git(tmp.path(), &["init"]);
+    git(tmp.path(), &["checkout", "-b", "main"]);
+    std::fs::write(tmp.path().join("README.md"), "hello\n").unwrap();
+    git(tmp.path(), &["add", "README.md"]);
+    git(tmp.path(), &["commit", "-m", "init"]);
+
+    let error = validate_trunk_branch_exists(tmp.path(), "mainline")
+        .unwrap_err()
+        .to_string();
+
+    assert!(error.contains("configured trunk_branch `mainline` does not exist"));
+    assert!(error.contains("refs/heads/mainline"));
+    assert!(error.contains("refs/remotes/origin/mainline"));
 }
 
 #[test]

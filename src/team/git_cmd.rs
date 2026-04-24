@@ -264,7 +264,11 @@ pub fn checkout_new_branch(repo: &Path, branch: &str, start: &str) -> Result<(),
 }
 
 pub fn show_ref_exists(repo: &Path, branch: &str) -> Result<bool, GitError> {
-    let ref_name = format!("refs/heads/{branch}");
+    let ref_name = if branch.starts_with("refs/") {
+        branch.to_string()
+    } else {
+        format!("refs/heads/{branch}")
+    };
     let output = run_git_with_status(repo, &["show-ref", "--verify", "--quiet", &ref_name])?;
     match output.status.code() {
         Some(0) => Ok(true),
@@ -552,6 +556,22 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let error = show_ref_exists(tmp.path(), "main").unwrap_err();
         assert!(!error.is_transient());
+    }
+
+    #[test]
+    fn show_ref_exists_accepts_branch_names_and_full_refs() {
+        let tmp = init_repo();
+        let main = run_git(tmp.path(), &["rev-parse", "main"]).unwrap().stdout;
+        let main = main.trim();
+        git_ok(
+            tmp.path(),
+            &["update-ref", "refs/remotes/origin/mainline", main],
+        );
+
+        assert!(show_ref_exists(tmp.path(), "main").unwrap());
+        assert!(show_ref_exists(tmp.path(), "refs/heads/main").unwrap());
+        assert!(show_ref_exists(tmp.path(), "refs/remotes/origin/mainline").unwrap());
+        assert!(!show_ref_exists(tmp.path(), "refs/heads/missing").unwrap());
     }
 
     #[test]

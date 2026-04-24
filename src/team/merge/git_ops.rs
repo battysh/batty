@@ -113,11 +113,6 @@ pub(crate) fn diff_stat_from_trunk(worktree_dir: &Path, trunk_branch: &str) -> R
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
-pub(crate) fn changed_paths_from_main(worktree_dir: &Path) -> Result<Vec<PathBuf>> {
-    changed_paths_from_trunk(worktree_dir, "main")
-}
-
 pub(crate) fn changed_paths_from_trunk(
     worktree_dir: &Path,
     trunk_branch: &str,
@@ -170,11 +165,6 @@ fn is_completion_noise_path(path: &Path) -> bool {
         path.file_name().and_then(|name| name.to_str()),
         Some("AGENTS.md" | "CLAUDE.md")
     )
-}
-
-#[cfg_attr(not(test), allow(dead_code))]
-fn evidence_paths_from_main(worktree_dir: &Path) -> Result<Vec<PathBuf>> {
-    evidence_paths_from_trunk(worktree_dir, "main")
 }
 
 fn evidence_paths_from_trunk(worktree_dir: &Path, trunk_branch: &str) -> Result<Vec<PathBuf>> {
