@@ -615,7 +615,24 @@ pub fn find_task_path_by_id(tasks_dir: &Path, task_id: u32) -> Result<PathBuf> {
         let entry = entry?;
         let path = entry.path();
         if task_id_from_filename(&path) == Some(task_id) {
-            return Ok(path);
+            match Task::from_file(&path) {
+                Ok(task) if task.id == task_id => return Ok(path),
+                Ok(task) => {
+                    tracing::warn!(
+                        path = %path.display(),
+                        filename_task_id = task_id,
+                        frontmatter_task_id = task.id,
+                        "ignoring task file whose filename id disagrees with frontmatter id"
+                    );
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        path = %path.display(),
+                        error = %error,
+                        "ignoring task file whose frontmatter could not be parsed"
+                    );
+                }
+            }
         }
     }
 
@@ -1343,9 +1360,33 @@ Second task description.
         let tasks_dir = tmp.path().join("tasks");
         fs::create_dir_all(&tasks_dir).unwrap();
         let stable = tasks_dir.join("042-stable-path.md");
-        fs::write(&stable, "not valid yaml").unwrap();
+        fs::write(
+            &stable,
+            "---\nid: 42\ntitle: stable path\nstatus: todo\npriority: high\nclass: standard\n---\n\nBody.\n",
+        )
+        .unwrap();
 
         assert_eq!(find_task_path_by_id(&tasks_dir, 42).unwrap(), stable);
+    }
+
+    #[test]
+    fn find_task_path_by_id_does_not_trust_mismatched_filename_prefix() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = tmp.path().join("tasks");
+        fs::create_dir_all(&tasks_dir).unwrap();
+        let drifted = tasks_dir.join("699-drifted.md");
+        fs::write(
+            &drifted,
+            "---\nid: 687\ntitle: drifted\nstatus: review\npriority: high\nclass: standard\n---\n\nBody.\n",
+        )
+        .unwrap();
+
+        let error = find_task_path_by_id(&tasks_dir, 699).unwrap_err();
+
+        assert!(
+            error.to_string().contains("task #699 not found"),
+            "mismatched filename/frontmatter id must not satisfy lookup: {error:#}"
+        );
     }
 
     #[test]

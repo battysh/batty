@@ -1003,10 +1003,14 @@ mod tests {
         fs::create_dir_all(&tasks_dir).unwrap();
         fs::write(
             tasks_dir.join("042-recurring-task.md"),
-            "---\nid: 42\n---\n",
+            "---\nid: 42\ntitle: recurring task\nstatus: todo\npriority: high\nclass: standard\n---\n\nBody.\n",
         )
         .unwrap();
-        fs::write(tasks_dir.join("001-other.md"), "---\nid: 1\n---\n").unwrap();
+        fs::write(
+            tasks_dir.join("001-other.md"),
+            "---\nid: 1\ntitle: other\nstatus: todo\npriority: high\nclass: standard\n---\n\nBody.\n",
+        )
+        .unwrap();
 
         let found = find_task_file(temp.path(), "42");
         assert!(found.is_some());

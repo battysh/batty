@@ -170,6 +170,13 @@ fn persist_verification_snapshot(
         .with_context(|| format!("failed to write {}", absolute_path.display()))?;
 
     let task_path = crate::team::task_cmd::find_task_path(board_dir, task_id)?;
+    crate::team::completion::validate_completion_metadata_target(
+        project_root,
+        &task_path,
+        task_id,
+        None,
+        &[relative_path.to_string_lossy().into_owned()],
+    )?;
     let mut metadata = crate::team::board::read_workflow_metadata(&task_path)?;
     metadata.tests_run = Some(true);
     metadata.tests_passed = Some(verification_run.passed);
@@ -248,6 +255,13 @@ fn record_completion_packet_metadata(
 ) -> Result<()> {
     let task_path = crate::team::task_cmd::find_task_path(board_dir, task_id)
         .with_context(|| format!("failed to locate task #{task_id} for completion metadata"))?;
+    crate::team::completion::validate_completion_metadata_target(
+        project_root,
+        &task_path,
+        task_id,
+        Some(branch),
+        &[],
+    )?;
     let mut metadata = read_workflow_metadata(&task_path)?;
     metadata.branch = Some(branch.to_string());
     metadata.commit = Some(read_worktree_head_commit(worktree_dir)?);
@@ -269,6 +283,38 @@ fn record_completion_packet_metadata(
     write_workflow_metadata(&task_path, &metadata).with_context(|| {
         format!("failed to persist completion packet metadata for task #{task_id}")
     })
+}
+
+fn escalate_completion_metadata_rejection(
+    daemon: &mut TeamDaemon,
+    engineer: &str,
+    task_id: u32,
+    manager_name: Option<&str>,
+    error: &anyhow::Error,
+) -> Result<()> {
+    warn!(
+        engineer,
+        task_id,
+        error = %error,
+        "completion metadata rejected; escalating without writing review metadata"
+    );
+    daemon.record_task_escalated(
+        engineer,
+        task_id.to_string(),
+        Some("completion_metadata_mismatch"),
+    );
+    let message = format!(
+        "[daemon] Completion metadata rejected for {engineer} on task #{task_id}; Batty did not write branch/commit/review metadata because the task id, branch, or artifacts did not agree.\nReason: {error:#}"
+    );
+    if let Some(manager_name) = manager_name {
+        daemon.queue_message("daemon", manager_name, &message)?;
+        daemon.mark_member_working(manager_name);
+    } else {
+        daemon.record_orchestrator_action(message);
+    }
+    daemon.clear_active_task(engineer);
+    daemon.set_member_idle(engineer);
+    Ok(())
 }
 
 fn read_worktree_head_commit(worktree_dir: &Path) -> Result<String> {
@@ -996,12 +1042,14 @@ pub(crate) fn handle_engineer_completion(daemon: &mut TeamDaemon, engineer: &str
                                 true,
                                 Some(verification_run.results.clone()),
                             ) {
-                                warn!(
+                                escalate_completion_metadata_rejection(
+                                    daemon,
                                     engineer,
                                     task_id,
-                                    error = %error,
-                                    "failed to record completion packet metadata for auto-merge"
-                                );
+                                    manager_name.as_deref(),
+                                    &error,
+                                )?;
+                                return Ok(());
                             }
                             info!(
                                 engineer,
@@ -1052,12 +1100,14 @@ pub(crate) fn handle_engineer_completion(daemon: &mut TeamDaemon, engineer: &str
                                 true,
                                 Some(verification_run.results.clone()),
                             ) {
-                                warn!(
+                                escalate_completion_metadata_rejection(
+                                    daemon,
                                     engineer,
                                     task_id,
-                                    error = %error,
-                                    "failed to record completion packet metadata for manual review"
-                                );
+                                    manager_name.as_deref(),
+                                    &error,
+                                )?;
+                                return Ok(());
                             }
                             if let Some(ref manager_name) = manager_name {
                                 let reason_text = decision.reasons.join("; ");
@@ -3301,6 +3351,32 @@ mod tests {
                 && outcome != "verification_escalated",
             "outcome marker should be merge-ready, got {outcome:?}"
         );
+    }
+
+    #[test]
+    fn record_completion_packet_metadata_rejects_branch_task_mismatch_without_writing() {
+        let (_tmp, repo, worktree_dir) = setup_auto_merge_repo("eng-1");
+        let board_dir = repo.join(".batty").join("team_config").join("board");
+        let task_path = board_dir.join("tasks").join("042-auto-merge-task.md");
+
+        let error = record_completion_packet_metadata(
+            &repo,
+            &board_dir,
+            42,
+            "eng-1/task-99",
+            &worktree_dir,
+            true,
+            None,
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("branch `eng-1/task-99` references task(s) #99"));
+        let metadata =
+            crate::team::board::read_workflow_metadata(&task_path).expect("read metadata");
+        assert!(metadata.branch.is_none());
+        assert!(metadata.commit.is_none());
+        assert_eq!(metadata.tests_run, None);
     }
 
     #[test]
