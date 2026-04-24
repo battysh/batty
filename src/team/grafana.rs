@@ -40,6 +40,7 @@ pub const REQUIRED_ALERTS: &[&str] = &[
     "Crash Spike",
     "Dispatch Starvation",
     "Merge Queue Depth",
+    "Non-Engineer Stall SLO",
 ];
 
 const ALERT_RULE_GROUP: &str = "batty-operational-anomalies";
@@ -116,6 +117,18 @@ const ALERT_RULES: &[AlertRuleDefinition] = &[
                       AND e.timestamp >= tm.completed_at \
                 );",
         description: "More than three completed tasks are still waiting for merge or rework.",
+    },
+    AlertRuleDefinition {
+        uid: "batty_non_engineer_stall_slo",
+        title: "Non-Engineer Stall SLO",
+        severity: "warning",
+        window_secs: 15 * 60,
+        for_duration: "2m",
+        threshold: 0.5,
+        sql: "SELECT CASE WHEN COUNT(*) > 0 THEN 1 ELSE 0 END AS value \
+              FROM non_engineer_stall_metrics \
+              WHERE last_seen_at BETWEEN $__from / 1000 AND $__to / 1000;",
+        description: "Architect, manager, or daemon SLO stall pressure was recorded recently.",
     },
 ];
 
@@ -868,7 +881,7 @@ mod tests {
 
     #[test]
     fn dashboard_alert_count_matches_expected() {
-        assert_eq!(REQUIRED_ALERTS.len(), 4);
+        assert_eq!(REQUIRED_ALERTS.len(), ALERT_RULES.len());
     }
 
     #[test]

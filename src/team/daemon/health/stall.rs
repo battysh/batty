@@ -899,7 +899,7 @@ fn modified_within(modified: SystemTime, threshold: Duration) -> bool {
 mod tests {
     use super::super::super::*;
     use super::super::test_helpers::test_team_config;
-    use super::SupervisoryProgress;
+    use super::{SupervisoryLane, SupervisoryProgress};
     use crate::team::config::{
         AutomationConfig, BoardConfig, OrchestratorPosition, RoleType, StandupConfig, TeamConfig,
         WorkflowMode, WorkflowPolicy,
@@ -1197,6 +1197,135 @@ mod tests {
             stall.details.as_deref(),
             Some("architect (architect) stalled after 5m: no actionable progress")
         );
+    }
+
+    #[test]
+    fn manager_review_wait_timeout_is_reported_as_stall_slo() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![
+                architect_member("architect"),
+                manager_member("lead", Some("architect")),
+                engineer_member("eng-1", Some("lead"), false),
+            ])
+            .build();
+        let threshold = daemon
+            .config
+            .team_config
+            .workflow_policy
+            .stall_threshold_secs;
+        insert_working_shim_handle(&mut daemon, "lead", threshold + 10, threshold + 10);
+        let tasks_dir = tmp
+            .path()
+            .join(".batty")
+            .join("team_config")
+            .join("board")
+            .join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+        let old = (Utc::now() - chrono::Duration::seconds((threshold + 10) as i64)).to_rfc3339();
+        std::fs::write(
+            tasks_dir.join("191-review-task.md"),
+            format!(
+                "---\nid: 191\ntitle: review-task\nstatus: review\npriority: high\nclaimed_by: eng-1\nupdated: {old}\nclass: standard\n---\n"
+            ),
+        )
+        .unwrap();
+
+        let signal = daemon.supervisory_progress_signal("lead", threshold);
+        assert_eq!(signal.short_label(), "stale review backlog");
+        assert_eq!(
+            signal.stall_reason_for_lane(SupervisoryLane::Manager),
+            "supervisory_stalled_manager_review_backlog"
+        );
+        assert!(daemon.is_supervisory_lane_stalled("lead", threshold));
+    }
+
+    #[test]
+    fn manager_dispatch_gap_pressure_is_reported_as_stall_slo() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![
+                architect_member("architect"),
+                manager_member("lead", Some("architect")),
+            ])
+            .build();
+        let threshold = daemon
+            .config
+            .team_config
+            .workflow_policy
+            .stall_threshold_secs;
+        insert_working_shim_handle(&mut daemon, "lead", threshold + 10, threshold + 10);
+
+        let inbox_root = inbox::inboxes_root(tmp.path());
+        inbox::init_inbox(&inbox_root, "lead").unwrap();
+        let mut message = InboxMessage::new_send(
+            "daemon",
+            "lead",
+            "Dispatch queue entry failed validation too many times.",
+        );
+        message.timestamp = crate::team::now_unix().saturating_sub(threshold + 10);
+        inbox::deliver_to_inbox(&inbox_root, &message).unwrap();
+
+        let signal = daemon.supervisory_progress_signal("lead", threshold);
+        assert_eq!(signal.short_label(), "stale dispatch gap");
+        assert_eq!(
+            signal.stall_reason_for_lane(SupervisoryLane::Manager),
+            "supervisory_stalled_manager_dispatch_gap"
+        );
+        assert!(daemon.is_supervisory_lane_stalled("lead", threshold));
+    }
+
+    #[test]
+    fn architect_inbox_backlog_pressure_is_reported_as_stall_slo() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![architect_member("architect")])
+            .build();
+        let threshold = daemon
+            .config
+            .team_config
+            .workflow_policy
+            .stall_threshold_secs;
+        insert_working_shim_handle(&mut daemon, "architect", threshold + 10, threshold + 10);
+
+        let inbox_root = inbox::inboxes_root(tmp.path());
+        inbox::init_inbox(&inbox_root, "architect").unwrap();
+        let mut message = InboxMessage::new_send(
+            "manager",
+            "architect",
+            "Triage backlog detected: direct-report packets need routing.",
+        );
+        message.timestamp = crate::team::now_unix().saturating_sub(threshold + 10);
+        inbox::deliver_to_inbox(&inbox_root, &message).unwrap();
+
+        let signal = daemon.supervisory_progress_signal("architect", threshold);
+        assert_eq!(signal.short_label(), "stale direct-report packets");
+        assert_eq!(
+            signal.stall_reason_for_lane(SupervisoryLane::Architect),
+            "supervisory_stalled_architect_direct_report_packets"
+        );
+        assert!(daemon.is_supervisory_lane_stalled("architect", threshold));
+    }
+
+    #[test]
+    fn healthy_non_engineer_roles_produce_no_stall_alert() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = TestDaemonBuilder::new(tmp.path())
+            .members(vec![
+                architect_member("architect"),
+                manager_member("lead", Some("architect")),
+            ])
+            .build();
+        let threshold = daemon
+            .config
+            .team_config
+            .workflow_policy
+            .stall_threshold_secs;
+        insert_working_shim_handle(&mut daemon, "architect", threshold - 1, threshold - 1);
+        insert_working_shim_handle(&mut daemon, "lead", threshold - 1, threshold - 1);
+
+        assert!(!daemon.is_supervisory_lane_stalled("architect", threshold));
+        assert!(!daemon.is_supervisory_lane_stalled("lead", threshold));
     }
 
     #[test]

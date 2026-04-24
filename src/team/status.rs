@@ -1349,26 +1349,23 @@ fn supervisory_status_token(reason: &str, role_label: Option<&str>) -> String {
         Some("manager") => "stall:manager",
         _ => "stall",
     };
-    let detail_token = if reason.ends_with("inbox_batching") {
-        "inbox"
-    } else if reason.ends_with("review_waiting") || reason.ends_with("review_backlog") {
-        "review"
-    } else if reason.ends_with("direct_report_packets") {
-        "triage"
+    let detail_token = supervisory_slo_status_token(reason);
+    format!("{role_token}:{detail_token}")
+}
+
+fn supervisory_slo_status_token(reason: &str) -> &'static str {
+    if reason.ends_with("review_waiting") || reason.ends_with("review_backlog") {
+        "review-wait-timeout"
     } else if reason.ends_with("dispatch_gap") {
-        "dispatch"
-    } else if reason.ends_with("planning_inbox") {
-        "planning"
-    } else if reason.ends_with("shim_activity_only") {
-        "shim"
-    } else if reason.ends_with("status_only_output") {
-        "status"
-    } else if reason.ends_with("no_actionable_progress") {
-        "no-progress"
+        "dispatch-gap-pressure"
+    } else if reason.ends_with("direct_report_packets")
+        || reason.ends_with("inbox_batching")
+        || reason.ends_with("planning_inbox")
+    {
+        "inbox-backlog-pressure"
     } else {
         "working-timeout"
-    };
-    format!("{role_token}:{detail_token}")
+    }
 }
 
 fn supervisory_reason_label(reason: &str) -> &'static str {
@@ -3237,12 +3234,12 @@ mod tests {
             &agent_health,
         );
 
-        assert_eq!(rows[0].health_summary, "stall:architect:no-progress");
+        assert_eq!(rows[0].health_summary, "stall:architect:working-timeout");
         assert_eq!(
             rows[0].signal.as_deref(),
             Some("architect (architect) stalled after 5m: no actionable progress")
         );
-        assert_eq!(rows[1].health_summary, "stall:manager:shim");
+        assert_eq!(rows[1].health_summary, "stall:manager:working-timeout");
         assert_eq!(
             rows[1].signal.as_deref(),
             Some("nudge paused, manager (manager) stalled after 5m: shim activity only")
@@ -3294,7 +3291,7 @@ mod tests {
         );
 
         assert_eq!(rows[0].state, "working");
-        assert_eq!(rows[0].health_summary, "stall:manager:review");
+        assert_eq!(rows[0].health_summary, "stall:manager:review-wait-timeout");
         assert_eq!(
             rows[0].signal.as_deref(),
             Some(
@@ -5045,7 +5042,50 @@ mod tests {
             ..AgentHealthSummary::default()
         });
 
-        assert_eq!(summary, "stall:manager:no-progress");
+        assert_eq!(summary, "stall:manager:working-timeout");
+    }
+
+    #[test]
+    fn format_agent_health_summary_uses_non_engineer_slo_tokens() {
+        let cases = [
+            (
+                "supervisory_stalled_manager_review_backlog",
+                RoleType::Manager,
+                "stall:manager:review-wait-timeout",
+            ),
+            (
+                "supervisory_stalled_manager_dispatch_gap",
+                RoleType::Manager,
+                "stall:manager:dispatch-gap-pressure",
+            ),
+            (
+                "supervisory_stalled_architect_direct_report_packets",
+                RoleType::Architect,
+                "stall:architect:inbox-backlog-pressure",
+            ),
+            (
+                "supervisory_stalled_architect_inbox_batching",
+                RoleType::Architect,
+                "stall:architect:inbox-backlog-pressure",
+            ),
+            (
+                "supervisory_stalled_manager_working_timeout",
+                RoleType::Manager,
+                "stall:manager:working-timeout",
+            ),
+        ];
+
+        for (reason, role_type, expected) in cases {
+            let summary = format_agent_health_summary_for_role(
+                &AgentHealthSummary {
+                    stall_reason: Some(reason.to_string()),
+                    stall_summary: Some("stalled".to_string()),
+                    ..AgentHealthSummary::default()
+                },
+                Some(role_type),
+            );
+            assert_eq!(summary, expected);
+        }
     }
 
     #[test]
@@ -5074,7 +5114,7 @@ mod tests {
             Some(RoleType::Manager),
         );
 
-        assert_eq!(summary, "stall:manager:shim");
+        assert_eq!(summary, "stall:manager:working-timeout");
     }
 
     #[test]

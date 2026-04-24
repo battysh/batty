@@ -263,6 +263,16 @@ fn init_schema(conn: &Connection) -> Result<()> {
             lead_time_mins   INTEGER,
             completed_at     INTEGER NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS non_engineer_stall_metrics (
+            role            TEXT NOT NULL,
+            lane            TEXT NOT NULL,
+            signal          TEXT NOT NULL,
+            count           INTEGER NOT NULL DEFAULT 0,
+            last_seen_at    INTEGER NOT NULL,
+            max_stall_secs  INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (role, signal)
+        );
         ",
     )
     .context("failed to initialize telemetry schema")?;
@@ -636,6 +646,21 @@ fn update_metrics_for_event(conn: &Connection, event: &TeamEvent) -> Result<()> 
                 )?;
             }
         }
+        "stall_detected" => {
+            if let Some(metric) = non_engineer_stall_metric_from_event(event) {
+                upsert_non_engineer_stall_metric(conn, &metric)?;
+            }
+        }
+        "daemon_binary_stale" => {
+            let metric = NonEngineerStallMetricEvent {
+                role: "daemon",
+                lane: "daemon",
+                signal: "stale_daemon_binary_pressure",
+                ts: event.ts,
+                stall_secs: 0,
+            };
+            upsert_non_engineer_stall_metric(conn, &metric)?;
+        }
         "daemon_started" => {
             let session_id = format!("session-{}", event.ts);
             conn.execute(
@@ -695,6 +720,92 @@ fn update_metrics_for_event(conn: &Connection, event: &TeamEvent) -> Result<()> 
         }
         _ => {}
     }
+    Ok(())
+}
+
+struct NonEngineerStallMetricEvent<'a> {
+    role: &'a str,
+    lane: &'a str,
+    signal: &'static str,
+    ts: u64,
+    stall_secs: u64,
+}
+
+fn non_engineer_stall_metric_from_event(
+    event: &TeamEvent,
+) -> Option<NonEngineerStallMetricEvent<'_>> {
+    let reason = event.reason.as_deref()?;
+    let is_supervisory_task = event
+        .task
+        .as_deref()
+        .is_some_and(|task| task.starts_with("supervisory::"));
+    if !is_supervisory_task && !reason.starts_with("supervisory_stalled_") {
+        return None;
+    }
+
+    let lane = if reason.contains("_architect_")
+        || event
+            .task
+            .as_deref()
+            .is_some_and(|task| task == "supervisory::architect")
+    {
+        "architect"
+    } else if reason.contains("_manager_")
+        || event
+            .task
+            .as_deref()
+            .is_some_and(|task| task == "supervisory::manager")
+    {
+        "manager"
+    } else {
+        return None;
+    };
+    let role = event.role.as_deref()?;
+    Some(NonEngineerStallMetricEvent {
+        role,
+        lane,
+        signal: non_engineer_stall_signal(reason),
+        ts: event.ts,
+        stall_secs: event.uptime_secs.unwrap_or_default(),
+    })
+}
+
+fn non_engineer_stall_signal(reason: &str) -> &'static str {
+    if reason.ends_with("review_waiting") || reason.ends_with("review_backlog") {
+        "review_wait_timeout"
+    } else if reason.ends_with("dispatch_gap") {
+        "dispatch_gap_pressure"
+    } else if reason.ends_with("direct_report_packets")
+        || reason.ends_with("inbox_batching")
+        || reason.ends_with("planning_inbox")
+    {
+        "inbox_backlog_pressure"
+    } else {
+        "working_timeout"
+    }
+}
+
+fn upsert_non_engineer_stall_metric(
+    conn: &Connection,
+    metric: &NonEngineerStallMetricEvent<'_>,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO non_engineer_stall_metrics
+            (role, lane, signal, count, last_seen_at, max_stall_secs)
+         VALUES (?1, ?2, ?3, 1, ?4, ?5)
+         ON CONFLICT(role, signal) DO UPDATE SET
+            count = count + 1,
+            lane = excluded.lane,
+            last_seen_at = excluded.last_seen_at,
+            max_stall_secs = MAX(max_stall_secs, excluded.max_stall_secs)",
+        params![
+            metric.role,
+            metric.lane,
+            metric.signal,
+            metric.ts as i64,
+            metric.stall_secs as i64,
+        ],
+    )?;
     Ok(())
 }
 
@@ -861,6 +972,39 @@ pub fn query_task_metrics(conn: &Connection) -> Result<Vec<TaskMetricsRow>> {
                 merge_time_secs: row.get(10)?,
                 confidence_score: row.get(11)?,
                 orphan_reconciliation_branch_mismatch_count: row.get(12)?,
+            })
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NonEngineerStallMetricRow {
+    pub role: String,
+    pub lane: String,
+    pub signal: String,
+    pub count: i64,
+    pub last_seen_at: i64,
+    pub max_stall_secs: i64,
+}
+
+pub fn query_non_engineer_stall_metrics(
+    conn: &Connection,
+) -> Result<Vec<NonEngineerStallMetricRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT role, lane, signal, count, last_seen_at, max_stall_secs
+         FROM non_engineer_stall_metrics
+         ORDER BY last_seen_at DESC, role, signal",
+    )?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(NonEngineerStallMetricRow {
+                role: row.get(0)?,
+                lane: row.get(1)?,
+                signal: row.get(2)?,
+                count: row.get(3)?,
+                last_seen_at: row.get(4)?,
+                max_stall_secs: row.get(5)?,
             })
         })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -1444,6 +1588,85 @@ mod tests {
         let events = query_recent_events(&conn, 10).unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].event_type, "daemon_started");
+    }
+
+    #[test]
+    fn non_engineer_stall_metrics_persist_supervisory_slo_signals() {
+        let conn = open_in_memory().unwrap();
+
+        let mut review = TeamEvent::stall_detected_with_reason(
+            "manager",
+            None,
+            600,
+            Some("supervisory_stalled_manager_review_backlog"),
+        );
+        review.task = Some("supervisory::manager".to_string());
+        review.ts = 2000;
+        insert_event(&conn, &review).unwrap();
+
+        let mut dispatch = TeamEvent::stall_detected_with_reason(
+            "manager",
+            None,
+            420,
+            Some("supervisory_stalled_manager_dispatch_gap"),
+        );
+        dispatch.task = Some("supervisory::manager".to_string());
+        dispatch.ts = 2100;
+        insert_event(&conn, &dispatch).unwrap();
+
+        let mut inbox = TeamEvent::stall_detected_with_reason(
+            "architect",
+            None,
+            300,
+            Some("supervisory_stalled_architect_direct_report_packets"),
+        );
+        inbox.task = Some("supervisory::architect".to_string());
+        inbox.ts = 2200;
+        insert_event(&conn, &inbox).unwrap();
+
+        let mut legacy_inbox = TeamEvent::stall_detected_with_reason(
+            "manager",
+            None,
+            240,
+            Some("supervisory_inbox_batching"),
+        );
+        legacy_inbox.task = Some("supervisory::manager".to_string());
+        legacy_inbox.ts = 2250;
+        insert_event(&conn, &legacy_inbox).unwrap();
+
+        insert_event(
+            &conn,
+            &TeamEvent::daemon_binary_stale(3, "stale daemon", "abc123", 1000, 2200),
+        )
+        .unwrap();
+
+        let rows = query_non_engineer_stall_metrics(&conn).unwrap();
+        assert!(rows.iter().any(|row| {
+            row.role == "manager"
+                && row.lane == "manager"
+                && row.signal == "review_wait_timeout"
+                && row.count == 1
+                && row.max_stall_secs == 600
+        }));
+        assert!(rows.iter().any(|row| {
+            row.role == "manager" && row.lane == "manager" && row.signal == "dispatch_gap_pressure"
+        }));
+        assert!(rows.iter().any(|row| {
+            row.role == "architect"
+                && row.lane == "architect"
+                && row.signal == "inbox_backlog_pressure"
+        }));
+        assert!(rows.iter().any(|row| {
+            row.role == "manager"
+                && row.lane == "manager"
+                && row.signal == "inbox_backlog_pressure"
+                && row.max_stall_secs == 240
+        }));
+        assert!(rows.iter().any(|row| {
+            row.role == "daemon"
+                && row.lane == "daemon"
+                && row.signal == "stale_daemon_binary_pressure"
+        }));
     }
 
     #[test]
