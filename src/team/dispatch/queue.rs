@@ -624,6 +624,9 @@ impl TeamDaemon {
         task: &crate::task::Task,
         allow_peer_pickup: bool,
     ) -> bool {
+        if matches!(task.status.as_str(), "done" | "archived") {
+            return false;
+        }
         if verification_retry_required_metadata(task).is_none() {
             return false;
         }

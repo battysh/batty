@@ -1968,6 +1968,56 @@ fn dispatch_queue_prefers_original_owner_for_verification_retry_rework() {
 }
 
 #[test]
+fn dispatch_queue_ignores_done_verification_retry_metadata() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_task_file(
+        tmp.path(),
+        "042-done-retry.md",
+        "---\nid: 42\ntitle: done retry metadata\nstatus: done\npriority: high\nclaimed_by: eng-1\nclass: standard\ntests_passed: false\noutcome: verification_retry_required\nartifacts:\n  - artifacts/retry-42.log\n---\n\nAlready merged.\n",
+    );
+    write_open_task_file(tmp.path(), 101, "normal-work", "todo");
+
+    let members = vec![
+        manager_member("manager", None),
+        engineer_member("eng-1", Some("manager"), false),
+        engineer_member("eng-2", Some("manager"), false),
+    ];
+    let mut daemon = TestDaemonBuilder::new(tmp.path())
+        .members(members)
+        .workflow_policy(WorkflowPolicy {
+            allocation: AllocationPolicy {
+                strategy: AllocationStrategy::RoundRobin,
+                ..AllocationPolicy::default()
+            },
+            ..WorkflowPolicy::default()
+        })
+        .board(BoardConfig {
+            auto_dispatch: true,
+            dispatch_stabilization_delay_secs: 0,
+            ..BoardConfig::default()
+        })
+        .states(HashMap::from([
+            ("eng-1".to_string(), MemberState::Idle),
+            ("eng-2".to_string(), MemberState::Idle),
+        ]))
+        .build();
+    daemon.last_auto_dispatch = Instant::now() - Duration::from_secs(30);
+    daemon.idle_started_at.insert(
+        "eng-1".to_string(),
+        Instant::now() - Duration::from_secs(60),
+    );
+    daemon.idle_started_at.insert(
+        "eng-2".to_string(),
+        Instant::now() - Duration::from_secs(60),
+    );
+
+    daemon.enqueue_dispatch_candidates().unwrap();
+
+    assert_eq!(daemon.dispatch_queue.len(), 1);
+    assert_eq!(daemon.dispatch_queue[0].task_id, 101);
+}
+
+#[test]
 fn dispatch_queue_sends_idle_peer_to_normal_work_before_retry_rework() {
     let tmp = tempfile::tempdir().unwrap();
     write_task_file(
