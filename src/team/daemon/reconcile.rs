@@ -295,9 +295,12 @@ impl TeamDaemon {
             return Ok(());
         }
         if self.removed_member_still_owns_board_work(name)? {
-            warn!(
-                member = name,
-                "skipping removed member worktree cleanup because board still claims work for member"
+            self.warn_removed_member_cleanup_refusal(
+                "board-claims-work",
+                name,
+                &worktree_dir,
+                None,
+                "skipping removed member worktree cleanup because board still claims work for member",
             );
             return Ok(());
         }
@@ -374,20 +377,23 @@ impl TeamDaemon {
 
         if worktree_dir.exists() {
             let current_branch = current_worktree_branch(worktree_dir)?;
-            if !removed_member_owns_branch(name, &current_branch) {
-                warn!(
-                    member = name,
-                    worktree = %worktree_dir.display(),
-                    branch = %current_branch,
-                    "skipping removed member worktree cleanup because branch is outside member namespace"
+            if !removed_member_owns_worktree_branch(name, &current_branch) {
+                self.warn_removed_member_cleanup_refusal(
+                    "outside-namespace",
+                    name,
+                    worktree_dir,
+                    Some(&current_branch),
+                    "skipping removed member worktree cleanup because branch is outside member namespace",
                 );
                 return Ok(());
             }
             if crate::team::task_loop::worktree_has_user_changes(worktree_dir)? {
-                warn!(
-                    member = name,
-                    worktree = %worktree_dir.display(),
-                    "skipping removed member worktree cleanup because worktree has uncommitted changes"
+                self.warn_removed_member_cleanup_refusal(
+                    "dirty-worktree",
+                    name,
+                    worktree_dir,
+                    Some(&current_branch),
+                    "skipping removed member worktree cleanup because worktree has uncommitted changes; commit, stash, or clear the worktree before cleanup",
                 );
                 return Ok(());
             }
@@ -414,6 +420,48 @@ impl TeamDaemon {
             "topology: cleaned removed member worktree state for {name}"
         ));
         Ok(())
+    }
+
+    fn warn_removed_member_cleanup_refusal(
+        &mut self,
+        reason: &str,
+        name: &str,
+        worktree_dir: &Path,
+        branch: Option<&str>,
+        message: &str,
+    ) {
+        let key = removed_member_cleanup_refusal_key(reason, name, worktree_dir, branch);
+        let cooldown = Duration::from_secs(
+            self.config
+                .team_config
+                .automation
+                .intervention_cooldown_secs,
+        );
+        if cooldown > Duration::ZERO
+            && self
+                .intervention_cooldowns
+                .get(&key)
+                .is_some_and(|last| last.elapsed() < cooldown)
+        {
+            return;
+        }
+
+        match branch {
+            Some(branch) => warn!(
+                member = name,
+                worktree = %worktree_dir.display(),
+                branch = %branch,
+                "{message}"
+            ),
+            None => warn!(
+                member = name,
+                worktree = %worktree_dir.display(),
+                "{message}"
+            ),
+        }
+        if cooldown > Duration::ZERO {
+            self.intervention_cooldowns.insert(key, Instant::now());
+        }
     }
 
     fn requeue_removed_member_tasks(&mut self, name: &str) -> Result<()> {
@@ -527,6 +575,44 @@ fn removed_member_owns_branch(name: &str, branch: &str) -> bool {
             .is_some_and(|suffix| suffix.starts_with('/'))
 }
 
+fn removed_member_owns_worktree_branch(name: &str, branch: &str) -> bool {
+    removed_member_owns_branch(name, branch)
+        || transient_removed_member_owner(name)
+            .is_some_and(|owner| removed_member_owns_branch(owner, branch))
+}
+
+fn transient_removed_member_owner(name: &str) -> Option<&str> {
+    if let Some((owner, task_id)) = name.rsplit_once("-task")
+        && !owner.is_empty()
+        && !task_id.is_empty()
+        && task_id.chars().all(|ch| ch.is_ascii_digit())
+    {
+        return Some(owner);
+    }
+
+    let Some(stem) = name.strip_suffix("-fix") else {
+        return None;
+    };
+    let (owner, task_id) = stem.rsplit_once('-')?;
+    if owner.is_empty() || task_id.is_empty() || !task_id.chars().all(|ch| ch.is_ascii_digit()) {
+        return None;
+    }
+    Some(owner)
+}
+
+fn removed_member_cleanup_refusal_key(
+    reason: &str,
+    name: &str,
+    worktree_dir: &Path,
+    branch: Option<&str>,
+) -> String {
+    format!(
+        "removed-member-worktree-cleanup::{reason}::{name}::{}::{}",
+        worktree_dir.display(),
+        branch.unwrap_or("")
+    )
+}
+
 fn cleanup_removed_member_branch(repo_root: &Path, name: &str, branch: &str) -> Result<()> {
     if !git_cmd::show_ref_exists(repo_root, branch).map_err(|error| {
         anyhow::anyhow!("failed to check branch '{branch}' before cleanup: {error}")
@@ -578,11 +664,14 @@ fn archived_removed_member_branch_name(repo_root: &Path, branch: &str) -> Result
 mod tests {
     use std::collections::HashMap;
 
+    use super::{removed_member_owns_worktree_branch, transient_removed_member_owner};
     use crate::team::config::RoleType;
     use crate::team::config_diff::{MemberChange, TopologyDiff};
     use crate::team::hierarchy::MemberInstance;
     use crate::team::test_helpers::make_test_daemon;
-    use crate::team::test_support::{engineer_member, write_board_task_file};
+    use crate::team::test_support::{
+        engineer_member, git_ok, git_stdout, init_git_repo, write_board_task_file,
+    };
 
     fn make_member(name: &str, role_type: RoleType) -> MemberInstance {
         MemberInstance {
@@ -777,5 +866,158 @@ mod tests {
         .unwrap();
         assert_eq!(task.status, "todo");
         assert_eq!(task.claimed_by, None);
+    }
+
+    #[test]
+    fn transient_removed_member_owner_parses_task_and_fix_worktree_names() {
+        assert_eq!(
+            transient_removed_member_owner("eng-1-3-task718"),
+            Some("eng-1-3")
+        );
+        assert_eq!(
+            transient_removed_member_owner("eng-1-3-726-fix"),
+            Some("eng-1-3")
+        );
+        assert_eq!(transient_removed_member_owner("eng-1-3"), None);
+        assert_eq!(transient_removed_member_owner("eng-1-3-task"), None);
+        assert_eq!(transient_removed_member_owner("eng-1-3-fixabc"), None);
+    }
+
+    #[test]
+    fn removed_member_owns_worktree_branch_accepts_transient_owner_namespace() {
+        assert!(removed_member_owns_worktree_branch(
+            "eng-1-3-task718",
+            "eng-1-3/718"
+        ));
+        assert!(removed_member_owns_worktree_branch(
+            "eng-1-3-726-fix",
+            "eng-1-3/726-fix"
+        ));
+        assert!(!removed_member_owns_worktree_branch(
+            "eng-1-3-task718",
+            "eng-1-4/718"
+        ));
+    }
+
+    #[test]
+    fn cleanup_removed_member_worktree_removes_clean_transient_worktree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "removed-transient-clean");
+        let worktree_dir = repo
+            .join(".batty")
+            .join("worktrees")
+            .join("eng-1-3-task718");
+        git_ok(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "eng-1-3/718",
+                worktree_dir.to_str().unwrap(),
+                "main",
+            ],
+        );
+        let mut daemon = make_test_daemon(&repo, vec![]);
+
+        daemon
+            .cleanup_removed_member_worktree("eng-1-3-task718")
+            .unwrap();
+
+        assert!(
+            !worktree_dir.exists(),
+            "clean transient worktree should be removed"
+        );
+        assert_eq!(
+            git_stdout(&repo, &["branch", "--list", "eng-1-3/718"]),
+            "",
+            "merged transient branch should be deleted"
+        );
+    }
+
+    #[test]
+    fn cleanup_removed_member_worktree_preserves_dirty_transient_worktree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "removed-transient-dirty");
+        let worktree_dir = repo
+            .join(".batty")
+            .join("worktrees")
+            .join("eng-1-3-726-fix");
+        git_ok(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "eng-1-3/726-fix",
+                worktree_dir.to_str().unwrap(),
+                "main",
+            ],
+        );
+        std::fs::write(worktree_dir.join("wip.txt"), "keep me\n").unwrap();
+        let mut daemon = make_test_daemon(&repo, vec![]);
+
+        daemon
+            .cleanup_removed_member_worktree("eng-1-3-726-fix")
+            .unwrap();
+
+        assert!(
+            worktree_dir.exists(),
+            "dirty transient worktree must be preserved"
+        );
+        assert!(
+            worktree_dir.join("wip.txt").exists(),
+            "dirty worktree contents must remain in place"
+        );
+        assert!(
+            daemon
+                .intervention_cooldowns
+                .keys()
+                .any(|key| key.starts_with("removed-member-worktree-cleanup::dirty-worktree::")),
+            "dirty preservation should record a cleanup refusal cooldown"
+        );
+    }
+
+    #[test]
+    fn cleanup_removed_member_worktree_dedupes_repeated_refusal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "removed-transient-dedupe");
+        let worktree_dir = repo
+            .join(".batty")
+            .join("worktrees")
+            .join("eng-1-3-task718");
+        git_ok(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "eng-1-4/718",
+                worktree_dir.to_str().unwrap(),
+                "main",
+            ],
+        );
+        let mut daemon = make_test_daemon(&repo, vec![]);
+
+        daemon
+            .cleanup_removed_member_worktree("eng-1-3-task718")
+            .unwrap();
+        daemon
+            .cleanup_removed_member_worktree("eng-1-3-task718")
+            .unwrap();
+
+        assert!(
+            worktree_dir.exists(),
+            "outside-namespace worktree should not be removed"
+        );
+        let refusal_keys = daemon
+            .intervention_cooldowns
+            .keys()
+            .filter(|key| key.starts_with("removed-member-worktree-cleanup::outside-namespace::"))
+            .count();
+        assert_eq!(
+            refusal_keys, 1,
+            "repeated cleanup refusal should keep one cooldown entry"
+        );
     }
 }
