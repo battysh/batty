@@ -6412,6 +6412,37 @@ mod tests {
         assert_eq!(metrics.blocked_count, 1);
     }
 
+    #[test]
+    fn compute_metrics_excludes_done_verification_retry_from_runnable_count() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        write_board_task(
+            tmp.path(),
+            "695-done-retry-a.md",
+            "id: 695\ntitle: Done retry A\nstatus: done\npriority: high\ntests_passed: false\noutcome: verification_retry_required\nartifacts:\n  - artifacts/retry-695.json\n",
+        );
+        write_board_task(
+            tmp.path(),
+            "701-done-retry-b.md",
+            "id: 701\ntitle: Done retry B\nstatus: done\npriority: high\ntests_passed: false\noutcome: verification_retry_required\nartifacts:\n  - artifacts/retry-701.json\n",
+        );
+        write_board_task(
+            tmp.path(),
+            "742-done-retry-c.md",
+            "id: 742\ntitle: Done retry C\nstatus: done\npriority: high\ntests_passed: false\noutcome: verification_retry_required\nartifacts:\n  - artifacts/retry-742.json\n",
+        );
+        write_board_task(
+            tmp.path(),
+            "900-open-retry.md",
+            "id: 900\ntitle: Open retry\nstatus: todo\npriority: high\ntests_passed: false\noutcome: verification_retry_required\nartifacts:\n  - artifacts/retry-900.json\n",
+        );
+
+        let metrics = compute_metrics(&board_dir(tmp.path()), &[engineer("eng-1")]).unwrap();
+
+        assert_eq!(metrics.runnable_count, 1);
+        assert_eq!(metrics.top_runnable_tasks, vec!["#900 (high) Open retry"]);
+    }
+
     /// Regression for #618: when a supervisor has actionable backlog
     /// (`needs review` / `needs triage`), generic stall text must be
     /// suppressed so operators see the actionable reason first.

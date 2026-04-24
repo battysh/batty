@@ -115,6 +115,9 @@ pub fn dispatchable_tasks(board_dir: &Path) -> Result<Vec<Task>> {
 }
 
 pub fn is_dispatchable_task(task: &Task, done: &HashSet<u32>) -> bool {
+    if matches!(task.status.as_str(), "done" | "archived") {
+        return false;
+    }
     let metadata = load_workflow_metadata(task).unwrap_or_default();
     let retry_required = verification_retry_required(&metadata);
     if !matches!(task.status.as_str(), "todo" | "backlog" | "runnable") && !retry_required {
@@ -127,6 +130,9 @@ pub fn is_dispatchable_task(task: &Task, done: &HashSet<u32>) -> bool {
 }
 
 pub fn dispatch_blocking_reason(task: &Task, tasks: &[Task]) -> Option<String> {
+    if matches!(task.status.as_str(), "done" | "archived") {
+        return Some(format!("status {} is not dispatchable", task.status));
+    }
     let metadata = load_workflow_metadata(task).unwrap_or_default();
     let retry_required = verification_retry_required(&metadata);
     if !matches!(task.status.as_str(), "todo" | "backlog" | "runnable") && !retry_required {
@@ -626,6 +632,36 @@ roles:
 
         let resolutions = resolve_board(tmp.path(), &solo_members()).unwrap();
         assert!(resolutions.is_empty());
+    }
+
+    #[test]
+    fn done_verification_retry_metadata_is_not_dispatchable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = tmp.path().join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+        write_task(
+            &tasks_dir,
+            1,
+            "status: done\ntests_passed: false\noutcome: verification_retry_required\nartifacts:\n  - artifacts/retry-1.json\n",
+        );
+        write_task(
+            &tasks_dir,
+            2,
+            "status: todo\ntests_passed: false\noutcome: verification_retry_required\nartifacts:\n  - artifacts/retry-2.json\n",
+        );
+
+        let dispatchable = dispatchable_tasks(tmp.path()).unwrap();
+        assert_eq!(
+            dispatchable.iter().map(|task| task.id).collect::<Vec<_>>(),
+            vec![2]
+        );
+
+        let tasks = load_tasks_from_dir(&tasks_dir).unwrap();
+        let done_task = tasks.iter().find(|task| task.id == 1).unwrap();
+        assert_eq!(
+            dispatch_blocking_reason(done_task, &tasks).as_deref(),
+            Some("status done is not dispatchable")
+        );
     }
 
     // --- dependency resolution ---
