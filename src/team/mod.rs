@@ -11,6 +11,8 @@ pub mod auto_merge;
 mod behavioral_tests;
 pub mod bench;
 pub mod board;
+#[allow(dead_code)]
+pub mod board_reconciliation;
 #[cfg(test)]
 mod smoke_tests;
 // -- Decomposed submodules --

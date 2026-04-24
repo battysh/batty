@@ -92,26 +92,26 @@ pub(crate) struct ReconciliationReport {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum AppliedFix {
-    RequeuedReviewTask {
+    RequeuedReview {
         task_id: u32,
         title: String,
         reasons: Vec<String>,
     },
-    CompletedMergedReviewTask {
+    CompletedMergedReview {
         task_id: u32,
         title: String,
         reason: String,
     },
-    UnblockedTask {
+    Unblocked {
         task_id: u32,
         title: String,
     },
-    RequeuedOrphanedTask {
+    RequeuedOrphaned {
         task_id: u32,
         title: String,
         owner: Option<String>,
     },
-    ArchivedDoneTask {
+    ArchivedDone {
         task_id: u32,
         title: String,
     },
@@ -140,8 +140,10 @@ pub(crate) fn scan_board_health(
         .map(|task| task.id)
         .collect();
 
-    let archive_candidates = archive_candidate_ids(board_dir, options.done_task_archive_after_secs)?;
-    let archive_candidate_ids: HashSet<u32> = archive_candidates.iter().map(|task| task.id).collect();
+    let archive_candidates =
+        archive_candidate_ids(board_dir, options.done_task_archive_after_secs)?;
+    let archive_candidate_ids: HashSet<u32> =
+        archive_candidates.iter().map(|task| task.id).collect();
 
     for task in &tasks {
         if task.status == "review" {
@@ -200,7 +202,9 @@ pub(crate) fn scan_board_health(
             });
         }
 
-        if task.status == "in-progress" && is_orphaned_in_progress_task(task, options.active_members.as_ref()) {
+        if task.status == "in-progress"
+            && is_orphaned_in_progress_task(task, options.active_members.as_ref())
+        {
             findings.push(BoardFinding::OrphanedInProgressTask {
                 task_id: task.id,
                 title: task.title.clone(),
@@ -220,9 +224,7 @@ pub(crate) fn scan_board_health(
             });
         }
 
-        if task.status == "done"
-            && archive_candidate_ids.contains(&task.id)
-        {
+        if task.status == "done" && archive_candidate_ids.contains(&task.id) {
             findings.push(BoardFinding::DoneTaskReadyToArchive {
                 task_id: task.id,
                 title: task.title.clone(),
@@ -272,7 +274,10 @@ pub(crate) fn scan_board_health(
     })
 }
 
-pub(crate) fn apply_safe_fixes(board_dir: &Path, report: &ReconciliationReport) -> Result<ApplyReport> {
+pub(crate) fn apply_safe_fixes(
+    board_dir: &Path,
+    report: &ReconciliationReport,
+) -> Result<ApplyReport> {
     let mut fixes = Vec::new();
     let tasks_dir = board_dir.join("tasks");
     let current_tasks = if tasks_dir.is_dir() {
@@ -297,7 +302,7 @@ pub(crate) fn apply_safe_fixes(board_dir: &Path, report: &ReconciliationReport) 
         let summary = crate::team::board::archive_tasks(board_dir, &to_archive, false)?;
         if summary.archived_count > 0 {
             for task in &to_archive {
-                fixes.push(AppliedFix::ArchivedDoneTask {
+                fixes.push(AppliedFix::ArchivedDone {
                     task_id: task.id,
                     title: task.title.clone(),
                 });
@@ -321,7 +326,7 @@ pub(crate) fn apply_safe_fixes(board_dir: &Path, report: &ReconciliationReport) 
                             "daemon.board_reconciliation.already_merged",
                         ),
                     )?;
-                    fixes.push(AppliedFix::CompletedMergedReviewTask {
+                    fixes.push(AppliedFix::CompletedMergedReview {
                         task_id: *task_id,
                         title: title.clone(),
                         reason: reason.clone(),
@@ -351,7 +356,7 @@ pub(crate) fn apply_safe_fixes(board_dir: &Path, report: &ReconciliationReport) 
                         ),
                     )?;
                     crate::team::task_cmd::unclaim_task(board_dir, *task_id)?;
-                    fixes.push(AppliedFix::RequeuedReviewTask {
+                    fixes.push(AppliedFix::RequeuedReview {
                         task_id: *task_id,
                         title: title.clone(),
                         reasons: reasons.clone(),
@@ -360,8 +365,7 @@ pub(crate) fn apply_safe_fixes(board_dir: &Path, report: &ReconciliationReport) 
             }
             BoardFinding::BlockedTaskResolved { task_id, title, .. } => {
                 if crate::team::task_cmd::find_task_path(board_dir, *task_id).is_ok() {
-                    let current_task =
-                        crate::task::load_task_by_id(&tasks_dir, *task_id)?;
+                    let current_task = crate::task::load_task_by_id(&tasks_dir, *task_id)?;
                     if current_task.status == "blocked" {
                         crate::team::task_cmd::transition_task_with_attribution(
                             board_dir,
@@ -374,7 +378,7 @@ pub(crate) fn apply_safe_fixes(board_dir: &Path, report: &ReconciliationReport) 
                     } else {
                         crate::team::task_cmd::clear_blocked_fields(board_dir, *task_id)?;
                     }
-                    fixes.push(AppliedFix::UnblockedTask {
+                    fixes.push(AppliedFix::Unblocked {
                         task_id: *task_id,
                         title: title.clone(),
                     });
@@ -395,7 +399,7 @@ pub(crate) fn apply_safe_fixes(board_dir: &Path, report: &ReconciliationReport) 
                         ),
                     )?;
                     crate::team::task_cmd::unclaim_task(board_dir, *task_id)?;
-                    fixes.push(AppliedFix::RequeuedOrphanedTask {
+                    fixes.push(AppliedFix::RequeuedOrphaned {
                         task_id: *task_id,
                         title: title.clone(),
                         owner: owner.clone(),
@@ -522,10 +526,10 @@ pub(crate) fn render_apply_report(report: &ApplyReport) -> String {
     out.push_str("Applied board reconciliation fixes:\n");
     for fix in &report.fixes {
         match fix {
-            AppliedFix::UnblockedTask { task_id, title } => {
+            AppliedFix::Unblocked { task_id, title } => {
                 out.push_str(&format!("  - unblocked task #{task_id} ({title})\n"));
             }
-            AppliedFix::RequeuedOrphanedTask {
+            AppliedFix::RequeuedOrphaned {
                 task_id,
                 title,
                 owner,
@@ -535,10 +539,10 @@ pub(crate) fn render_apply_report(report: &ApplyReport) -> String {
                     owner.as_deref().unwrap_or("unclaimed state")
                 ));
             }
-            AppliedFix::ArchivedDoneTask { task_id, title } => {
+            AppliedFix::ArchivedDone { task_id, title } => {
                 out.push_str(&format!("  - archived task #{task_id} ({title})\n"));
             }
-            AppliedFix::CompletedMergedReviewTask {
+            AppliedFix::CompletedMergedReview {
                 task_id,
                 title,
                 reason,
@@ -547,7 +551,7 @@ pub(crate) fn render_apply_report(report: &ApplyReport) -> String {
                     "  - completed merged review task #{task_id} ({title}): {reason}\n"
                 ));
             }
-            AppliedFix::RequeuedReviewTask {
+            AppliedFix::RequeuedReview {
                 task_id,
                 title,
                 reasons,
@@ -566,10 +570,7 @@ fn archive_candidate_ids(board_dir: &Path, threshold_secs: u64) -> Result<Vec<Ta
     crate::team::board::done_tasks_older_than(board_dir, Duration::from_secs(threshold_secs))
 }
 
-fn is_orphaned_in_progress_task(
-    task: &Task,
-    active_members: Option<&HashSet<String>>,
-) -> bool {
+fn is_orphaned_in_progress_task(task: &Task, active_members: Option<&HashSet<String>>) -> bool {
     match task.claimed_by.as_deref() {
         None => true,
         Some(owner) => active_members.is_some_and(|active| !active.contains(owner)),
@@ -600,14 +601,22 @@ fn commits_ahead_of_main(project_root: &Path, task: &Task, git_available: bool) 
 }
 
 fn task_age_secs(task: &Task, now: DateTime<Utc>) -> u64 {
+    let frontmatter_timestamp = task
+        .last_progress_at
+        .as_deref()
+        .or(task.claimed_at.as_deref())
+        .or(task.completed.as_deref())
+        .and_then(crate::task::parse_frontmatter_timestamp_compat);
+    if let Some(timestamp) = frontmatter_timestamp {
+        return now.signed_duration_since(timestamp).num_seconds().max(0) as u64;
+    }
+
     std::fs::metadata(&task.source_path)
         .and_then(|metadata| metadata.modified())
         .ok()
         .map(|mtime| {
             let modified_at: DateTime<Utc> = mtime.into();
-            now.signed_duration_since(modified_at)
-                .num_seconds()
-                .max(0) as u64
+            now.signed_duration_since(modified_at).num_seconds().max(0) as u64
         })
         .unwrap_or(0)
 }
@@ -642,7 +651,11 @@ mod tests {
         worktree_path: Option<&Path>,
         completed: Option<&str>,
     ) {
-        let tasks_dir = project_root.join(".batty").join("team_config").join("board").join("tasks");
+        let tasks_dir = project_root
+            .join(".batty")
+            .join("team_config")
+            .join("board")
+            .join("tasks");
         fs::create_dir_all(&tasks_dir).unwrap();
         let depends = if depends_on.is_empty() {
             "depends_on: []\n".to_string()
@@ -659,8 +672,17 @@ mod tests {
         let claimed_by = claimed_by
             .map(|owner| format!("claimed_by: {owner}\n"))
             .unwrap_or_default();
-        let branch = branch.map(|value| format!("branch: {value}\n")).unwrap_or_default();
-        let commit = commit.map(|value| format!("commit: {value}\n")).unwrap_or_default();
+        let progress_timestamps = if claimed_by.is_empty() {
+            String::new()
+        } else {
+            "claimed_at: 2026-04-06T09:00:00Z\nlast_progress_at: 2026-04-06T09:00:00Z\n".to_string()
+        };
+        let branch = branch
+            .map(|value| format!("branch: {value}\n"))
+            .unwrap_or_default();
+        let commit = commit
+            .map(|value| format!("commit: {value}\n"))
+            .unwrap_or_default();
         let worktree_path = worktree_path
             .map(|path| format!("worktree_path: {}\n", path.display()))
             .unwrap_or_default();
@@ -670,7 +692,7 @@ mod tests {
         fs::write(
             tasks_dir.join(format!("{id:03}-{title}.md")),
             format!(
-                "---\nid: {id}\ntitle: {title}\nstatus: {status}\npriority: high\n{claimed_by}{depends}{branch}{commit}{worktree_path}{completed}---\n\nTask body.\n"
+                "---\nid: {id}\ntitle: {title}\nstatus: {status}\npriority: high\n{claimed_by}{progress_timestamps}{depends}{branch}{commit}{worktree_path}{completed}---\n\nTask body.\n"
             ),
         )
         .unwrap();
@@ -681,7 +703,18 @@ mod tests {
         let tmp = tempdir().unwrap();
         let repo = init_git_repo(&tmp, "reconcile_blocked");
         write_task(&repo, 1, "dep", "done", None, &[], None, None, None, None);
-        write_task(&repo, 2, "blocked", "blocked", None, &[1], None, None, None, None);
+        write_task(
+            &repo,
+            2,
+            "blocked",
+            "blocked",
+            None,
+            &[1],
+            None,
+            None,
+            None,
+            None,
+        );
 
         let report = scan_board_health(
             &repo,
@@ -690,10 +723,10 @@ mod tests {
         )
         .unwrap();
 
-        assert!(report
-            .findings
-            .iter()
-            .any(|finding| matches!(finding, BoardFinding::BlockedTaskResolved { task_id: 2, .. })));
+        assert!(report.findings.iter().any(|finding| matches!(
+            finding,
+            BoardFinding::BlockedTaskResolved { task_id: 2, .. }
+        )));
     }
 
     #[test]
@@ -845,10 +878,12 @@ mod tests {
         )
         .unwrap();
 
-        assert!(report.findings.iter().any(|finding| matches!(
-            finding,
-            BoardFinding::StuckTaskNoCommits { task_id: 9, .. }
-        )));
+        assert!(
+            report.findings.iter().any(|finding| matches!(
+                finding,
+                BoardFinding::StuckTaskNoCommits { task_id: 9, .. }
+            ))
+        );
     }
 
     #[test]
@@ -894,7 +929,11 @@ mod tests {
         let board_dir = repo.join(".batty").join("team_config").join("board");
 
         git_ok(&repo, &["checkout", "-b", "eng-1/task-12"]);
-        fs::write(repo.join("src").join("reviewed.rs"), "pub fn reviewed() {}\n").unwrap();
+        fs::write(
+            repo.join("src").join("reviewed.rs"),
+            "pub fn reviewed() {}\n",
+        )
+        .unwrap();
         git_ok(&repo, &["add", "."]);
         git_ok(&repo, &["commit", "-m", "review candidate"]);
         let commit = String::from_utf8(
@@ -909,7 +948,16 @@ mod tests {
         .trim()
         .to_string();
         git_ok(&repo, &["checkout", "main"]);
-        git_ok(&repo, &["merge", "--no-ff", "eng-1/task-12", "-m", "merge review candidate"]);
+        git_ok(
+            &repo,
+            &[
+                "merge",
+                "--no-ff",
+                "eng-1/task-12",
+                "-m",
+                "merge review candidate",
+            ],
+        );
 
         write_task(
             &repo,
@@ -924,20 +972,26 @@ mod tests {
             None,
         );
 
-        let report = scan_board_health(&repo, &board_dir, &ReconciliationOptions::default()).unwrap();
+        let report =
+            scan_board_health(&repo, &board_dir, &ReconciliationOptions::default()).unwrap();
         assert!(report.findings.iter().any(|finding| matches!(
             finding,
             BoardFinding::ReviewTaskAlreadyMerged { task_id: 12, .. }
         )));
 
         let applied = apply_safe_fixes(&board_dir, &report).unwrap();
-        assert!(applied.fixes.iter().any(|fix| matches!(
-            fix,
-            AppliedFix::CompletedMergedReviewTask { task_id: 12, .. }
-        )));
+        assert!(
+            applied
+                .fixes
+                .iter()
+                .any(|fix| matches!(fix, AppliedFix::CompletedMergedReview { task_id: 12, .. }))
+        );
 
         let tasks = load_tasks_from_dir(&board_dir.join("tasks")).unwrap();
-        assert_eq!(tasks.iter().find(|task| task.id == 12).unwrap().status, "done");
+        assert_eq!(
+            tasks.iter().find(|task| task.id == 12).unwrap().status,
+            "done"
+        );
     }
 
     #[test]
@@ -959,17 +1013,20 @@ mod tests {
             None,
         );
 
-        let report = scan_board_health(&repo, &board_dir, &ReconciliationOptions::default()).unwrap();
+        let report =
+            scan_board_health(&repo, &board_dir, &ReconciliationOptions::default()).unwrap();
         assert!(report.findings.iter().any(|finding| matches!(
             finding,
             BoardFinding::ReviewTaskMissingMetadata { task_id: 13, .. }
         )));
 
         let applied = apply_safe_fixes(&board_dir, &report).unwrap();
-        assert!(applied.fixes.iter().any(|fix| matches!(
-            fix,
-            AppliedFix::RequeuedReviewTask { task_id: 13, .. }
-        )));
+        assert!(
+            applied
+                .fixes
+                .iter()
+                .any(|fix| matches!(fix, AppliedFix::RequeuedReview { task_id: 13, .. }))
+        );
 
         let tasks = load_tasks_from_dir(&board_dir.join("tasks")).unwrap();
         let task = tasks.iter().find(|task| task.id == 13).unwrap();
@@ -984,7 +1041,18 @@ mod tests {
         let repo = init_git_repo(&tmp, "reconcile_apply");
         let board_dir = repo.join(".batty").join("team_config").join("board");
         write_task(&repo, 1, "dep", "done", None, &[], None, None, None, None);
-        write_task(&repo, 2, "blocked", "blocked", None, &[1], None, None, None, None);
+        write_task(
+            &repo,
+            2,
+            "blocked",
+            "blocked",
+            None,
+            &[1],
+            None,
+            None,
+            None,
+            None,
+        );
         write_task(
             &repo,
             3,
@@ -1025,18 +1093,24 @@ mod tests {
         .unwrap();
         let applied = apply_safe_fixes(&board_dir, &report).unwrap();
 
-        assert!(applied
-            .fixes
-            .iter()
-            .any(|fix| matches!(fix, AppliedFix::UnblockedTask { task_id: 2, .. })));
-        assert!(applied
-            .fixes
-            .iter()
-            .any(|fix| matches!(fix, AppliedFix::RequeuedOrphanedTask { task_id: 3, .. })));
-        assert!(applied
-            .fixes
-            .iter()
-            .any(|fix| matches!(fix, AppliedFix::ArchivedDoneTask { task_id: 4, .. })));
+        assert!(
+            applied
+                .fixes
+                .iter()
+                .any(|fix| matches!(fix, AppliedFix::Unblocked { task_id: 2, .. }))
+        );
+        assert!(
+            applied
+                .fixes
+                .iter()
+                .any(|fix| matches!(fix, AppliedFix::RequeuedOrphaned { task_id: 3, .. }))
+        );
+        assert!(
+            applied
+                .fixes
+                .iter()
+                .any(|fix| matches!(fix, AppliedFix::ArchivedDone { task_id: 4, .. }))
+        );
 
         let remaining = load_tasks_from_dir(&board_dir.join("tasks")).unwrap();
         assert_eq!(
