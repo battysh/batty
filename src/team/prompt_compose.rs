@@ -113,7 +113,10 @@ pub fn infer_model_class(model: Option<&str>, agent: Option<&str>) -> Option<&'s
     let source = model.or(agent)?;
     let value = normalize_value(source);
 
-    if value.starts_with("claude-opus-") || value == "gemini-2.5-pro" {
+    if value.starts_with("claude-opus-")
+        || value == "gemini-2.5-pro"
+        || value.starts_with("gpt-5.5")
+    {
         return Some("frontier");
     }
     if value.starts_with("claude-sonnet-")
@@ -189,6 +192,7 @@ mod tests {
             infer_model_class(Some("claude-opus-4-1"), None),
             Some("frontier")
         );
+        assert_eq!(infer_model_class(Some("gpt-5.5"), None), Some("frontier"));
         assert_eq!(infer_model_class(Some("gpt-5.4"), None), Some("standard"));
         assert_eq!(
             infer_model_class(Some("gemini-2.5-flash"), None),
@@ -233,7 +237,7 @@ mod tests {
             role_name: "engineer".to_string(),
             role_type: RoleType::Engineer,
             agent: Some("codex".to_string()),
-            model: Some("gpt-5.4".to_string()),
+            model: Some("gpt-5.5".to_string()),
             prompt: Some("batty_engineer.md".to_string()),
             posture: Some("deep_worker".to_string()),
             model_class: None,

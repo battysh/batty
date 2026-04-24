@@ -348,7 +348,7 @@ fn pricing_for_model(
 
 fn built_in_model_pricing(model: &str) -> Option<ModelPricing> {
     // Defaults keep the command useful out of the box. team.yaml can override any model entry.
-    if model.starts_with("gpt-5.4") {
+    if model.starts_with("gpt-5.5") || model.starts_with("gpt-5.4") {
         return Some(ModelPricing {
             input_usd_per_mtok: 2.5,
             cached_input_usd_per_mtok: 0.25,
@@ -806,6 +806,7 @@ mod tests {
 
     #[test]
     fn built_in_pricing_supports_common_models() {
+        assert!(pricing_for_model(&HashMap::new(), "gpt-5.5").is_some());
         assert!(pricing_for_model(&HashMap::new(), "gpt-5.4").is_some());
         assert!(pricing_for_model(&HashMap::new(), "claude-opus-4-6").is_some());
         assert!(pricing_for_model(&HashMap::new(), "claude-sonnet-4").is_some());
@@ -1294,8 +1295,8 @@ mod tests {
     // ── built_in_model_pricing ───────────────────────────────────
 
     #[test]
-    fn built_in_pricing_gpt54_has_reasoning_rate() {
-        let pricing = built_in_model_pricing("gpt-5.4").unwrap();
+    fn built_in_pricing_gpt55_has_reasoning_rate() {
+        let pricing = built_in_model_pricing("gpt-5.5").unwrap();
         assert!(pricing.reasoning_output_usd_per_mtok.is_some());
     }
 
