@@ -6,8 +6,9 @@
 #![allow(dead_code)]
 
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use tracing::{debug, info, warn};
@@ -22,6 +23,7 @@ pub const SUPERVISOR_PAUSE_HOTKEY: &str = "C-b P";
 /// Default tmux-prefix hotkey for resuming Batty supervision.
 pub const SUPERVISOR_RESUME_HOTKEY: &str = "C-b R";
 const SEND_KEYS_SUBMIT_DELAY_MS: u64 = 100;
+const TMUX_COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Known split strategies for creating the orchestrator log pane.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -151,6 +153,63 @@ where
         .args(args)
         .output()
         .map_err(|error| TmuxError::exec("tmux", error).into())
+}
+
+fn command_output_with_timeout(
+    mut command: Command,
+    command_label: &'static str,
+    target: Option<&str>,
+    timeout: Duration,
+) -> Result<Output> {
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = command
+        .spawn()
+        .map_err(|error| TmuxError::exec(command_label, error))?;
+    let started_at = Instant::now();
+
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => {
+                let elapsed = started_at.elapsed();
+                let output = child
+                    .wait_with_output()
+                    .map_err(|error| TmuxError::exec(command_label, error))?;
+                debug!(
+                    command = command_label,
+                    target,
+                    elapsed_ms = elapsed.as_millis(),
+                    status = ?output.status.code(),
+                    "tmux command completed"
+                );
+                return Ok(output);
+            }
+            Ok(None) if started_at.elapsed() >= timeout => {
+                let elapsed = started_at.elapsed();
+                warn!(
+                    command = command_label,
+                    target,
+                    timeout_ms = timeout.as_millis(),
+                    elapsed_ms = elapsed.as_millis(),
+                    pid = child.id(),
+                    "tmux command timed out; killing subprocess"
+                );
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(TmuxError::command_failed(
+                    command_label,
+                    target,
+                    &format!(
+                        "timed out after {}ms (elapsed {}ms)",
+                        timeout.as_millis(),
+                        elapsed.as_millis()
+                    ),
+                )
+                .into());
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(10)),
+            Err(error) => return Err(TmuxError::exec(command_label, error).into()),
+        }
+    }
 }
 
 /// Probe tmux capabilities used by Batty and choose compatible behavior.
@@ -646,10 +705,11 @@ pub fn send_keys(target: &str, keys: &str, press_enter: bool) -> Result<()> {
     if !keys.is_empty() {
         // `-l` sends text literally so punctuation/symbols are not interpreted as
         // tmux key names.
-        let output = Command::new("tmux")
-            .args(["send-keys", "-t", target, "-l", "--", keys])
-            .output()
-            .with_context(|| format!("failed to send keys to target '{target}'"))?;
+        let mut command = Command::new("tmux");
+        command.args(["send-keys", "-t", target, "-l", "--", keys]);
+        let output =
+            command_output_with_timeout(command, "send-keys", Some(target), TMUX_COMMAND_TIMEOUT)
+                .with_context(|| format!("failed to send keys to target '{target}'"))?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -664,10 +724,15 @@ pub fn send_keys(target: &str, keys: &str, press_enter: bool) -> Result<()> {
             std::thread::sleep(std::time::Duration::from_millis(SEND_KEYS_SUBMIT_DELAY_MS));
         }
 
-        let output = Command::new("tmux")
-            .args(["send-keys", "-t", target, "Enter"])
-            .output()
-            .with_context(|| format!("failed to send Enter to target '{target}'"))?;
+        let mut command = Command::new("tmux");
+        command.args(["send-keys", "-t", target, "Enter"]);
+        let output = command_output_with_timeout(
+            command,
+            "send-keys Enter",
+            Some(target),
+            TMUX_COMMAND_TIMEOUT,
+        )
+        .with_context(|| format!("failed to send Enter to target '{target}'"))?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -762,10 +827,11 @@ pub fn capture_pane_recent(target: &str, lines: u32) -> Result<String> {
         args.push(format!("-{lines}"));
     }
 
-    let output = Command::new("tmux")
-        .args(&args)
-        .output()
-        .with_context(|| format!("failed to capture pane for target '{target}'"))?;
+    let mut command = Command::new("tmux");
+    command.args(&args);
+    let output =
+        command_output_with_timeout(command, "capture-pane", Some(target), TMUX_COMMAND_TIMEOUT)
+            .with_context(|| format!("failed to capture pane for target '{target}'"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -1164,6 +1230,47 @@ mod tests {
         assert_eq!(parse_tmux_version("tmux 3.3a"), Some((3, 3)));
         assert_eq!(parse_tmux_version("tmux 2.9"), Some((2, 9)));
         assert_eq!(parse_tmux_version("tmux unknown"), None);
+    }
+
+    #[test]
+    fn command_timeout_reproducer_bounds_stalled_subprocess() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "sleep 5"]);
+        let started_at = Instant::now();
+
+        let error = command_output_with_timeout(
+            command,
+            "supervision-harness-reproducer",
+            Some("%reproducer"),
+            Duration::from_millis(50),
+        )
+        .expect_err("sleeping subprocess should be killed at the timeout");
+
+        assert!(
+            started_at.elapsed() < Duration::from_secs(2),
+            "stalled subprocess should be bounded by instrumentation"
+        );
+        assert!(
+            error.to_string().contains("timed out after 50ms"),
+            "timeout error should identify the bounded wait, got: {error}"
+        );
+    }
+
+    #[test]
+    fn command_timeout_reproducer_preserves_success_output() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "printf marker-ok"]);
+
+        let output = command_output_with_timeout(
+            command,
+            "supervision-harness-reproducer",
+            Some("%reproducer"),
+            Duration::from_secs(1),
+        )
+        .expect("quick subprocess should complete normally");
+
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "marker-ok");
     }
 
     #[test]
