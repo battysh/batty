@@ -54,18 +54,22 @@ pub fn build_layout(
     tmux::rename_window(&format!("{session}:0"), "team")?;
 
     // Enable pane borders with role labels using @batty_role (agent-proof)
-    let _ = std::process::Command::new("tmux")
-        .args(["set-option", "-t", session, "pane-border-status", "top"])
-        .output();
-    let _ = std::process::Command::new("tmux")
-        .args([
+    let _ = tmux::run_tmux_with_timeout(
+        ["set-option", "-t", session, "pane-border-status", "top"],
+        "set-option pane-border-status",
+        Some(session),
+    );
+    let _ = tmux::run_tmux_with_timeout(
+        [
             "set-option",
             "-t",
             session,
             "pane-border-format",
             " #[fg=green,bold]#{@batty_role}#[default] #{@batty_status} ",
-        ])
-        .output();
+        ],
+        "set-option pane-border-format",
+        Some(session),
+    );
 
     let mut pane_map: HashMap<String, String> = HashMap::new();
     let orchestrator_enabled = should_launch_orchestrator_pane(workflow_mode, orchestrator_pane);
@@ -189,19 +193,23 @@ fn launch_orchestrator_pane(
     );
     tmux::respawn_pane(&orchestrator_target, &tail_command)?;
     set_pane_title(session, &orchestrator_target, ORCHESTRATOR_ROLE)?;
-    let _ = std::process::Command::new("tmux")
-        .args([
+    let _ = tmux::run_tmux_with_timeout(
+        [
             "set-option",
             "-p",
             "-t",
             orchestrator_target.as_str(),
             "@batty_status",
             "workflow stream",
-        ])
-        .output();
-    let _ = std::process::Command::new("tmux")
-        .args(["select-pane", "-t", agent_root_pane.as_str()])
-        .output();
+        ],
+        "set-option @batty_status",
+        Some(orchestrator_target.as_str()),
+    );
+    let _ = tmux::run_tmux_with_timeout(
+        ["select-pane", "-t", agent_root_pane.as_str()],
+        "select-pane",
+        Some(agent_root_pane.as_str()),
+    );
     Ok(agent_root_pane)
 }
 
@@ -360,9 +368,11 @@ fn stack_members_in_pane(
 /// `pane-border-format` reads `@batty_role` for a stable label.
 fn set_pane_title(_session: &str, pane_id: &str, title: &str) -> Result<()> {
     // Use select-pane -T to set pane title. Pane IDs (%N) are global in tmux.
-    let output = std::process::Command::new("tmux")
-        .args(["select-pane", "-t", pane_id, "-T", title])
-        .output()?;
+    let output = tmux::run_tmux_with_timeout(
+        ["select-pane", "-t", pane_id, "-T", title],
+        "select-pane -T",
+        Some(pane_id),
+    )?;
     if !output.status.success() {
         debug!(
             pane = pane_id,
@@ -371,9 +381,11 @@ fn set_pane_title(_session: &str, pane_id: &str, title: &str) -> Result<()> {
     }
 
     // Store role name in a custom pane option that agents can't overwrite
-    let _ = std::process::Command::new("tmux")
-        .args(["set-option", "-p", "-t", pane_id, "@batty_role", title])
-        .output();
+    let _ = tmux::run_tmux_with_timeout(
+        ["set-option", "-p", "-t", pane_id, "@batty_role", title],
+        "set-option @batty_role",
+        Some(pane_id),
+    );
 
     Ok(())
 }

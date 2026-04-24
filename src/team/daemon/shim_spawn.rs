@@ -58,15 +58,17 @@ pub(in crate::team) fn kill_orphan_shims(member_name: &str) {
 /// in the current session.
 fn query_pane_size(member_name: &str) -> Option<(u16, u16)> {
     // Find the pane for this member by checking tmux pane titles or the layout
-    let output = std::process::Command::new("tmux")
-        .args([
+    let output = crate::tmux::run_tmux_with_timeout(
+        [
             "list-panes",
             "-a",
             "-F",
             "#{pane_title} #{pane_width} #{pane_height}",
-        ])
-        .output()
-        .ok()?;
+        ],
+        "list-panes pane-size",
+        None,
+    )
+    .ok()?;
     if !output.status.success() {
         return None;
     }

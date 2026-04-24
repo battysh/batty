@@ -25,6 +25,17 @@ pub const SUPERVISOR_RESUME_HOTKEY: &str = "C-b R";
 const SEND_KEYS_SUBMIT_DELAY_MS: u64 = 100;
 const TMUX_COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
 
+fn tmux_command_timeout() -> Duration {
+    #[cfg(test)]
+    if let Ok(value) = std::env::var("BATTY_TEST_TMUX_COMMAND_TIMEOUT_MS") {
+        if let Ok(ms) = value.parse::<u64>() {
+            return Duration::from_millis(ms);
+        }
+    }
+
+    TMUX_COMMAND_TIMEOUT
+}
+
 /// Known split strategies for creating the orchestrator log pane.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SplitMode {
@@ -149,10 +160,21 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<std::ffi::OsStr>,
 {
-    Command::new("tmux")
-        .args(args)
-        .output()
-        .map_err(|error| TmuxError::exec("tmux", error).into())
+    run_tmux_with_timeout(args, "tmux", None)
+}
+
+pub(crate) fn run_tmux_with_timeout<I, S>(
+    args: I,
+    command_label: &'static str,
+    target: Option<&str>,
+) -> Result<Output>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
+    let mut command = Command::new("tmux");
+    command.args(args);
+    command_output_with_timeout(command, command_label, target, tmux_command_timeout())
 }
 
 fn command_output_with_timeout(
@@ -324,37 +346,37 @@ pub fn session_name(phase: &str) -> String {
 
 /// Check if a tmux session exists.
 pub fn session_exists(session: &str) -> bool {
-    Command::new("tmux")
-        .args(["has-session", "-t", session])
-        .output()
+    run_tmux_with_timeout(["has-session", "-t", session], "has-session", Some(session))
         .map(|o| o.status.success())
         .unwrap_or(false)
 }
 
 /// Check whether a tmux server is currently running.
 pub fn server_running() -> bool {
-    Command::new("tmux")
-        .args(["list-sessions"])
-        .output()
+    run_tmux_with_timeout(["list-sessions"], "list-sessions", None)
         .map(|o| o.status.success())
         .unwrap_or(false)
 }
 
 /// Check if a specific tmux pane target exists.
 pub fn pane_exists(target: &str) -> bool {
-    Command::new("tmux")
-        .args(["display-message", "-p", "-t", target, "#{pane_id}"])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+    run_tmux_with_timeout(
+        ["display-message", "-p", "-t", target, "#{pane_id}"],
+        "display-message #{pane_id}",
+        Some(target),
+    )
+    .map(|o| o.status.success())
+    .unwrap_or(false)
 }
 
 /// Check whether a pane target is dead (`remain-on-exit` pane).
 pub fn pane_dead(target: &str) -> Result<bool> {
-    let output = Command::new("tmux")
-        .args(["display-message", "-p", "-t", target, "#{pane_dead}"])
-        .output()
-        .with_context(|| format!("failed to query pane_dead for target '{target}'"))?;
+    let output = run_tmux_with_timeout(
+        ["display-message", "-p", "-t", target, "#{pane_dead}"],
+        "display-message #{pane_dead}",
+        Some(target),
+    )
+    .with_context(|| format!("failed to query pane_dead for target '{target}'"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -372,10 +394,12 @@ pub fn pane_dead(target: &str) -> Result<bool> {
 
 /// Check whether a pane currently has an active `pipe-pane` command.
 pub fn pane_pipe_enabled(target: &str) -> Result<bool> {
-    let output = Command::new("tmux")
-        .args(["display-message", "-p", "-t", target, "#{pane_pipe}"])
-        .output()
-        .with_context(|| format!("failed to query pane_pipe for target '{target}'"))?;
+    let output = run_tmux_with_timeout(
+        ["display-message", "-p", "-t", target, "#{pane_pipe}"],
+        "display-message #{pane_pipe}",
+        Some(target),
+    )
+    .with_context(|| format!("failed to query pane_pipe for target '{target}'"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -388,10 +412,12 @@ pub fn pane_pipe_enabled(target: &str) -> Result<bool> {
 
 /// Get the active pane id for a session target (for example: `%3`).
 pub fn pane_id(target: &str) -> Result<String> {
-    let output = Command::new("tmux")
-        .args(["display-message", "-p", "-t", target, "#{pane_id}"])
-        .output()
-        .with_context(|| format!("failed to resolve pane id for target '{target}'"))?;
+    let output = run_tmux_with_timeout(
+        ["display-message", "-p", "-t", target, "#{pane_id}"],
+        "display-message #{pane_id}",
+        Some(target),
+    )
+    .with_context(|| format!("failed to resolve pane id for target '{target}'"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -412,16 +438,18 @@ pub fn pane_id(target: &str) -> Result<String> {
 
 /// Return `(pane_width, pane_height)` for a tmux pane target.
 pub fn pane_dimensions(target: &str) -> Result<(u16, u16)> {
-    let output = Command::new("tmux")
-        .args([
+    let output = run_tmux_with_timeout(
+        [
             "display-message",
             "-p",
             "-t",
             target,
             "#{pane_width} #{pane_height}",
-        ])
-        .output()
-        .with_context(|| format!("failed to query pane dimensions for target '{target}'"))?;
+        ],
+        "display-message #{pane_width} #{pane_height}",
+        Some(target),
+    )
+    .with_context(|| format!("failed to query pane dimensions for target '{target}'"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -450,16 +478,18 @@ pub fn pane_dimensions(target: &str) -> Result<(u16, u16)> {
 
 /// Get the current working directory for a pane target.
 pub fn pane_current_path(target: &str) -> Result<String> {
-    let output = Command::new("tmux")
-        .args([
+    let output = run_tmux_with_timeout(
+        [
             "display-message",
             "-p",
             "-t",
             target,
             "#{pane_current_path}",
-        ])
-        .output()
-        .with_context(|| format!("failed to resolve pane current path for target '{target}'"))?;
+        ],
+        "display-message #{pane_current_path}",
+        Some(target),
+    )
+    .with_context(|| format!("failed to resolve pane current path for target '{target}'"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -475,10 +505,12 @@ pub fn pane_current_path(target: &str) -> Result<String> {
 
 /// Get the configured session working directory path.
 pub fn session_path(session: &str) -> Result<String> {
-    let output = Command::new("tmux")
-        .args(["display-message", "-p", "-t", session, "#{session_path}"])
-        .output()
-        .with_context(|| format!("failed to resolve session path for '{session}'"))?;
+    let output = run_tmux_with_timeout(
+        ["display-message", "-p", "-t", session, "#{session_path}"],
+        "display-message #{session_path}",
+        Some(session),
+    )
+    .with_context(|| format!("failed to resolve session path for '{session}'"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -519,9 +551,9 @@ pub fn create_session(session: &str, program: &str, args: &[String], work_dir: &
         cmd.arg(arg);
     }
 
-    let output = cmd
-        .output()
-        .with_context(|| format!("failed to create tmux session '{session}'"))?;
+    let output =
+        command_output_with_timeout(cmd, "new-session", Some(session), TMUX_COMMAND_TIMEOUT)
+            .with_context(|| format!("failed to create tmux session '{session}'"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -571,9 +603,9 @@ pub fn create_window(
         cmd.arg(arg);
     }
 
-    let output = cmd
-        .output()
-        .with_context(|| format!("failed to create tmux window '{window_name}'"))?;
+    let output =
+        command_output_with_timeout(cmd, "new-window", Some(window_name), TMUX_COMMAND_TIMEOUT)
+            .with_context(|| format!("failed to create tmux window '{window_name}'"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -585,10 +617,12 @@ pub fn create_window(
 
 /// Rename an existing tmux window target (e.g. `session:0` or `session:old`).
 pub fn rename_window(target: &str, new_name: &str) -> Result<()> {
-    let output = Command::new("tmux")
-        .args(["rename-window", "-t", target, new_name])
-        .output()
-        .with_context(|| format!("failed to rename tmux window target '{target}'"))?;
+    let output = run_tmux_with_timeout(
+        ["rename-window", "-t", target, new_name],
+        "rename-window",
+        Some(target),
+    )
+    .with_context(|| format!("failed to rename tmux window target '{target}'"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -600,10 +634,12 @@ pub fn rename_window(target: &str, new_name: &str) -> Result<()> {
 
 /// Select a tmux window target (e.g. `session:agent-1`).
 pub fn select_window(target: &str) -> Result<()> {
-    let output = Command::new("tmux")
-        .args(["select-window", "-t", target])
-        .output()
-        .with_context(|| format!("failed to select tmux window '{target}'"))?;
+    let output = run_tmux_with_timeout(
+        ["select-window", "-t", target],
+        "select-window",
+        Some(target),
+    )
+    .with_context(|| format!("failed to select tmux window '{target}'"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -625,10 +661,12 @@ pub fn setup_pipe_pane(target: &str, log_path: &Path) -> Result<()> {
     }
 
     let pipe_cmd = format!("cat >> {}", log_path.display());
-    let output = Command::new("tmux")
-        .args(["pipe-pane", "-t", target, &pipe_cmd])
-        .output()
-        .with_context(|| format!("failed to set up pipe-pane for target '{target}'"))?;
+    let output = run_tmux_with_timeout(
+        ["pipe-pane", "-t", target, &pipe_cmd],
+        "pipe-pane",
+        Some(target),
+    )
+    .with_context(|| format!("failed to set up pipe-pane for target '{target}'"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -647,10 +685,12 @@ pub fn setup_pipe_pane_if_missing(target: &str, log_path: &Path) -> Result<()> {
     }
 
     let pipe_cmd = format!("cat >> {}", log_path.display());
-    let output = Command::new("tmux")
-        .args(["pipe-pane", "-o", "-t", target, &pipe_cmd])
-        .output()
-        .with_context(|| format!("failed to set up pipe-pane (-o) for target '{target}'"))?;
+    let output = run_tmux_with_timeout(
+        ["pipe-pane", "-o", "-t", target, &pipe_cmd],
+        "pipe-pane -o",
+        Some(target),
+    )
+    .with_context(|| format!("failed to set up pipe-pane (-o) for target '{target}'"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -746,9 +786,11 @@ pub fn send_keys(target: &str, keys: &str, press_enter: bool) -> Result<()> {
 
 /// List all tmux session names matching a prefix.
 pub fn list_sessions_with_prefix(prefix: &str) -> Vec<String> {
-    let output = Command::new("tmux")
-        .args(["list-sessions", "-F", "#{session_name}"])
-        .output();
+    let output = run_tmux_with_timeout(
+        ["list-sessions", "-F", "#{session_name}"],
+        "list-sessions",
+        None,
+    );
 
     match output {
         Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout)
@@ -794,10 +836,12 @@ pub fn kill_session(session: &str) -> Result<()> {
         return Ok(()); // already gone
     }
 
-    let output = Command::new("tmux")
-        .args(["kill-session", "-t", session])
-        .output()
-        .with_context(|| format!("failed to kill tmux session '{session}'"))?;
+    let output = run_tmux_with_timeout(
+        ["kill-session", "-t", session],
+        "kill-session",
+        Some(session),
+    )
+    .with_context(|| format!("failed to kill tmux session '{session}'"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -850,8 +894,8 @@ pub fn set_mouse(session: &str, enabled: bool) -> Result<()> {
 }
 
 fn bind_supervisor_hotkey(session: &str, key: &str, action: &str) -> Result<()> {
-    let output = Command::new("tmux")
-        .args([
+    let output = run_tmux_with_timeout(
+        [
             "bind-key",
             "-T",
             "prefix",
@@ -861,9 +905,11 @@ fn bind_supervisor_hotkey(session: &str, key: &str, action: &str) -> Result<()> 
             session,
             SUPERVISOR_CONTROL_OPTION,
             action,
-        ])
-        .output()
-        .with_context(|| format!("failed to bind supervisor hotkey '{key}' for '{session}'"))?;
+        ],
+        "bind-key",
+        Some(session),
+    )
+    .with_context(|| format!("failed to bind supervisor hotkey '{key}' for '{session}'"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -887,18 +933,18 @@ pub fn configure_supervisor_hotkeys(session: &str) -> Result<()> {
 ///
 /// Returns `Some("pause")` / `Some("resume")` when set, or `None` when idle.
 pub fn take_supervisor_hotkey_action(session: &str) -> Result<Option<String>> {
-    let output = Command::new("tmux")
-        .args([
+    let output = run_tmux_with_timeout(
+        [
             "show-options",
             "-v",
             "-t",
             session,
             SUPERVISOR_CONTROL_OPTION,
-        ])
-        .output()
-        .with_context(|| {
-            format!("failed to read supervisor control option for session '{session}'")
-        })?;
+        ],
+        "show-options",
+        Some(session),
+    )
+    .with_context(|| format!("failed to read supervisor control option for session '{session}'"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -919,10 +965,12 @@ pub fn take_supervisor_hotkey_action(session: &str) -> Result<Option<String>> {
 /// Returns a list of pane IDs (e.g., ["%0", "%1"]).
 #[cfg(test)]
 pub fn list_panes(session: &str) -> Result<Vec<String>> {
-    let output = Command::new("tmux")
-        .args(["list-panes", "-t", session, "-F", "#{pane_id}"])
-        .output()
-        .with_context(|| format!("failed to list panes for session '{session}'"))?;
+    let output = run_tmux_with_timeout(
+        ["list-panes", "-t", session, "-F", "#{pane_id}"],
+        "list-panes",
+        Some(session),
+    )
+    .with_context(|| format!("failed to list panes for session '{session}'"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -939,10 +987,12 @@ pub fn list_panes(session: &str) -> Result<Vec<String>> {
 
 #[cfg(test)]
 fn list_window_names(session: &str) -> Result<Vec<String>> {
-    let output = Command::new("tmux")
-        .args(["list-windows", "-t", session, "-F", "#{window_name}"])
-        .output()
-        .with_context(|| format!("failed to list windows for session '{session}'"))?;
+    let output = run_tmux_with_timeout(
+        ["list-windows", "-t", session, "-F", "#{window_name}"],
+        "list-windows",
+        Some(session),
+    )
+    .with_context(|| format!("failed to list windows for session '{session}'"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -958,16 +1008,18 @@ fn list_window_names(session: &str) -> Result<Vec<String>> {
 
 /// List panes in a session with command/active/dead metadata.
 pub fn list_pane_details(session: &str) -> Result<Vec<PaneDetails>> {
-    let output = Command::new("tmux")
-        .args([
+    let output = run_tmux_with_timeout(
+        [
             "list-panes",
             "-t",
             session,
             "-F",
             "#{pane_id}\t#{pane_current_command}\t#{pane_active}\t#{pane_dead}",
-        ])
-        .output()
-        .with_context(|| format!("failed to list pane details for session '{session}'"))?;
+        ],
+        "list-panes details",
+        Some(session),
+    )
+    .with_context(|| format!("failed to list pane details for session '{session}'"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -1000,8 +1052,8 @@ pub fn list_pane_details(session: &str) -> Result<Vec<PaneDetails>> {
 /// `target_pane` is a tmux pane ID (e.g., `%0`). Returns the new pane's ID.
 pub fn split_window_horizontal(target_pane: &str, size_pct: u32) -> Result<String> {
     let size = format!("{size_pct}%");
-    let output = Command::new("tmux")
-        .args([
+    let output = run_tmux_with_timeout(
+        [
             "split-window",
             "-h",
             "-t",
@@ -1011,9 +1063,11 @@ pub fn split_window_horizontal(target_pane: &str, size_pct: u32) -> Result<Strin
             "-P",
             "-F",
             "#{pane_id}",
-        ])
-        .output()
-        .with_context(|| format!("failed to split pane '{target_pane}' horizontally"))?;
+        ],
+        "split-window -h",
+        Some(target_pane),
+    )
+    .with_context(|| format!("failed to split pane '{target_pane}' horizontally"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -1035,8 +1089,8 @@ pub fn split_window_vertical_in_pane(
 ) -> Result<String> {
     // Pane IDs (%N) are globally unique in tmux — use them directly as targets
     let size = format!("{size_pct}%");
-    let output = Command::new("tmux")
-        .args([
+    let output = run_tmux_with_timeout(
+        [
             "split-window",
             "-v",
             "-t",
@@ -1046,9 +1100,11 @@ pub fn split_window_vertical_in_pane(
             "-P",
             "-F",
             "#{pane_id}",
-        ])
-        .output()
-        .with_context(|| format!("failed to split pane '{pane_id}' vertically"))?;
+        ],
+        "split-window -v",
+        Some(pane_id),
+    )
+    .with_context(|| format!("failed to split pane '{pane_id}' vertically"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -1062,10 +1118,12 @@ pub fn split_window_vertical_in_pane(
 
 /// Evenly spread a pane and any adjacent panes in its layout cell.
 pub fn select_layout_even(target_pane: &str) -> Result<()> {
-    let output = Command::new("tmux")
-        .args(["select-layout", "-E", "-t", target_pane])
-        .output()
-        .with_context(|| format!("failed to even layout for pane '{target_pane}'"))?;
+    let output = run_tmux_with_timeout(
+        ["select-layout", "-E", "-t", target_pane],
+        "select-layout -E",
+        Some(target_pane),
+    )
+    .with_context(|| format!("failed to even layout for pane '{target_pane}'"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -1088,15 +1146,17 @@ pub fn load_buffer(content: &str) -> Result<()> {
     std::fs::write(&tmp, content)
         .with_context(|| format!("failed to write buffer file {}", tmp.display()))?;
 
-    let output = Command::new("tmux")
-        .args([
+    let output = run_tmux_with_timeout(
+        [
             "load-buffer",
             "-b",
             BATTY_BUFFER_NAME,
             &tmp.to_string_lossy(),
-        ])
-        .output()
-        .context("failed to run tmux load-buffer")?;
+        ],
+        "load-buffer",
+        Some(BATTY_BUFFER_NAME),
+    )
+    .context("failed to run tmux load-buffer")?;
 
     let _ = std::fs::remove_file(&tmp);
 
@@ -1113,10 +1173,12 @@ pub fn load_buffer(content: &str) -> Result<()> {
 /// The `-d` flag deletes the buffer after pasting so it doesn't linger.
 /// The `-b` flag selects the batty-specific buffer (never the user's default).
 pub fn paste_buffer(target: &str) -> Result<()> {
-    let output = Command::new("tmux")
-        .args(["paste-buffer", "-d", "-b", BATTY_BUFFER_NAME, "-t", target])
-        .output()
-        .with_context(|| format!("failed to paste buffer into '{target}'"))?;
+    let output = run_tmux_with_timeout(
+        ["paste-buffer", "-d", "-b", BATTY_BUFFER_NAME, "-t", target],
+        "paste-buffer",
+        Some(target),
+    )
+    .with_context(|| format!("failed to paste buffer into '{target}'"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -1128,9 +1190,7 @@ pub fn paste_buffer(target: &str) -> Result<()> {
 
 /// Kill a specific tmux pane.
 pub fn kill_pane(target: &str) -> Result<()> {
-    let output = Command::new("tmux")
-        .args(["kill-pane", "-t", target])
-        .output()
+    let output = run_tmux_with_timeout(["kill-pane", "-t", target], "kill-pane", Some(target))
         .with_context(|| format!("failed to kill pane '{target}'"))?;
 
     if !output.status.success() {
@@ -1146,10 +1206,12 @@ pub fn kill_pane(target: &str) -> Result<()> {
 
 /// Respawn a dead pane with a new command.
 pub fn respawn_pane(target: &str, command: &str) -> Result<()> {
-    let output = Command::new("tmux")
-        .args(["respawn-pane", "-t", target, "-k", command])
-        .output()
-        .with_context(|| format!("failed to respawn pane '{target}'"))?;
+    let output = run_tmux_with_timeout(
+        ["respawn-pane", "-t", target, "-k", command],
+        "respawn-pane",
+        Some(target),
+    )
+    .with_context(|| format!("failed to respawn pane '{target}'"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -1161,9 +1223,7 @@ pub fn respawn_pane(target: &str, command: &str) -> Result<()> {
 
 /// Helper: run `tmux set -t <session> <option> <value>`.
 pub fn tmux_set(session: &str, option: &str, value: &str) -> Result<()> {
-    let output = Command::new("tmux")
-        .args(["set", "-t", session, option, value])
-        .output()
+    let output = run_tmux_with_timeout(["set", "-t", session, option, value], "set", Some(session))
         .with_context(|| format!("failed to set tmux option '{option}' for session '{session}'"))?;
 
     if !output.status.success() {
@@ -1185,7 +1245,7 @@ pub fn tmux_set(session: &str, option: &str, value: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::team::test_support::PATH_LOCK;
+    use crate::team::test_support::{EnvVarGuard, PATH_LOCK};
     use serial_test::serial;
     use std::cell::RefCell;
 
@@ -1273,6 +1333,44 @@ mod tests {
 
         assert!(output.status.success());
         assert_eq!(String::from_utf8_lossy(&output.stdout), "marker-ok");
+    }
+
+    #[test]
+    fn pane_id_is_bounded_by_tmux_command_timeout() {
+        let _path_lock = PATH_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let fake_tmux = tmp.path().join("tmux");
+        std::fs::write(&fake_tmux, "#!/bin/sh\nsleep 30\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&fake_tmux, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let path = format!(
+            "{}:{}",
+            tmp.path().display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let _path_guard = EnvVarGuard::set("PATH", &path);
+        let _timeout_guard = EnvVarGuard::set("BATTY_TEST_TMUX_COMMAND_TIMEOUT_MS", "50");
+
+        let started_at = Instant::now();
+        let error = pane_id("%hung").expect_err("hung pane_id lookup should time out");
+        let error_chain = format!("{error:#}");
+
+        assert!(
+            started_at.elapsed() < Duration::from_secs(2),
+            "pane_id should not block indefinitely when tmux hangs"
+        );
+        assert!(
+            error_chain.contains("timed out after 50ms"),
+            "timeout should identify bounded tmux wait, got: {error_chain}"
+        );
+        assert!(
+            error_chain.contains("%hung"),
+            "timeout should include target context, got: {error_chain}"
+        );
     }
 
     #[test]

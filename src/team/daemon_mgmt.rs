@@ -860,16 +860,18 @@ pub fn run_watchdog(project_root: &Path, resume: bool) -> Result<()> {
 
 /// Find the tmux pane ID tagged with `@batty_role=<member_name>` in a session.
 fn find_pane_for_member(session: &str, member_name: &str) -> Option<String> {
-    let output = std::process::Command::new("tmux")
-        .args([
+    let output = crate::tmux::run_tmux_with_timeout(
+        [
             "list-panes",
             "-t",
             session,
             "-F",
             "#{pane_id} #{@batty_role}",
-        ])
-        .output()
-        .ok()?;
+        ],
+        "list-panes @batty_role",
+        Some(session),
+    )
+    .ok()?;
 
     if !output.status.success() {
         return None;

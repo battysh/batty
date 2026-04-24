@@ -129,28 +129,7 @@ impl TeamDaemon {
 
 /// Query tmux pane dimensions by pane ID (e.g. "%602").
 fn query_tmux_pane_size(pane_id: &str) -> Option<(u16, u16)> {
-    let output = std::process::Command::new("tmux")
-        .args([
-            "display-message",
-            "-t",
-            pane_id,
-            "-p",
-            "#{pane_width} #{pane_height}",
-        ])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let parts: Vec<&str> = stdout.split_whitespace().collect();
-    if parts.len() >= 2 {
-        let cols: u16 = parts[0].parse().ok()?;
-        let rows: u16 = parts[1].parse().ok()?;
-        Some((cols, rows))
-    } else {
-        None
-    }
+    crate::tmux::pane_dimensions(pane_id).ok()
 }
 
 // ---------------------------------------------------------------------------

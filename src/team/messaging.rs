@@ -122,10 +122,12 @@ pub(crate) fn detect_sender() -> Option<String> {
 
     // 2. Fall back to tmux pane role detection (PTY mode)
     let pane_id = std::env::var("TMUX_PANE").ok()?;
-    let output = std::process::Command::new("tmux")
-        .args(["show-options", "-p", "-t", &pane_id, "-v", "@batty_role"])
-        .output()
-        .ok()?;
+    let output = crate::tmux::run_tmux_with_timeout(
+        ["show-options", "-p", "-t", &pane_id, "-v", "@batty_role"],
+        "show-options @batty_role",
+        Some(&pane_id),
+    )
+    .ok()?;
     if output.status.success() {
         let role = String::from_utf8_lossy(&output.stdout).trim().to_string();
         if !role.is_empty() { Some(role) } else { None }
