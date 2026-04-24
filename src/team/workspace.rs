@@ -97,27 +97,35 @@ pub fn setup_workspace_worktree(
     Ok(worktree_dir.to_path_buf())
 }
 
+pub struct WorkspaceAssignmentWorktree<'a> {
+    pub project_root: &'a Path,
+    pub workspace_type: WorkspaceType,
+    pub worktree_dir: &'a Path,
+    pub engineer_name: &'a str,
+    pub task_branch: &'a str,
+    pub team_config_dir: &'a Path,
+    pub sub_repo_names: &'a [String],
+    pub trunk_branch: &'a str,
+}
+
 pub fn prepare_workspace_assignment_worktree(
-    project_root: &Path,
-    workspace_type: WorkspaceType,
-    worktree_dir: &Path,
-    engineer_name: &str,
-    task_branch: &str,
-    team_config_dir: &Path,
-    sub_repo_names: &[String],
-    trunk_branch: &str,
+    assignment: WorkspaceAssignmentWorktree<'_>,
 ) -> Result<PathBuf> {
     prepare_multi_repo_assignment_worktree_from_trunk(
-        project_root,
-        worktree_dir,
-        engineer_name,
-        task_branch,
-        team_config_dir,
-        sub_repo_names,
-        trunk_branch,
+        assignment.project_root,
+        assignment.worktree_dir,
+        assignment.engineer_name,
+        assignment.task_branch,
+        assignment.team_config_dir,
+        assignment.sub_repo_names,
+        assignment.trunk_branch,
     )?;
-    register_brazil_workspace_if_needed(workspace_type, worktree_dir, sub_repo_names)?;
-    Ok(worktree_dir.to_path_buf())
+    register_brazil_workspace_if_needed(
+        assignment.workspace_type,
+        assignment.worktree_dir,
+        assignment.sub_repo_names,
+    )?;
+    Ok(assignment.worktree_dir.to_path_buf())
 }
 
 fn register_brazil_workspace_if_needed(

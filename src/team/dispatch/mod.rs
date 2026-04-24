@@ -21,7 +21,7 @@ use super::super::task_loop::engineer_base_branch_name;
 use super::super::task_loop::prepare_engineer_assignment_worktree_from_trunk;
 use super::super::task_loop::refresh_engineer_worktree_if_stale_from_trunk;
 use super::super::task_loop::{WorktreeRefreshAction, WorktreeRefreshOutcome};
-use super::super::workspace::prepare_workspace_assignment_worktree;
+use super::super::workspace::{WorkspaceAssignmentWorktree, prepare_workspace_assignment_worktree};
 use super::helpers::describe_command_failure;
 use super::launcher::{
     agent_supports_sdk_mode, canonical_agent_name, new_member_session_id, strip_nudge_section,
@@ -221,16 +221,16 @@ impl TeamDaemon {
                         Some(repo_name),
                     )?;
                 }
-                prepare_workspace_assignment_worktree(
-                    &project_root,
-                    self.config.team_config.workspace_type,
-                    &work_dir,
-                    engineer,
+                prepare_workspace_assignment_worktree(WorkspaceAssignmentWorktree {
+                    project_root: &project_root,
+                    workspace_type: self.config.team_config.workspace_type,
+                    worktree_dir: &work_dir,
+                    engineer_name: engineer,
                     task_branch,
-                    &team_config_dir,
-                    &sub_repo_names,
-                    self.config.team_config.trunk_branch(),
-                )?
+                    team_config_dir: &team_config_dir,
+                    sub_repo_names: &sub_repo_names,
+                    trunk_branch: self.config.team_config.trunk_branch(),
+                })?
             } else if work_dir.exists() {
                 self.maybe_refresh_assignment_worktree(
                     engineer,
