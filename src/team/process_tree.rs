@@ -49,31 +49,39 @@ fn find_concurrent_batty_process<'a>(
         .min_by_key(|process| process.pid)
 }
 
-/// Returns true if the command's `--project-root <path>` argument matches the
-/// given project root (canonicalized), OR if no `--project-root` argument is
-/// present (legacy/ambiguous processes are treated as potential conflicts so
-/// the original safety rail still fires).
+/// Returns true if the command appears to target the given project root.
+///
+/// Checked args (in order): `--project-root`, `--cwd`. A value matches when its
+/// canonicalized path is at or inside `project_root`. If any indicator arg is
+/// present and none matches, the process belongs to a different project. If no
+/// indicator args are present, the process is ambiguous and treated as a
+/// potential conflict (preserves the original safety rail).
 fn targets_project_root(command: &str, project_root: &Path) -> bool {
     let mut tokens = command.split_whitespace();
+    let mut saw_project_indicator = false;
     while let Some(token) = tokens.next() {
-        if token == "--project-root" {
-            let Some(value) = tokens.next() else {
+        let value: Option<String> = if token == "--project-root" || token == "--cwd" {
+            tokens.next().map(|s| s.to_string())
+        } else if let Some(v) = token.strip_prefix("--project-root=") {
+            Some(v.to_string())
+        } else if let Some(v) = token.strip_prefix("--cwd=") {
+            Some(v.to_string())
+        } else {
+            None
+        };
+
+        if let Some(value) = value {
+            saw_project_indicator = true;
+            let candidate = PathBuf::from(&value);
+            let canonical = candidate
+                .canonicalize()
+                .unwrap_or_else(|_| candidate.clone());
+            if canonical == project_root || canonical.starts_with(project_root) {
                 return true;
-            };
-            let candidate = PathBuf::from(value);
-            let canonical = candidate
-                .canonicalize()
-                .unwrap_or_else(|_| candidate.clone());
-            return canonical == project_root;
-        } else if let Some(value) = token.strip_prefix("--project-root=") {
-            let candidate = PathBuf::from(value);
-            let canonical = candidate
-                .canonicalize()
-                .unwrap_or_else(|_| candidate.clone());
-            return canonical == project_root;
+            }
         }
     }
-    true
+    !saw_project_indicator
 }
 
 fn ancestor_pids(current_pid: u32, processes: &[ProcessInfo]) -> HashSet<u32> {
@@ -324,6 +332,63 @@ mod tests {
                 20,
                 10,
                 "batty daemon --project-root /Users/me/batty_marketing --resume"
+            ))
+        );
+    }
+
+    #[test]
+    fn shim_with_cwd_in_different_project_is_not_concurrent() {
+        // Shims don't carry --project-root; they carry --cwd pointing at the
+        // project or a worktree inside it. Ensure cwd-based matching works.
+        let processes = vec![
+            proc(10, 0, "launchd"),
+            proc(
+                20,
+                10,
+                "batty shim --id architect --agent-type codex --cwd /Users/me/batty --sdk-mode",
+            ),
+            proc(
+                21,
+                10,
+                "batty shim --id eng-1-1 --cwd /Users/me/batty/.batty/worktrees/eng-1-1",
+            ),
+            proc(30, 10, "zsh"),
+            proc(
+                40,
+                30,
+                "batty daemon --project-root /Users/me/batty_marketing --resume",
+            ),
+        ];
+
+        assert_eq!(
+            find_concurrent_batty_process(40, &processes, Path::new("/Users/me/batty_marketing")),
+            None
+        );
+    }
+
+    #[test]
+    fn shim_with_cwd_inside_project_root_is_concurrent() {
+        let processes = vec![
+            proc(10, 0, "launchd"),
+            proc(
+                20,
+                10,
+                "batty shim --id eng-1-1 --cwd /Users/me/batty_marketing/.batty/worktrees/eng-1-1",
+            ),
+            proc(30, 10, "zsh"),
+            proc(
+                40,
+                30,
+                "batty daemon --project-root /Users/me/batty_marketing --resume",
+            ),
+        ];
+
+        assert_eq!(
+            find_concurrent_batty_process(40, &processes, Path::new("/Users/me/batty_marketing")),
+            Some(&proc(
+                20,
+                10,
+                "batty shim --id eng-1-1 --cwd /Users/me/batty_marketing/.batty/worktrees/eng-1-1"
             ))
         );
     }
