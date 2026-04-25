@@ -413,7 +413,12 @@ impl TeamDaemon {
         }
 
         for branch in branches {
-            cleanup_removed_member_branch(repo_root, name, &branch)?;
+            cleanup_removed_member_branch(
+                repo_root,
+                name,
+                &branch,
+                self.config.team_config.trunk_branch(),
+            )?;
         }
 
         self.record_orchestrator_action(format!(
@@ -611,14 +616,19 @@ fn removed_member_cleanup_refusal_key(
     )
 }
 
-fn cleanup_removed_member_branch(repo_root: &Path, name: &str, branch: &str) -> Result<()> {
+fn cleanup_removed_member_branch(
+    repo_root: &Path,
+    name: &str,
+    branch: &str,
+    trunk_branch: &str,
+) -> Result<()> {
     if !git_cmd::show_ref_exists(repo_root, branch).map_err(|error| {
         anyhow::anyhow!("failed to check branch '{branch}' before cleanup: {error}")
     })? {
         return Ok(());
     }
 
-    if branch_is_merged_into(repo_root, branch, "main")? {
+    if branch_is_merged_into(repo_root, branch, trunk_branch)? {
         git_cmd::branch_delete(repo_root, branch)
             .map_err(|error| anyhow::anyhow!("failed to delete branch '{branch}': {error}"))?;
         info!(
@@ -662,7 +672,10 @@ fn archived_removed_member_branch_name(repo_root: &Path, branch: &str) -> Result
 mod tests {
     use std::collections::HashMap;
 
-    use super::{removed_member_owns_worktree_branch, transient_removed_member_owner};
+    use super::{
+        cleanup_removed_member_branch, removed_member_owns_worktree_branch,
+        transient_removed_member_owner,
+    };
     use crate::team::config::RoleType;
     use crate::team::config_diff::{MemberChange, TopologyDiff};
     use crate::team::hierarchy::MemberInstance;
@@ -930,6 +943,31 @@ mod tests {
             git_stdout(&repo, &["branch", "--list", "eng-1-3/718"]),
             "",
             "merged transient branch should be deleted"
+        );
+    }
+
+    #[test]
+    fn cleanup_removed_member_branch_uses_configured_trunk() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "removed-mainline-merged");
+        git_ok(&repo, &["checkout", "-b", "mainline"]);
+        git_ok(&repo, &["checkout", "-b", "eng-1/removed"]);
+        std::fs::write(repo.join("src").join("removed.rs"), "pub fn removed() {}\n").unwrap();
+        git_ok(&repo, &["add", "."]);
+        git_ok(&repo, &["commit", "-m", "removed member branch"]);
+        git_ok(&repo, &["checkout", "mainline"]);
+        git_ok(
+            &repo,
+            &["merge", "--no-ff", "eng-1/removed", "-m", "merge removed"],
+        );
+        git_ok(&repo, &["checkout", "main"]);
+
+        cleanup_removed_member_branch(&repo, "eng-1", "eng-1/removed", "mainline").unwrap();
+
+        assert_eq!(
+            git_stdout(&repo, &["branch", "--list", "eng-1/removed"]),
+            "",
+            "branch merged into configured trunk should be deleted"
         );
     }
 

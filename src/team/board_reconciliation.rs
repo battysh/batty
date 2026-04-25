@@ -18,6 +18,7 @@ pub(crate) struct ReconciliationOptions {
     pub stuck_task_threshold_secs: u64,
     pub done_task_archive_after_secs: u64,
     pub git_available: bool,
+    pub trunk_branch: String,
 }
 
 impl Default for ReconciliationOptions {
@@ -28,6 +29,7 @@ impl Default for ReconciliationOptions {
             stuck_task_threshold_secs: DEFAULT_STUCK_TASK_THRESHOLD_SECS,
             done_task_archive_after_secs: DEFAULT_DONE_TASK_ARCHIVE_AFTER_SECS,
             git_available: true,
+            trunk_branch: crate::team::config::default_trunk_branch(),
         }
     }
 }
@@ -154,7 +156,11 @@ pub(crate) fn scan_board_health(
                 commit: task.commit.clone(),
                 ..crate::team::workflow::WorkflowMeta::default()
             };
-            match crate::team::review::validate_review_candidate(project_root, &review_meta)? {
+            match crate::team::review::validate_review_candidate_from_trunk(
+                project_root,
+                &review_meta,
+                &options.trunk_branch,
+            )? {
                 crate::team::review::ReviewEligibility::Eligible => {}
                 crate::team::review::ReviewEligibility::AlreadyMerged { reason } => {
                     findings.push(BoardFinding::ReviewTaskAlreadyMerged {
@@ -208,7 +214,12 @@ pub(crate) fn scan_board_health(
 
         if task.status == "in-progress"
             && task_age_secs(task, options.now) >= options.stuck_task_threshold_secs
-            && commits_ahead_of_main(project_root, task, options.git_available)? == 0
+            && commits_ahead_of_trunk(
+                project_root,
+                task,
+                options.git_available,
+                &options.trunk_branch,
+            )? == 0
         {
             findings.push(BoardFinding::StuckTaskNoCommits {
                 task_id: task.id,
@@ -230,7 +241,11 @@ pub(crate) fn scan_board_health(
             && options.git_available
             && let Some(branch) = task.branch.as_deref()
             && !branch.is_empty()
-            && !crate::team::task_loop::branch_is_merged_into(project_root, branch, "main")?
+            && !crate::team::task_loop::branch_is_merged_into(
+                project_root,
+                branch,
+                &options.trunk_branch,
+            )?
         {
             findings.push(BoardFinding::DoneTaskHasUnmergedBranch {
                 task_id: task.id,
@@ -468,7 +483,7 @@ pub(crate) fn render_report(report: &ReconciliationReport) -> String {
                 branch,
             } => {
                 out.push_str(&format!(
-                    "WARN: task #{task_id} ({title}) is done but branch '{branch}' is not merged into main\n"
+                    "WARN: task #{task_id} ({title}) is done but branch '{branch}' is not merged into the configured trunk\n"
                 ));
             }
             BoardFinding::CrossTaskMetadataDrift {
@@ -508,7 +523,7 @@ pub(crate) fn render_report(report: &ReconciliationReport) -> String {
                 age_secs,
             } => {
                 out.push_str(&format!(
-                    "WARN: task #{task_id} ({title}) has been in-progress for {} with no commits ahead of main ({})\n",
+                    "WARN: task #{task_id} ({title}) has been in-progress for {} with no commits ahead of the configured trunk ({})\n",
                     format_duration(*age_secs),
                     owner.as_deref().unwrap_or("unclaimed")
                 ));
@@ -594,7 +609,12 @@ fn is_orphaned_in_progress_task(task: &Task, active_members: Option<&HashSet<Str
     }
 }
 
-fn commits_ahead_of_main(project_root: &Path, task: &Task, git_available: bool) -> Result<u32> {
+fn commits_ahead_of_trunk(
+    project_root: &Path,
+    task: &Task,
+    git_available: bool,
+    trunk_branch: &str,
+) -> Result<u32> {
     if !git_available {
         return Ok(0);
     }
@@ -602,15 +622,21 @@ fn commits_ahead_of_main(project_root: &Path, task: &Task, git_available: bool) 
     if let Some(worktree_path) = task.worktree_path.as_deref() {
         let worktree_dir = PathBuf::from(worktree_path);
         if worktree_dir.exists() {
-            return crate::team::git_cmd::rev_list_count(&worktree_dir, "main..HEAD")
-                .map_err(Into::into);
+            return crate::team::git_cmd::rev_list_count(
+                &worktree_dir,
+                &format!("{trunk_branch}..HEAD"),
+            )
+            .map_err(Into::into);
         }
     }
 
     if let Some(branch) = task.branch.as_deref() {
         if !branch.is_empty() {
-            return crate::team::git_cmd::rev_list_count(project_root, &format!("main..{branch}"))
-                .map_err(Into::into);
+            return crate::team::git_cmd::rev_list_count(
+                project_root,
+                &format!("{trunk_branch}..{branch}"),
+            )
+            .map_err(Into::into);
         }
     }
 
@@ -656,18 +682,31 @@ mod tests {
     use std::process::Command;
     use tempfile::tempdir;
 
+    #[derive(Default)]
+    struct WriteTaskOptions<'a> {
+        claimed_by: Option<&'a str>,
+        depends_on: &'a [u32],
+        branch: Option<&'a str>,
+        commit: Option<&'a str>,
+        worktree_path: Option<&'a Path>,
+        completed: Option<&'a str>,
+    }
+
     fn write_task(
         project_root: &Path,
         id: u32,
         title: &str,
         status: &str,
-        claimed_by: Option<&str>,
-        depends_on: &[u32],
-        branch: Option<&str>,
-        commit: Option<&str>,
-        worktree_path: Option<&Path>,
-        completed: Option<&str>,
+        options: WriteTaskOptions<'_>,
     ) {
+        let WriteTaskOptions {
+            claimed_by,
+            depends_on,
+            branch,
+            commit,
+            worktree_path,
+            completed,
+        } = options;
         let tasks_dir = project_root
             .join(".batty")
             .join("team_config")
@@ -757,18 +796,16 @@ mod tests {
     fn scan_detects_resolved_blocked_task() {
         let tmp = tempdir().unwrap();
         let repo = init_git_repo(&tmp, "reconcile_blocked");
-        write_task(&repo, 1, "dep", "done", None, &[], None, None, None, None);
+        write_task(&repo, 1, "dep", "done", WriteTaskOptions::default());
         write_task(
             &repo,
             2,
             "blocked",
             "blocked",
-            None,
-            &[1],
-            None,
-            None,
-            None,
-            None,
+            WriteTaskOptions {
+                depends_on: &[1],
+                ..WriteTaskOptions::default()
+            },
         );
 
         let report = scan_board_health(
@@ -788,7 +825,7 @@ mod tests {
     fn scan_keeps_dependency_task_blocked_when_parent_is_not_done() {
         let tmp = tempdir().unwrap();
         let repo = init_git_repo(&tmp, "reconcile_parent_todo");
-        write_task(&repo, 1, "dep", "todo", None, &[], None, None, None, None);
+        write_task(&repo, 1, "dep", "todo", WriteTaskOptions::default());
         write_stale_dependency_task(
             &repo,
             2,
@@ -817,7 +854,7 @@ mod tests {
         let tmp = tempdir().unwrap();
         let repo = init_git_repo(&tmp, "reconcile_stale_todo_claim");
         let board_dir = repo.join(".batty").join("team_config").join("board");
-        write_task(&repo, 1, "dep", "done", None, &[], None, None, None, None);
+        write_task(&repo, 1, "dep", "done", WriteTaskOptions::default());
         write_stale_dependency_task(
             &repo,
             2,
@@ -849,7 +886,7 @@ mod tests {
         let tmp = tempdir().unwrap();
         let repo = init_git_repo(&tmp, "reconcile_preserve_active_claim");
         let board_dir = repo.join(".batty").join("team_config").join("board");
-        write_task(&repo, 1, "dep", "done", None, &[], None, None, None, None);
+        write_task(&repo, 1, "dep", "done", WriteTaskOptions::default());
         write_stale_dependency_task(
             &repo,
             2,
@@ -891,12 +928,11 @@ mod tests {
             2,
             "done-task",
             "done",
-            Some("eng-1"),
-            &[],
-            Some("eng-1/task-2"),
-            None,
-            None,
-            None,
+            WriteTaskOptions {
+                claimed_by: Some("eng-1"),
+                branch: Some("eng-1/task-2"),
+                ..WriteTaskOptions::default()
+            },
         );
 
         let report = scan_board_health(
@@ -913,6 +949,53 @@ mod tests {
     }
 
     #[test]
+    fn scan_uses_configured_trunk_for_done_branch_merge_check() {
+        let tmp = tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "reconcile_mainline_merged");
+        git_ok(&repo, &["checkout", "-b", "mainline"]);
+        git_ok(&repo, &["checkout", "-b", "eng-1/task-3"]);
+        fs::write(
+            repo.join("src").join("mainline_done.rs"),
+            "pub fn mainline_done() {}\n",
+        )
+        .unwrap();
+        git_ok(&repo, &["add", "."]);
+        git_ok(&repo, &["commit", "-m", "mainline done"]);
+        git_ok(&repo, &["checkout", "mainline"]);
+        git_ok(
+            &repo,
+            &["merge", "--no-ff", "eng-1/task-3", "-m", "merge done"],
+        );
+        git_ok(&repo, &["checkout", "main"]);
+        write_task(
+            &repo,
+            3,
+            "mainline-done-task",
+            "done",
+            WriteTaskOptions {
+                claimed_by: Some("eng-1"),
+                branch: Some("eng-1/task-3"),
+                ..WriteTaskOptions::default()
+            },
+        );
+
+        let report = scan_board_health(
+            &repo,
+            &repo.join(".batty").join("team_config").join("board"),
+            &ReconciliationOptions {
+                trunk_branch: "mainline".to_string(),
+                ..ReconciliationOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert!(!report.findings.iter().any(|finding| matches!(
+            finding,
+            BoardFinding::DoneTaskHasUnmergedBranch { task_id: 3, .. }
+        )));
+    }
+
+    #[test]
     fn scan_reports_cross_task_metadata_drift() {
         let tmp = tempdir().unwrap();
         let repo = init_git_repo(&tmp, "reconcile_metadata_drift");
@@ -921,12 +1004,12 @@ mod tests {
             687,
             "wrong-metadata",
             "review",
-            Some("eng-1"),
-            &[],
-            Some("eng-1-1/699"),
-            Some("abc1234"),
-            None,
-            None,
+            WriteTaskOptions {
+                claimed_by: Some("eng-1"),
+                branch: Some("eng-1-1/699"),
+                commit: Some("abc1234"),
+                ..WriteTaskOptions::default()
+            },
         );
 
         let report = scan_board_health(
@@ -958,12 +1041,10 @@ mod tests {
             7,
             "orphaned",
             "in-progress",
-            Some("eng-1"),
-            &[],
-            None,
-            None,
-            None,
-            None,
+            WriteTaskOptions {
+                claimed_by: Some("eng-1"),
+                ..WriteTaskOptions::default()
+            },
         );
         let options = ReconciliationOptions {
             active_members: Some(HashSet::from(["eng-2".to_string()])),
@@ -1005,12 +1086,12 @@ mod tests {
             9,
             "stuck",
             "in-progress",
-            Some("eng-1"),
-            &[],
-            Some("eng-1/task-9"),
-            None,
-            Some(&worktree_dir),
-            None,
+            WriteTaskOptions {
+                claimed_by: Some("eng-1"),
+                branch: Some("eng-1/task-9"),
+                worktree_path: Some(&worktree_dir),
+                ..WriteTaskOptions::default()
+            },
         );
         let report = scan_board_health(
             &repo,
@@ -1035,6 +1116,61 @@ mod tests {
     }
 
     #[test]
+    fn scan_uses_configured_trunk_for_stuck_task_commit_check() {
+        let tmp = tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "reconcile_mainline_progress");
+        git_ok(&repo, &["checkout", "-b", "mainline"]);
+        let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
+        fs::create_dir_all(&worktree_dir).unwrap();
+        git_ok(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                worktree_dir.to_string_lossy().as_ref(),
+                "-b",
+                "eng-1/task-10",
+                "mainline",
+            ],
+        );
+        fs::write(worktree_dir.join("progress.rs"), "pub fn progress() {}\n").unwrap();
+        git_ok(&worktree_dir, &["add", "."]);
+        git_ok(&worktree_dir, &["commit", "-m", "mainline progress"]);
+        write_task(
+            &repo,
+            10,
+            "not-stuck-mainline",
+            "in-progress",
+            WriteTaskOptions {
+                claimed_by: Some("eng-1"),
+                branch: Some("eng-1/task-10"),
+                worktree_path: Some(&worktree_dir),
+                ..WriteTaskOptions::default()
+            },
+        );
+
+        let report = scan_board_health(
+            &repo,
+            &repo.join(".batty").join("team_config").join("board"),
+            &ReconciliationOptions {
+                now: chrono::DateTime::parse_from_rfc3339("2026-04-06T12:00:00Z")
+                    .unwrap()
+                    .with_timezone(&Utc),
+                active_members: Some(HashSet::from(["eng-1".to_string()])),
+                stuck_task_threshold_secs: 7200,
+                trunk_branch: "mainline".to_string(),
+                ..ReconciliationOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert!(!report.findings.iter().any(|finding| matches!(
+            finding,
+            BoardFinding::StuckTaskNoCommits { task_id: 10, .. }
+        )));
+    }
+
+    #[test]
     fn scan_detects_done_task_ready_to_archive() {
         let tmp = tempdir().unwrap();
         let repo = init_git_repo(&tmp, "reconcile_archive");
@@ -1043,12 +1179,10 @@ mod tests {
             11,
             "archive-me",
             "done",
-            None,
-            &[],
-            None,
-            None,
-            None,
-            Some("2026-04-01T00:00:00Z"),
+            WriteTaskOptions {
+                completed: Some("2026-04-01T00:00:00Z"),
+                ..WriteTaskOptions::default()
+            },
         );
 
         let report = scan_board_health(
@@ -1112,12 +1246,12 @@ mod tests {
             12,
             "review-merged",
             "review",
-            Some("eng-1"),
-            &[],
-            Some("eng-1/task-12"),
-            Some(&commit),
-            None,
-            None,
+            WriteTaskOptions {
+                claimed_by: Some("eng-1"),
+                branch: Some("eng-1/task-12"),
+                commit: Some(&commit),
+                ..WriteTaskOptions::default()
+            },
         );
 
         let report =
@@ -1153,12 +1287,10 @@ mod tests {
             13,
             "review-missing-meta",
             "review",
-            Some("eng-1"),
-            &[],
-            None,
-            None,
-            None,
-            None,
+            WriteTaskOptions {
+                claimed_by: Some("eng-1"),
+                ..WriteTaskOptions::default()
+            },
         );
 
         let report =
@@ -1188,42 +1320,36 @@ mod tests {
         let tmp = tempdir().unwrap();
         let repo = init_git_repo(&tmp, "reconcile_apply");
         let board_dir = repo.join(".batty").join("team_config").join("board");
-        write_task(&repo, 1, "dep", "done", None, &[], None, None, None, None);
+        write_task(&repo, 1, "dep", "done", WriteTaskOptions::default());
         write_task(
             &repo,
             2,
             "blocked",
             "blocked",
-            None,
-            &[1],
-            None,
-            None,
-            None,
-            None,
+            WriteTaskOptions {
+                depends_on: &[1],
+                ..WriteTaskOptions::default()
+            },
         );
         write_task(
             &repo,
             3,
             "orphan",
             "in-progress",
-            Some("eng-1"),
-            &[],
-            None,
-            None,
-            None,
-            None,
+            WriteTaskOptions {
+                claimed_by: Some("eng-1"),
+                ..WriteTaskOptions::default()
+            },
         );
         write_task(
             &repo,
             4,
             "done-old",
             "done",
-            None,
-            &[],
-            None,
-            None,
-            None,
-            Some("2026-04-01T00:00:00Z"),
+            WriteTaskOptions {
+                completed: Some("2026-04-01T00:00:00Z"),
+                ..WriteTaskOptions::default()
+            },
         );
 
         let report = scan_board_health(

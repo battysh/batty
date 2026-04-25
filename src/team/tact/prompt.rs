@@ -61,7 +61,7 @@ pub fn compose_planning_prompt_with_blockers(
     project_name: &str,
     blocked_task_summaries: &[String],
 ) -> String {
-    compose_planning_prompt_with_recovery_context(
+    compose_planning_prompt_with_recovery_context(PlanningPromptRecoveryContext {
         idle_engineer_count,
         board_summary,
         recent_completions,
@@ -69,20 +69,35 @@ pub fn compose_planning_prompt_with_blockers(
         project_goals,
         project_name,
         blocked_task_summaries,
-        &[],
-    )
+        review_task_summaries: &[],
+    })
+}
+
+pub struct PlanningPromptRecoveryContext<'a> {
+    pub idle_engineer_count: usize,
+    pub board_summary: &'a str,
+    pub recent_completions: &'a [String],
+    pub roadmap_context: &'a [String],
+    pub project_goals: &'a [String],
+    pub project_name: &'a str,
+    pub blocked_task_summaries: &'a [String],
+    pub review_task_summaries: &'a [String],
 }
 
 pub fn compose_planning_prompt_with_recovery_context(
-    idle_engineer_count: usize,
-    board_summary: &str,
-    recent_completions: &[String],
-    roadmap_context: &[String],
-    project_goals: &[String],
-    project_name: &str,
-    blocked_task_summaries: &[String],
-    review_task_summaries: &[String],
+    ctx: PlanningPromptRecoveryContext<'_>,
 ) -> String {
+    let PlanningPromptRecoveryContext {
+        idle_engineer_count,
+        board_summary,
+        recent_completions,
+        roadmap_context,
+        project_goals,
+        project_name,
+        blocked_task_summaries,
+        review_task_summaries,
+    } = ctx;
+
     let dispatchable_count = board_summary
         .split(',')
         .find_map(|part| part.trim().strip_prefix("dispatchable_tasks="))
@@ -307,20 +322,21 @@ mod tests {
     #[test]
     fn compose_with_review_backlog_requests_one_review_drain_task() {
         let prompt = compose_planning_prompt_with_recovery_context(
-            3,
-            "todo=0, backlog=0, review=1, actionable_review=1, blocked=2, dispatchable_tasks=0, planning_state=review-backlog-gated",
-            &[],
-            &[],
-            &[],
-            "Batty",
-            &[
+            PlanningPromptRecoveryContext {
+            idle_engineer_count: 3,
+            board_summary: "todo=0, backlog=0, review=1, actionable_review=1, blocked=2, dispatchable_tasks=0, planning_state=review-backlog-gated",
+            recent_completions: &[],
+            roadmap_context: &[],
+            project_goals: &[],
+            project_name: "Batty",
+            blocked_task_summaries: &[
                 "#738 Ship dependent release: waiting on #736 review disposition".to_string(),
                 "#739 Restore downstream dispatch: waiting on #736 review disposition".to_string(),
             ],
-            &[
+            review_task_summaries: &[
                 "#736 Drain completion review: review_owner=manager; branch=eng-1-2/736; commit=abc1234; artifacts=.batty/reports/verification/completion/task-736-eng-1-2-attempt-1.json; next_action=review commit; gates held tasks: #738, #739".to_string(),
             ],
-        );
+        });
 
         assert!(prompt.contains("Review backlog requiring drain/unblock tasks:"));
         assert!(prompt.contains("#736 Drain completion review"));

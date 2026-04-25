@@ -129,8 +129,9 @@ impl TeamDaemon {
                 warn!(error = %error, "failed to persist daemon binary refresh-needed state");
             } else {
                 self.record_orchestrator_action(format!(
-                    "runtime: daemon binary refresh pending after merge ({} commit(s) behind main)",
-                    report.commits_behind
+                    "runtime: daemon binary refresh pending after merge ({} commit(s) behind {})",
+                    report.commits_behind,
+                    self.config.team_config.trunk_branch()
                 ));
             }
         }
@@ -478,13 +479,10 @@ impl TeamDaemon {
             .map(|watcher| watcher.last_lines(200))
             .unwrap_or_default();
         let retries_before_success = self.retry_counts.get(role).copied().unwrap_or(0);
-        let commits = crate::team::git_cmd::run_git(
+        let commits = completion_commit_count_since_trunk(
             &self.worktree_dir(role),
-            &["rev-list", "--count", "main..HEAD"],
-        )
-        .ok()
-        .and_then(|output| output.stdout.trim().parse::<u32>().ok())
-        .unwrap_or(0);
+            self.config.team_config.trunk_branch(),
+        );
 
         let metrics = crate::team::quality_metrics::build_completion_quality_metrics(
             backend,
@@ -955,6 +953,16 @@ impl TeamDaemon {
     }
 }
 
+fn completion_commit_count_since_trunk(worktree_dir: &Path, trunk_branch: &str) -> u32 {
+    crate::team::git_cmd::run_git(
+        worktree_dir,
+        &["rev-list", "--count", &format!("{trunk_branch}..HEAD")],
+    )
+    .ok()
+    .and_then(|output| output.stdout.trim().parse::<u32>().ok())
+    .unwrap_or(0)
+}
+
 pub(crate) fn append_orchestrator_log_line(
     plain_path: &Path,
     ansi_path: &Path,
@@ -1092,6 +1100,7 @@ mod tests {
     use crate::team::events::{EventSink, read_events};
     use crate::team::failure_patterns::FailureTracker;
     use crate::team::test_helpers::{RecordingChannel, daemon_config_with_roles};
+    use crate::team::test_support::{git_ok, init_git_repo};
     use regex::Regex;
     use serial_test::serial;
 
@@ -1148,6 +1157,23 @@ mod tests {
             pane_map: HashMap::new(),
         })
         .unwrap()
+    }
+
+    #[test]
+    fn completion_commit_count_uses_configured_trunk() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "telemetry-mainline-commits");
+        git_ok(&repo, &["checkout", "-b", "mainline"]);
+        git_ok(&repo, &["checkout", "-b", "eng-1/task-45"]);
+        fs::write(
+            repo.join("src").join("telemetry_mainline.rs"),
+            "pub fn telemetry_mainline() {}\n",
+        )
+        .unwrap();
+        git_ok(&repo, &["add", "."]);
+        git_ok(&repo, &["commit", "-m", "telemetry mainline commit"]);
+
+        assert_eq!(completion_commit_count_since_trunk(&repo, "mainline"), 1);
     }
 
     fn stale_binary_report(
