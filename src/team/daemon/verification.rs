@@ -1352,9 +1352,10 @@ src/parser.rs:12: failure here\n";
             .unwrap()
             .expect("task mismatch should be reported");
         assert!(!result.passed);
-        assert!(result.output.contains("task reference mismatch"));
+        assert!(result.output.contains("branch recovery required"));
         assert!(result.output.contains("assigned task is #11"));
         assert!(result.output.contains("#449"));
+        assert!(result.recovery.is_some());
     }
 
     #[test]

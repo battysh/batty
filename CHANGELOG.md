@@ -2,6 +2,53 @@
 
 All notable changes to Batty are documented here.
 
+## 0.11.62 — 2026-04-25
+
+Launch-stability release for the self-improvement control plane. This release
+lands the overnight recovery fixes needed before handing Batty back to
+weekend autonomous work: stale daemon binaries are detected immediately after
+safe merges, blocked work is actionable from `batty status`, Discord command
+misconfiguration is surfaced instead of silently dropping operator messages,
+and pending shim backlogs collapse stale same-task chatter before burying the
+current directive.
+
+### Fixes
+
+- **Schedule daemon binary freshness checks immediately after safe merges**
+  (`src/team/daemon/merge_queue.rs`) — successful source merges now run the
+  post-merge binary freshness probe in the same merge cycle and persist a
+  pending daemon refresh state when the running daemon is stale.
+- **Make blocked boards actionable from status**
+  (`src/team/status.rs`, `src/team/resolver.rs`) — workflow metrics now include
+  compact blocked-task recipes with dependency state, preservation guidance,
+  release guidance, and claimed-todo recovery hints. The same data is present
+  in JSON status reports for dashboards and Discord summaries.
+- **Detect Discord MESSAGE_CONTENT intent misconfiguration**
+  (`src/team/discord.rs`, `src/team/discord_bridge.rs`) — when Discord polling
+  receives messages but every otherwise-visible command has empty content,
+  Batty records a distinct configuration fault telling the operator to enable
+  the bot's Message Content privileged intent in the Discord Developer Portal.
+- **Cap low-signal pending shim replay by task**
+  (`src/team/delivery/routing.rs`) — repeated same-task nudges, reminders,
+  status updates, and acknowledgements queued while a shim is not ready collapse
+  into a task-current digest. Human directives and work/review/completion
+  decisions remain uncollapsed.
+- **Retain verifier lane-mismatch recovery from the launch queue**
+  (`src/team/daemon/verification.rs`, `src/team/merge/completion.rs`) — the
+  branch-recovery path keeps wrong-lane verification evidence from exhausting a
+  task's retry budget and records recovered task branch metadata.
+
+### Tests
+
+- `cargo fmt --check`
+- `cargo check -q`
+- `cargo clippy --all-targets -- -D warnings`
+- `cargo test --lib discord -- --nocapture`
+- `cargo test --lib pending_queue -- --nocapture`
+- `cargo test --lib merge_queue -- --nocapture`
+- `cargo test --lib blocked_task -- --nocapture`
+- `cargo test --lib build_team_status_json_report -- --nocapture`
+
 ## 0.11.61 — 2026-04-17
 
 Stop the orphan-false-positive reconciliation churn. Before this fix,

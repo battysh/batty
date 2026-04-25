@@ -219,6 +219,26 @@ pub struct DiscordBot {
     allowed_user_ids: Vec<i64>,
     commands_channel_id: String,
     last_message_id: Option<String>,
+    last_message_content_fault: Option<DiscordMessageContentFault>,
+}
+
+/// Diagnostic emitted when Discord returns command-channel messages but the
+/// bot cannot read message bodies, usually because MESSAGE_CONTENT is disabled.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscordMessageContentFault {
+    pub total_received: usize,
+    pub dropped_empty_content: usize,
+    pub dropped_bot_author: usize,
+    pub dropped_unauthorized_user: usize,
+}
+
+impl DiscordMessageContentFault {
+    pub fn status_message(&self) -> String {
+        format!(
+            "Discord MESSAGE_CONTENT intent fault: received {} messages and dropped {} empty-content messages. Enable MESSAGE CONTENT INTENT for the bot in Discord Developer Portal -> Bot -> Privileged Gateway Intents, then restart Batty.",
+            self.total_received, self.dropped_empty_content
+        )
+    }
 }
 
 impl DiscordBot {
@@ -228,6 +248,7 @@ impl DiscordBot {
             allowed_user_ids,
             commands_channel_id,
             last_message_id: None,
+            last_message_content_fault: None,
         }
     }
 
@@ -435,11 +456,17 @@ impl DiscordBot {
             }
         };
 
-        let (messages, latest_message_id) = parse_messages_response(&json, &self.allowed_user_ids)?;
+        let (messages, latest_message_id, message_content_fault) =
+            parse_messages_response(&json, &self.allowed_user_ids)?;
         if let Some(message_id) = latest_message_id {
             self.last_message_id = Some(message_id);
         }
+        self.last_message_content_fault = message_content_fault;
         Ok(messages)
+    }
+
+    pub fn take_message_content_fault(&mut self) -> Option<DiscordMessageContentFault> {
+        self.last_message_content_fault.take()
     }
 
     fn get_json(&self, url: &str) -> Result<serde_json::Value> {
@@ -811,7 +838,11 @@ fn truncate_for_discord(input: &str, limit: usize) -> String {
 fn parse_messages_response(
     json: &serde_json::Value,
     allowed_user_ids: &[i64],
-) -> Result<(Vec<InboundMessage>, Option<String>)> {
+) -> Result<(
+    Vec<InboundMessage>,
+    Option<String>,
+    Option<DiscordMessageContentFault>,
+)> {
     let messages = json
         .as_array()
         .ok_or_else(|| anyhow!("Discord messages response was not an array"))?;
@@ -892,6 +923,13 @@ fn parse_messages_response(
     // lacks the MESSAGE_CONTENT privileged intent in the Developer Portal.
     // Previously this failed silently — ZERO inbound + Health: ok.
     let total = messages.len();
+    let message_content_fault = (total > 0 && inbound.is_empty() && dropped_empty_content == total)
+        .then_some(DiscordMessageContentFault {
+            total_received: total,
+            dropped_empty_content,
+            dropped_bot_author,
+            dropped_unauthorized_user,
+        });
     if total > 0 && inbound.is_empty() {
         warn!(
             total_received = total,
@@ -930,7 +968,7 @@ fn parse_messages_response(
         (Some((_, id)), None) | (None, Some((_, id))) => Some(id),
         (None, None) => None,
     };
-    Ok((inbound, cursor))
+    Ok((inbound, cursor, message_content_fault))
 }
 
 fn parse_bot_identity(json: &serde_json::Value) -> Result<BotIdentity> {
@@ -1353,7 +1391,7 @@ mod tests {
             }
         ]);
 
-        let (messages, latest_message_id) = parse_messages_response(&json, &[42]).unwrap();
+        let (messages, latest_message_id, fault) = parse_messages_response(&json, &[42]).unwrap();
         assert_eq!(
             messages,
             vec![InboundMessage {
@@ -1368,6 +1406,7 @@ mod tests {
         // where a bot posts last would stall the cursor forever and every
         // poll would re-fetch + re-filter the same batch.
         assert_eq!(latest_message_id.as_deref(), Some("1003"));
+        assert_eq!(fault, None);
     }
 
     #[test]
@@ -1387,10 +1426,72 @@ mod tests {
             }
         ]);
 
-        let (messages, latest_message_id) = parse_messages_response(&json, &[42]).unwrap();
+        let (messages, latest_message_id, fault) = parse_messages_response(&json, &[42]).unwrap();
         assert_eq!(messages[0].text, "first");
         assert_eq!(messages[1].text, "second");
         assert_eq!(latest_message_id.as_deref(), Some("1009"));
+        assert_eq!(fault, None);
+    }
+
+    #[test]
+    fn parse_messages_response_reports_message_content_intent_fault() {
+        let json = serde_json::json!([
+            {
+                "id": "1010",
+                "channel_id": "55",
+                "content": "",
+                "author": {"id": "42", "bot": false}
+            },
+            {
+                "id": "1011",
+                "channel_id": "55",
+                "content": "",
+                "author": {"id": "42", "bot": false}
+            }
+        ]);
+
+        let (messages, latest_message_id, fault) = parse_messages_response(&json, &[42]).unwrap();
+        assert!(messages.is_empty());
+        assert_eq!(latest_message_id.as_deref(), Some("1011"));
+        assert_eq!(
+            fault,
+            Some(DiscordMessageContentFault {
+                total_received: 2,
+                dropped_empty_content: 2,
+                dropped_bot_author: 0,
+                dropped_unauthorized_user: 0,
+            })
+        );
+        assert!(
+            fault
+                .unwrap()
+                .status_message()
+                .contains("MESSAGE CONTENT INTENT")
+        );
+    }
+
+    #[test]
+    fn parse_messages_response_recovers_after_content_resumes() {
+        let json = serde_json::json!([
+            {
+                "id": "1012",
+                "channel_id": "55",
+                "content": "",
+                "author": {"id": "42", "bot": false}
+            },
+            {
+                "id": "1013",
+                "channel_id": "55",
+                "content": "$status",
+                "author": {"id": "42", "bot": false}
+            }
+        ]);
+
+        let (messages, latest_message_id, fault) = parse_messages_response(&json, &[42]).unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].text, "$status");
+        assert_eq!(latest_message_id.as_deref(), Some("1013"));
+        assert_eq!(fault, None);
     }
 
     #[test]

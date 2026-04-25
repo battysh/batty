@@ -269,8 +269,9 @@ prints a clean GitHub feedback section so the absence of feedback is visible.
 
 Discord gives you three dedicated channels for monitoring your team from your phone.
 
-1. Create a Discord bot at <https://discord.com/developers/applications> and
-   invite it to your server with Send Messages permission.
+1. Create a Discord bot at <https://discord.com/developers/applications>,
+   enable **Message Content Intent** under Bot -> Privileged Gateway Intents,
+   and invite it to your server with Send Messages permission.
 
 1. Create three channels: `#batty-commands`, `#batty-events`, `#batty-agents`.
 
@@ -292,6 +293,11 @@ Discord gives you three dedicated channels for monitoring your team from your ph
    ```sh
    batty discord status
    ```
+
+   If Discord receives command-channel messages but Batty reports a
+   `MESSAGE_CONTENT` fault in `batty status` or daemon logs, the bot can see
+   messages but cannot read their text. Enable Message Content Intent in the
+   Discord Developer Portal, then restart Batty.
 
 1. Start batty and use Discord:
 
