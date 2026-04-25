@@ -2,6 +2,7 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
 
 use crate::task::{Task, load_tasks_from_dir};
 use crate::team::config::TeamConfig;
@@ -18,6 +19,23 @@ pub(crate) struct VerificationRunResult {
     pub results: TestResults,
     pub failures: Vec<String>,
     pub file_paths: Vec<String>,
+    pub recovery: Option<VerificationRecovery>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum VerificationRecoveryKind {
+    BranchTaskMismatch,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct VerificationRecovery {
+    pub kind: VerificationRecoveryKind,
+    pub expected_task_id: u32,
+    pub expected_branch: String,
+    pub actual_branch: String,
+    pub preserved_branches: Vec<String>,
+    pub message: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -60,6 +78,7 @@ pub(crate) fn run_automatic_verification(
         results: test_run.results,
         failures,
         file_paths,
+        recovery: None,
     })
 }
 
@@ -135,6 +154,7 @@ fn active_claim_conflict_failure(worktree_dir: &Path) -> Result<Option<Verificat
         },
         failures: vec![message],
         file_paths: Vec::new(),
+        recovery: None,
     }))
 }
 
@@ -154,16 +174,41 @@ fn task_mismatch_validation_failure(worktree_dir: &Path) -> Result<Option<Verifi
         return Ok(None);
     }
 
+    let expected_branch = recovery_branch_for_task(&project_root, &engineer, &task);
+    let preserved_branches = preserved_branch_candidates(&project_root, &engineer, task.id);
+    let preserved_summary = if preserved_branches.is_empty() {
+        "No preserved branch evidence was found.".to_string()
+    } else {
+        format!(
+            "Preserved recovery evidence: {}.",
+            preserved_branches
+                .iter()
+                .map(|branch| format!("`{branch}`"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    };
     let message = format!(
-        "task reference mismatch for task #{}: {}",
+        "branch recovery required for task #{}: worktree is on `{}` but expected `{}`. {} Mismatch detail: {}",
         task.id,
+        branch_name,
+        expected_branch,
+        preserved_summary,
         blockers.join("; ")
     );
+    let recovery = VerificationRecovery {
+        kind: VerificationRecoveryKind::BranchTaskMismatch,
+        expected_task_id: task.id,
+        expected_branch,
+        actual_branch: branch_name,
+        preserved_branches,
+        message: message.clone(),
+    };
     Ok(Some(VerificationRunResult {
         passed: false,
         output: message.clone(),
         results: TestResults {
-            framework: "task-mismatch".to_string(),
+            framework: "branch-recovery".to_string(),
             total: None,
             passed: 0,
             failed: 1,
@@ -173,7 +218,119 @@ fn task_mismatch_validation_failure(worktree_dir: &Path) -> Result<Option<Verifi
         },
         failures: vec![message],
         file_paths: Vec::new(),
+        recovery: Some(recovery),
     }))
+}
+
+fn recovery_branch_for_task(project_root: &Path, engineer: &str, task: &Task) -> String {
+    let declared_branch = task
+        .branch
+        .as_deref()
+        .map(str::trim)
+        .filter(|branch| !branch.is_empty())
+        .map(str::to_string);
+    if let Some(branch) = declared_branch.as_deref()
+        && git_ref_exists(project_root, branch)
+    {
+        return branch.to_string();
+    }
+
+    if let Some(branch) = task_branch_candidates(project_root, task.id)
+        .into_iter()
+        .find(|branch| !branch.starts_with("preserved/"))
+    {
+        return branch;
+    }
+
+    if let Some(branch) = preserved_branch_candidates(project_root, engineer, task.id)
+        .into_iter()
+        .next()
+    {
+        return branch;
+    }
+
+    declared_branch.unwrap_or_else(|| format!("{engineer}/{}", task.id))
+}
+
+fn git_ref_exists(project_root: &Path, branch: &str) -> bool {
+    std::process::Command::new("git")
+        .args([
+            "show-ref",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{branch}"),
+        ])
+        .current_dir(project_root)
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+fn task_branch_candidates(project_root: &Path, task_id: u32) -> Vec<String> {
+    let Ok(output) = std::process::Command::new("git")
+        .args(["for-each-ref", "refs/heads", "--format=%(refname:short)"])
+        .current_dir(project_root)
+        .output()
+    else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+
+    let id = task_id.to_string();
+    let slash_suffix = format!("/{id}");
+    let task_dash = format!("task-{id}");
+    let task_underscore = format!("task_{id}");
+    let surrounded = format!("-{id}-");
+    let mut branches = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|branch| !branch.is_empty())
+        .filter(|branch| {
+            branch.ends_with(&slash_suffix)
+                || branch.contains(&task_dash)
+                || branch.contains(&task_underscore)
+                || branch.contains(&surrounded)
+        })
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    branches.sort_by_key(|branch| {
+        (
+            branch.starts_with("preserved/"),
+            branch.starts_with("backup/"),
+            branch.clone(),
+        )
+    });
+    branches
+}
+
+fn preserved_branch_candidates(project_root: &Path, engineer: &str, task_id: u32) -> Vec<String> {
+    let Ok(output) = std::process::Command::new("git")
+        .args([
+            "for-each-ref",
+            "refs/heads/preserved",
+            "--format=%(refname:short)",
+        ])
+        .current_dir(project_root)
+        .output()
+    else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+
+    let prefix = format!("preserved/{engineer}-{task_id}-");
+    let fallback = format!("-{task_id}-");
+    let mut branches = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|branch| !branch.is_empty())
+        .filter(|branch| branch.starts_with(&prefix) || branch.contains(&fallback))
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    branches.sort();
+    branches
 }
 
 pub(crate) fn parse_scope_fence(task_text: &str) -> Vec<String> {
@@ -436,6 +593,7 @@ fn scope_validation_failure(worktree_dir: &Path) -> Result<Option<VerificationRu
             },
             failures: vec![message],
             file_paths: scope.declared_scope,
+            recovery: None,
         }));
     }
 
@@ -462,6 +620,7 @@ fn scope_validation_failure(worktree_dir: &Path) -> Result<Option<VerificationRu
         },
         failures: vec![message],
         file_paths: scope.out_of_scope_files,
+        recovery: None,
     }))
 }
 
