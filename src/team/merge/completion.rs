@@ -161,6 +161,31 @@ fn verification_outcome_label(phase: &VerificationPhase) -> &'static str {
     }
 }
 
+fn verification_recovery_message(
+    recovery: &crate::team::daemon::verification::VerificationRecovery,
+) -> String {
+    let preserved = if recovery.preserved_branches.is_empty() {
+        "No preserved branch evidence was found.".to_string()
+    } else {
+        format!(
+            "Preserved branch evidence: {}.",
+            recovery
+                .preserved_branches
+                .iter()
+                .map(|branch| format!("`{branch}`"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    };
+    format!(
+        "{}\n\nRecovery action: switch this lane back to `{}` for task #{} before verifying again. Current branch: `{}`. {preserved}\n\nThis is recorded as `branch_recovery_required`; it did not consume a verification retry.",
+        recovery.message,
+        recovery.expected_branch,
+        recovery.expected_task_id,
+        recovery.actual_branch
+    )
+}
+
 fn persist_verification_snapshot(
     project_root: &Path,
     board_dir: &Path,
@@ -219,6 +244,92 @@ fn persist_verification_snapshot(
     crate::team::board::write_workflow_metadata(&task_path, &metadata)?;
 
     Ok(relative_path.to_string_lossy().into_owned())
+}
+
+fn persist_verification_recovery_snapshot(
+    project_root: &Path,
+    board_dir: &Path,
+    task_id: u32,
+    engineer: &str,
+    state: &VerificationState,
+    verification_run: &crate::team::daemon::verification::VerificationRunResult,
+) -> Result<String> {
+    let relative_path = Path::new(".batty")
+        .join("reports")
+        .join("verification")
+        .join("completion")
+        .join(format!("task-{task_id:03}-{engineer}-attempt-1.json"));
+    let absolute_path = project_root.join(&relative_path);
+    if let Some(parent) = absolute_path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+
+    let snapshot = serde_json::json!({
+        "task_id": task_id,
+        "engineer": engineer,
+        "phase": "branch_recovery",
+        "attempt": state.iteration,
+        "max_attempts": state.max_iterations,
+        "outcome": "branch_recovery_required",
+        "passed": false,
+        "results": verification_run.results,
+        "failures": verification_run.failures,
+        "file_paths": verification_run.file_paths,
+        "evidence": state.evidence,
+        "recovery": verification_run.recovery,
+        "output": verification_run.output,
+    });
+    let serialized =
+        serde_json::to_string_pretty(&snapshot).context("failed to serialize verification data")?;
+    std::fs::write(&absolute_path, serialized)
+        .with_context(|| format!("failed to write {}", absolute_path.display()))?;
+
+    let task_path = crate::team::task_cmd::find_task_path(board_dir, task_id)?;
+    crate::team::completion::validate_completion_metadata_target(
+        project_root,
+        &task_path,
+        task_id,
+        None,
+        &[relative_path.to_string_lossy().into_owned()],
+    )?;
+    let mut metadata = crate::team::board::read_workflow_metadata(&task_path)?;
+    metadata.tests_run = Some(true);
+    metadata.tests_passed = Some(false);
+    metadata.test_results = Some(verification_run.results.clone());
+    metadata.outcome = Some("branch_recovery_required".to_string());
+    if let Some(recovery) = verification_run.recovery.as_ref() {
+        metadata.branch = Some(recovery.expected_branch.clone());
+        metadata.commit = git_ref_head(project_root, &recovery.expected_branch);
+        if let Some(worktree_path) = worktree_path_for_branch(&recovery.expected_branch) {
+            metadata.worktree_path = Some(worktree_path);
+        }
+    }
+    track_artifact(&mut metadata, &relative_path.to_string_lossy());
+    crate::team::board::write_workflow_metadata(&task_path, &metadata)?;
+
+    Ok(relative_path.to_string_lossy().into_owned())
+}
+
+fn git_ref_head(project_root: &Path, branch: &str) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .args(["rev-parse", "--verify", branch])
+        .current_dir(project_root)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let commit = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!commit.is_empty()).then_some(commit)
+}
+
+fn worktree_path_for_branch(branch: &str) -> Option<String> {
+    if branch.starts_with("preserved/") || branch.starts_with("backup/") {
+        return None;
+    }
+    let engineer = branch.split('/').next()?.trim();
+    (!engineer.is_empty()).then(|| format!(".batty/worktrees/{engineer}"))
 }
 
 fn structured_failure_details(results: &TestResults) -> Vec<String> {
@@ -665,6 +776,7 @@ pub(crate) fn handle_engineer_completion(daemon: &mut TeamDaemon, engineer: &str
                     ),
                     failures: Vec::new(),
                     file_paths: Vec::new(),
+                    recovery: None,
                 },
                 0,
             )
@@ -730,10 +842,44 @@ pub(crate) fn handle_engineer_completion(daemon: &mut TeamDaemon, engineer: &str
                 ),
                 failures: Vec::new(),
                 file_paths: Vec::new(),
+                recovery: None,
             },
             0,
         )
     };
+
+    if let Some(recovery) = verification_run.recovery.as_ref() {
+        verification_state.iteration = verification_state.iteration.saturating_sub(1);
+        verification_state.last_test_passed = false;
+        verification_state.last_test_output = Some(verification_run.output.clone());
+        persist_verification_recovery_snapshot(
+            daemon.project_root(),
+            &board_dir,
+            task_id,
+            engineer,
+            &verification_state,
+            &verification_run,
+        )?;
+
+        let recovery_message = verification_recovery_message(recovery);
+        daemon.record_orchestrator_action(format!(
+            "verification recovery: task #{} for {} is on wrong branch '{}' (expected '{}'); recorded branch_recovery_required without consuming retry",
+            recovery.expected_task_id, engineer, recovery.actual_branch, recovery.expected_branch
+        ));
+        daemon.queue_message("batty", engineer, &recovery_message)?;
+        if let Some(ref manager_name) = manager_name {
+            daemon.queue_message(
+                "daemon",
+                manager_name,
+                &format!(
+                    "[daemon] Branch recovery required before verifying task #{} for {}.\n{}",
+                    recovery.expected_task_id, engineer, recovery_message
+                ),
+            )?;
+        }
+        daemon.verification_states.remove(engineer);
+        return Ok(());
+    }
 
     let has_required_evidence = if verification_policy.require_evidence {
         total_commits > 0 && code_files_changed > 0
@@ -2428,6 +2574,131 @@ mod tests {
         let snapshot = std::fs::read_to_string(snapshot_path).unwrap();
         assert!(snapshot.contains("\"phase\": \"fixing\""));
         assert!(snapshot.contains("smoke_test"));
+    }
+
+    #[test]
+    fn task_reference_mismatch_records_branch_recovery_without_consuming_retry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "batty-branch-recovery-test");
+        let engineer = "eng-1-2";
+        let task_id = 682;
+        let title = "branch-recovery";
+        let tasks_dir = repo
+            .join(".batty")
+            .join("team_config")
+            .join("board")
+            .join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+        let task_path = tasks_dir.join(format!("{task_id:03}-{title}.md"));
+        std::fs::write(
+            &task_path,
+            format!(
+                "---\nid: {task_id}\ntitle: {title}\nstatus: in-progress\npriority: high\nclaimed_by: {engineer}\nbranch: eng-1-3/{task_id}\nworktree_path: .batty/worktrees/{engineer}\nclass: standard\n---\n\nTask description.\n"
+            ),
+        )
+        .unwrap();
+
+        let team_config_dir = repo.join(".batty").join("team_config");
+        let worktree_dir = repo.join(".batty").join("worktrees").join(engineer);
+        setup_engineer_worktree(
+            &repo,
+            &worktree_dir,
+            &engineer_base_branch_name(engineer),
+            &team_config_dir,
+        )
+        .unwrap();
+
+        checkout_worktree_branch_from_trunk(&worktree_dir, "eng-1-2/682", "main").unwrap();
+        std::fs::write(
+            worktree_dir.join("src").join("lib.rs"),
+            "pub fn valid_682() {}\n",
+        )
+        .unwrap();
+        git_ok(&worktree_dir, &["add", "src/lib.rs"]);
+        git_ok(
+            &worktree_dir,
+            &["commit", "-m", "Task #682: valid recovery state"],
+        );
+        let valid_commit = git_stdout(&worktree_dir, &["rev-parse", "HEAD"]);
+        git_ok(
+            &worktree_dir,
+            &[
+                "branch",
+                "preserved/eng-1-2-682-branch-lock-recovery-20260424182106",
+            ],
+        );
+
+        checkout_worktree_branch_from_trunk(&worktree_dir, "eng-1-3/736", "main").unwrap();
+        std::fs::write(
+            worktree_dir.join("src").join("lib.rs"),
+            "pub fn wrong_736() {}\n",
+        )
+        .unwrap();
+        git_ok(&worktree_dir, &["add", "src/lib.rs"]);
+        git_ok(&worktree_dir, &["commit", "-m", "Task #736: wrong branch"]);
+
+        let mut daemon = setup_completion_daemon(&repo, engineer);
+        daemon.set_active_task_for_test(engineer, task_id);
+        daemon.set_member_state_for_test(engineer, MemberState::Working);
+
+        handle_engineer_completion(&mut daemon, engineer).unwrap();
+
+        assert_eq!(daemon.active_task_id(engineer), Some(task_id));
+        assert!(!daemon.verification_states.contains_key(engineer));
+        assert_eq!(
+            current_worktree_branch(&worktree_dir).unwrap(),
+            "eng-1-3/736"
+        );
+
+        let task = crate::task::Task::from_file(&task_path).unwrap();
+        assert_eq!(task.status, "in-progress");
+        assert!(task.blocked_on.is_none());
+        let metadata = crate::team::board::read_workflow_metadata(&task_path).unwrap();
+        assert_eq!(
+            metadata.outcome.as_deref(),
+            Some("branch_recovery_required")
+        );
+        assert_eq!(metadata.branch.as_deref(), Some("eng-1-2/682"));
+        assert_eq!(metadata.commit.as_deref(), Some(valid_commit.as_str()));
+        assert_eq!(
+            metadata.worktree_path.as_deref(),
+            Some(".batty/worktrees/eng-1-2")
+        );
+        assert_eq!(metadata.tests_passed, Some(false));
+
+        let snapshot =
+            std::fs::read_to_string(verification_snapshot_path(&repo, task_id, engineer, 1))
+                .unwrap();
+        assert!(snapshot.contains("\"phase\": \"branch_recovery\""));
+        assert!(snapshot.contains("\"outcome\": \"branch_recovery_required\""));
+        assert!(snapshot.contains("\"actual_branch\": \"eng-1-3/736\""));
+        assert!(snapshot.contains("\"expected_branch\": \"eng-1-2/682\""));
+        assert!(snapshot.contains("preserved/eng-1-2-682-branch-lock-recovery-20260424182106"));
+        assert!(snapshot.contains("\"attempt\": 0"));
+
+        let engineer_messages =
+            inbox::pending_messages(&inbox::inboxes_root(&repo), engineer).unwrap();
+        assert_eq!(engineer_messages.len(), 1);
+        assert!(
+            engineer_messages[0]
+                .body
+                .contains("branch_recovery_required")
+        );
+        assert!(
+            engineer_messages[0]
+                .body
+                .contains("preserved/eng-1-2-682-branch-lock-recovery-20260424182106")
+        );
+        assert!(!engineer_messages[0].body.contains("Fix attempt"));
+
+        let manager_messages =
+            inbox::pending_messages(&inbox::inboxes_root(&repo), "manager").unwrap();
+        assert_eq!(manager_messages.len(), 1);
+        assert!(
+            manager_messages[0]
+                .body
+                .contains("Branch recovery required before verifying task #682")
+        );
     }
 
     #[test]
