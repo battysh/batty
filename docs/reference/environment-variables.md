@@ -29,18 +29,18 @@ Batty sets these variables for each launched member. MCP server configs should
 use them for paths, lock keys, and local ports when multiple engineers run in
 parallel.
 
-| Name                        | Purpose                                                                 | Default                                      | Example                                      |
-| --------------------------- | ----------------------------------------------------------------------- | -------------------------------------------- | -------------------------------------------- |
-| `BATTY_MCP_NAMESPACE`       | Stable per-project/per-member namespace for MCP state and remote keys. | generated from project and member name       | `batty-eng-1-2`                              |
-| `BATTY_MCP_RESOURCE_DIR`    | Per-member directory for MCP files, sockets, caches, and lock files.   | `.batty/mcp/namespaces/<member>`             | `.batty/mcp/namespaces/eng-1-2`              |
-| `BATTY_MCP_SHARED_LOCK_DIR` | Directory for daemon-wide MCP serialization locks.                     | `.batty/mcp/shared-locks`                    | `.batty/mcp/shared-locks`                    |
-| `BATTY_MCP_SHARED_LOCK`     | Shared lock path for MCP servers that cannot be namespaced safely.     | `.batty/mcp/shared-locks/mcp-shared.lock`    | `.batty/mcp/shared-locks/mcp-shared.lock`    |
-| `BATTY_MCP_PORT_BASE`       | Per-member base TCP port for MCP servers that need local listeners.    | deterministic value in the `46000+` range    | `53720`                                      |
-| `BATTY_MCP_PORT_RANGE`      | Number of ports reserved from `BATTY_MCP_PORT_BASE`.                  | `20`                                         | `20`                                         |
-| `MCP_NAMESPACE`             | Convenience alias, preserving an already-set value if present.         | `BATTY_MCP_NAMESPACE`                        | `batty-eng-1-2`                              |
-| `MCP_RESOURCE_DIR`          | Convenience alias, preserving an already-set value if present.         | `BATTY_MCP_RESOURCE_DIR`                     | `.batty/mcp/namespaces/eng-1-2`              |
-| `MCP_SHARED_LOCK`           | Convenience alias, preserving an already-set value if present.         | `BATTY_MCP_SHARED_LOCK`                      | `.batty/mcp/shared-locks/mcp-shared.lock`    |
-| `MCP_PORT_BASE`             | Convenience alias, preserving an already-set value if present.         | `BATTY_MCP_PORT_BASE`                        | `53720`                                      |
+| Name                        | Purpose                                                                | Default                                   | Example                                   |
+| --------------------------- | ---------------------------------------------------------------------- | ----------------------------------------- | ----------------------------------------- |
+| `BATTY_MCP_NAMESPACE`       | Stable per-project/per-member namespace for MCP state and remote keys. | generated from project and member name    | `batty-eng-1-2`                           |
+| `BATTY_MCP_RESOURCE_DIR`    | Per-member directory for MCP files, sockets, caches, and lock files.   | `.batty/mcp/namespaces/<member>`          | `.batty/mcp/namespaces/eng-1-2`           |
+| `BATTY_MCP_SHARED_LOCK_DIR` | Directory for daemon-wide MCP serialization locks.                     | `.batty/mcp/shared-locks`                 | `.batty/mcp/shared-locks`                 |
+| `BATTY_MCP_SHARED_LOCK`     | Shared lock path for MCP servers that cannot be namespaced safely.     | `.batty/mcp/shared-locks/mcp-shared.lock` | `.batty/mcp/shared-locks/mcp-shared.lock` |
+| `BATTY_MCP_PORT_BASE`       | Per-member base TCP port for MCP servers that need local listeners.    | deterministic value in the `46000+` range | `53720`                                   |
+| `BATTY_MCP_PORT_RANGE`      | Number of ports reserved from `BATTY_MCP_PORT_BASE`.                   | `20`                                      | `20`                                      |
+| `MCP_NAMESPACE`             | Convenience alias, preserving an already-set value if present.         | `BATTY_MCP_NAMESPACE`                     | `batty-eng-1-2`                           |
+| `MCP_RESOURCE_DIR`          | Convenience alias, preserving an already-set value if present.         | `BATTY_MCP_RESOURCE_DIR`                  | `.batty/mcp/namespaces/eng-1-2`           |
+| `MCP_SHARED_LOCK`           | Convenience alias, preserving an already-set value if present.         | `BATTY_MCP_SHARED_LOCK`                   | `.batty/mcp/shared-locks/mcp-shared.lock` |
+| `MCP_PORT_BASE`             | Convenience alias, preserving an already-set value if present.         | `BATTY_MCP_PORT_BASE`                     | `53720`                                   |
 
 MCP servers are unsafe for concurrent engineers when they use fixed TCP ports,
 fixed Unix socket paths, singleton state files, shared cache directories, or

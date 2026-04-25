@@ -14,53 +14,54 @@ Hierarchical agent team system for software development
 Usage: batty [OPTIONS] <COMMAND>
 
 Commands:
-  init             Scaffold .batty/team_config/ with default team.yaml and prompt templates
-  export-template  Export the current team config as a reusable template
-  export-run       Export run state for debugging
-  retro            Generate a run retrospective
-  start            Start the team daemon and tmux session
-  stop             Stop the team daemon and kill the tmux session
-  attach           Attach to the running team tmux session
-  status           Show all team members and their states
-  bench            Prevent an engineer from receiving new auto-dispatch work
-  unbench          Remove an engineer from the durable bench list
-  openclaw         OpenClaw supervisor integration helpers for Batty
-  send             Send a message to an agent role (human → agent injection)
-  assign           Assign a task to an engineer (used by manager agent)
-  validate         Validate team config without launching
-  config           Show resolved team configuration
-  board            Show the kanban board
-  inbox            List inbox messages for a team member, or purge delivered inbox messages
-  read             Read a specific message from a member's inbox
-  ack              Acknowledge (mark delivered) a message in a member's inbox
-  merge            Merge an engineer's worktree branch into main
-  task             Manage workflow task state and metadata
-  review           Record a structured review disposition for a task
-  completions      Generate shell completions
-  nudge            Per-intervention runtime toggles
-  pause            Pause nudges and standups
-  resume           Resume nudges and standups
-  grafana          Manage Grafana monitoring (setup, status, open)
-  discord          Configure Discord human communication
-  telegram         Set up Telegram bot for human communication
-  project          Manage the global Batty project registry for multi-project supervision
-  load             Estimate team load and show recent load history
-  parity           Show clean-room parity summary from PARITY.md
-  verify           Run clean-room equivalence verification from PARITY.md
-  release          Validate clean main, assemble release notes, and create a release tag
-  queue            Show pending dispatch queue entries
-  dispatch         Explain which engineer would receive the next dispatch
-  cost             Estimate current run cost from agent session files
-  scale            Dynamically scale team topology (add/remove agents)
-  reload           Trigger an explicit topology reload for the running daemon
-  research         Run autonomous evaluator-driven research missions
-  doctor           Dump diagnostic state from Batty state files
-  worktree         Inspect engineer worktree health
-  metrics          Show consolidated telemetry dashboard (tasks, cycle time, rates, agents)
-  stress-test      Run a synthetic long-session stress harness with fault injection
-  telemetry        Query the telemetry database for agent and task metrics
-  chat             Interactive chat with an agent via the shim protocol
-  help             Print this message or the help of the given subcommand(s)
+  init                     Scaffold .batty/team_config/ with default team.yaml and prompt templates
+  export-template          Export the current team config as a reusable template
+  export-run               Export run state for debugging
+  retro                    Generate a run retrospective
+  start                    Start the team daemon and tmux session
+  stop                     Stop the team daemon and kill the tmux session
+  attach                   Attach to the running team tmux session
+  status                   Show all team members and their states
+  daemon-restart-if-stale  Safely rebuild and restart the daemon only when its binary is stale
+  bench                    Prevent an engineer from receiving new auto-dispatch work
+  unbench                  Remove an engineer from the durable bench list
+  openclaw                 OpenClaw supervisor integration helpers for Batty
+  send                     Send a message to an agent role (human → agent injection)
+  assign                   Assign a task to an engineer (used by manager agent)
+  validate                 Validate team config without launching
+  config                   Show resolved team configuration
+  board                    Show the kanban board
+  inbox                    List inbox messages for a team member, or purge delivered inbox messages
+  read                     Read a specific message from a member's inbox
+  ack                      Acknowledge (mark delivered) a message in a member's inbox
+  merge                    Merge an engineer's worktree branch into main
+  task                     Manage workflow task state and metadata
+  review                   Record a structured review disposition for a task
+  completions              Generate shell completions
+  nudge                    Per-intervention runtime toggles
+  pause                    Pause nudges and standups
+  resume                   Resume nudges and standups
+  grafana                  Manage Grafana monitoring (setup, status, open)
+  discord                  Configure Discord human communication
+  telegram                 Set up Telegram bot for human communication
+  project                  Manage the global Batty project registry for multi-project supervision
+  load                     Estimate team load and show recent load history
+  parity                   Show clean-room parity summary from PARITY.md
+  verify                   Run clean-room equivalence verification from PARITY.md
+  release                  Validate clean main, assemble release notes, and create a release tag
+  queue                    Show pending dispatch queue entries
+  dispatch                 Explain which engineer would receive the next dispatch
+  cost                     Estimate current run cost from agent session files
+  scale                    Dynamically scale team topology (add/remove agents)
+  reload                   Trigger an explicit topology reload for the running daemon
+  research                 Run autonomous evaluator-driven research missions
+  doctor                   Dump diagnostic state from Batty state files
+  worktree                 Inspect engineer worktree health
+  metrics                  Show consolidated telemetry dashboard (tasks, cycle time, rates, agents)
+  stress-test              Run a synthetic long-session stress harness with fault injection
+  telemetry                Query the telemetry database for agent and task metrics
+  chat                     Interactive chat with an agent via the shim protocol
+  help                     Print this message or the help of the given subcommand(s)
 
 Options:
   -v, --verbose...
@@ -90,6 +91,51 @@ Arguments:
           Message REF, ID, or ID prefix from `batty inbox` output
 
 Options:
+  -v, --verbose...
+          Verbosity level (-v, -vv, -vvv)
+
+  -h, --help
+          Print help
+```
+
+## `batty activity`
+
+Internal activity-log maintenance commands
+
+```text
+Internal activity-log maintenance commands
+
+Usage: batty activity [OPTIONS] <COMMAND>
+
+Commands:
+  annotate-status  Add actor/source fields to the latest matching status activity entry
+  help             Print this message or the help of the given subcommand(s)
+
+Options:
+  -v, --verbose...
+          Verbosity level (-v, -vv, -vvv)
+
+  -h, --help
+          Print help
+```
+
+## `batty activity annotate-status`
+
+Add actor/source fields to the latest matching status activity entry
+
+```text
+Add actor/source fields to the latest matching status activity entry
+
+Usage: batty activity annotate-status [OPTIONS] --source <SOURCE> <TASK_ID>
+
+Arguments:
+  <TASK_ID>
+          Task id
+
+Options:
+      --source <SOURCE>
+          Source command/module path
+
   -v, --verbose...
           Verbosity level (-v, -vv, -vvv)
 
@@ -426,6 +472,26 @@ Options:
 
       --resume
           Resume agent sessions from a previous run
+
+  -v, --verbose...
+          Verbosity level (-v, -vv, -vvv)
+
+  -h, --help
+          Print help
+```
+
+## `batty daemon-restart-if-stale`
+
+Safely rebuild and restart the daemon only when its binary is stale
+
+```text
+Safely rebuild and restart the daemon only when its binary is stale
+
+Usage: batty daemon-restart-if-stale [OPTIONS]
+
+Options:
+      --dry-run
+          Show the safe restart plan without rebuilding or restarting
 
   -v, --verbose...
           Verbosity level (-v, -vv, -vvv)
@@ -1515,10 +1581,10 @@ Options:
 
 ## `batty release`
 
-Validate clean main, assemble release notes, create a release tag, and write a guarded publish handoff
+Validate clean main, assemble release notes, and create a release tag
 
 ```text
-Validate clean main, assemble release notes, create a release tag, and write a guarded publish handoff
+Validate clean main, assemble release notes, and create a release tag
 
 Usage: batty release [OPTIONS]
 
@@ -1534,16 +1600,6 @@ Options:
 
   -h, --help
           Print help
-```
-
-`batty release` never pushes branches, pushes tags, or publishes packages.
-Every attempt writes `.batty/reports/release/publish-handoff.json`; blocked
-attempts include explicit `blocked_reasons`. After inspection, publish manually:
-
-```sh
-git push origin main
-git push origin v<version>
-cargo publish --package batty-cli
 ```
 
 ## `batty reload`

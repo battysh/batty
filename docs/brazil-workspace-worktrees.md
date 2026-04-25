@@ -96,9 +96,9 @@ Success criteria for the spike:
 
 1. `packageInfo` resolves packages inside `"$ENG_WS/src"` rather than
    `"$WS_PARENT/src"`.
-2. `brazil-build` from `"$ENG_WS/src/pkg-a"` resolves cross-package deps from
+1. `brazil-build` from `"$ENG_WS/src/pkg-a"` resolves cross-package deps from
    sibling worktrees under `"$ENG_WS/src"`.
-3. Deleting or resetting the engineer workspace does not mutate the original
+1. Deleting or resetting the engineer workspace does not mutate the original
    workspace registration.
 
 ## Failure Modes To Expect
