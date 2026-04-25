@@ -153,7 +153,13 @@ impl TeamDaemon {
             else {
                 continue;
             };
-            if expires_at > now || task_has_claim_progress(&task, &self.worktree_dir(lookup_name)) {
+            if expires_at > now
+                || task_has_claim_progress(
+                    &task,
+                    &self.worktree_dir(lookup_name),
+                    self.config.team_config.trunk_branch(),
+                )
+            {
                 continue;
             }
 
@@ -398,8 +404,11 @@ fn task_claim_expiry(task: &crate::task::Task, default_ttl_secs: u64) -> Option<
     Some(claimed_at + chrono::Duration::seconds(ttl_secs as i64))
 }
 
-fn latest_commit_timestamp(work_dir: &std::path::Path) -> Option<DateTime<Utc>> {
-    if crate::team::git_cmd::rev_list_count(work_dir, "main..HEAD")
+fn latest_commit_timestamp(
+    work_dir: &std::path::Path,
+    trunk_branch: &str,
+) -> Option<DateTime<Utc>> {
+    if crate::team::git_cmd::rev_list_count(work_dir, &format!("{trunk_branch}..HEAD"))
         .ok()
         .is_none_or(|count| count == 0)
     {
@@ -417,12 +426,16 @@ fn latest_commit_timestamp(work_dir: &std::path::Path) -> Option<DateTime<Utc>> 
     parse_rfc3339_utc(stdout.trim())
 }
 
-fn task_has_claim_progress(task: &crate::task::Task, work_dir: &std::path::Path) -> bool {
+fn task_has_claim_progress(
+    task: &crate::task::Task,
+    work_dir: &std::path::Path,
+    trunk_branch: &str,
+) -> bool {
     let Some(last_progress_at) = task.last_progress_at.as_deref().and_then(parse_rfc3339_utc)
     else {
         return false;
     };
-    if latest_commit_timestamp(work_dir).is_some_and(|ts| ts > last_progress_at) {
+    if latest_commit_timestamp(work_dir, trunk_branch).is_some_and(|ts| ts > last_progress_at) {
         return true;
     }
     if crate::team::git_cmd::has_user_changes(work_dir).unwrap_or(false) {
@@ -438,8 +451,8 @@ mod tests {
     use crate::team::events::read_events;
     use crate::team::task_cmd::{set_optional_string, set_optional_u64, update_task_frontmatter};
     use crate::team::test_support::{
-        TestDaemonBuilder, engineer_member, init_git_repo, manager_member, write_board_task_file,
-        write_owned_task_file,
+        TestDaemonBuilder, engineer_member, git_ok, init_git_repo, manager_member,
+        write_board_task_file, write_owned_task_file,
     };
 
     fn auto_doctor_daemon(repo: &std::path::Path, use_worktrees: bool) -> TeamDaemon {
@@ -561,6 +574,46 @@ mod tests {
                 .any(|action| action.action_type == "stale_claim_reclaimed"
                     && action.task_id == Some(23))
         );
+    }
+
+    #[test]
+    fn claim_progress_uses_configured_trunk_branch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "auto_doctor_mainline_progress");
+        git_ok(&repo, &["checkout", "-b", "mainline"]);
+        git_ok(&repo, &["checkout", "-b", "eng-1/task-24"]);
+        std::fs::write(
+            repo.join("src").join("mainline_progress.rs"),
+            "pub fn progress() {}\n",
+        )
+        .unwrap();
+        git_ok(&repo, &["add", "."]);
+        git_ok(&repo, &["commit", "-m", "mainline claim progress"]);
+        write_owned_task_file(&repo, 24, "mainline-progress", "in-progress", "eng-1");
+        let stale_time = (Utc::now() - chrono::Duration::hours(2)).to_rfc3339();
+        update_task_frontmatter(
+            &repo
+                .join(".batty")
+                .join("team_config")
+                .join("board")
+                .join("tasks")
+                .join("024-mainline-progress.md"),
+            |mapping| {
+                set_optional_string(mapping, "last_progress_at", Some(&stale_time));
+            },
+        )
+        .unwrap();
+        let task = crate::task::Task::from_file(
+            &repo
+                .join(".batty")
+                .join("team_config")
+                .join("board")
+                .join("tasks")
+                .join("024-mainline-progress.md"),
+        )
+        .unwrap();
+
+        assert!(task_has_claim_progress(&task, &repo, "mainline"));
     }
 
     #[test]

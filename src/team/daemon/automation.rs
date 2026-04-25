@@ -596,8 +596,12 @@ impl TeamDaemon {
             };
 
             if should_check_progress
-                && let Some(progress_type) =
-                    task_claim_progress_type(task, &work_dir, current_output_bytes)
+                && let Some(progress_type) = task_claim_progress_type(
+                    task,
+                    &work_dir,
+                    current_output_bytes,
+                    self.config.team_config.trunk_branch(),
+                )
             {
                 if expires_at <= now && progress_type == "dirty_files" {
                     self.intervention_cooldowns
@@ -2552,14 +2556,16 @@ impl TeamDaemon {
             dispatchable_count: dispatchable_task_count,
         };
         let prompt = crate::team::tact::compose_planning_prompt_with_recovery_context(
-            idle_engineer_count,
-            &board_summary,
-            &recent_completions,
-            &roadmap_context,
-            &project_goals,
-            &self.config.team_config.name,
-            &blocked_task_summaries,
-            &review_drain_task_summaries,
+            crate::team::tact::PlanningPromptRecoveryContext {
+                idle_engineer_count,
+                board_summary: &board_summary,
+                recent_completions: &recent_completions,
+                roadmap_context: &roadmap_context,
+                project_goals: &project_goals,
+                project_name: &self.config.team_config.name,
+                blocked_task_summaries: &blocked_task_summaries,
+                review_task_summaries: &review_drain_task_summaries,
+            },
         );
         let body = format!(
             "HIGH PRIORITY: planning cycle triggered because idle engineers outnumber dispatchable tasks.\n\n{prompt}"
@@ -3175,8 +3181,11 @@ fn parse_rfc3339_utc(value: &str) -> Option<DateTime<Utc>> {
         .map(|timestamp| timestamp.with_timezone(&Utc))
 }
 
-fn latest_commit_timestamp(work_dir: &std::path::Path) -> Option<DateTime<Utc>> {
-    if crate::team::git_cmd::rev_list_count(work_dir, "main..HEAD")
+fn latest_commit_timestamp(
+    work_dir: &std::path::Path,
+    trunk_branch: &str,
+) -> Option<DateTime<Utc>> {
+    if crate::team::git_cmd::rev_list_count(work_dir, &format!("{trunk_branch}..HEAD"))
         .ok()
         .is_none_or(|count| count == 0)
     {
@@ -3213,12 +3222,13 @@ fn task_claim_progress_type(
     task: &crate::task::Task,
     work_dir: &std::path::Path,
     current_output_bytes: u64,
+    trunk_branch: &str,
 ) -> Option<&'static str> {
     let last_progress_at = task
         .last_progress_at
         .as_deref()
         .and_then(parse_rfc3339_utc)?;
-    if latest_commit_timestamp(work_dir).is_some_and(|ts| ts > last_progress_at) {
+    if latest_commit_timestamp(work_dir, trunk_branch).is_some_and(|ts| ts > last_progress_at) {
         return Some("commit");
     }
     if has_claim_progress_worktree_changes(work_dir) {
@@ -3279,7 +3289,12 @@ impl TeamDaemon {
             output_growth: current_output_bytes > task.last_output_bytes.unwrap_or(0),
             recent_claim_progress: task_recent_claim_progress(task, now, progress_window),
             fresh_claim_grace: task_in_fresh_claim_grace(task, now, progress_window),
-            live_progress_type: task_claim_progress_type(task, &work_dir, current_output_bytes),
+            live_progress_type: task_claim_progress_type(
+                task,
+                &work_dir,
+                current_output_bytes,
+                self.config.team_config.trunk_branch(),
+            ),
         })
     }
 
@@ -3313,7 +3328,7 @@ mod tests {
     use super::super::*;
     use super::{
         ClaimedTaskBranchMismatch, active_stale_review_entries,
-        select_authoritative_multi_claim_task,
+        select_authoritative_multi_claim_task, task_claim_progress_type,
     };
     use crate::team::config::RoleType;
     use crate::team::config::{BoardConfig, WorkflowMode, WorkflowPolicy};
@@ -3801,6 +3816,38 @@ thread 'tmux::tests::split_window_horizontal_creates_new_pane' panicked at src/t
 
         assert!(planning_inbox_messages(&tmp).is_empty());
         assert!(!daemon.planning_cycle_active);
+    }
+
+    #[test]
+    fn claim_progress_commit_detection_uses_configured_trunk_branch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "claim-progress-mainline");
+        git_ok(&repo, &["checkout", "-b", "mainline"]);
+        git_ok(&repo, &["checkout", "-b", "eng-1/task-42"]);
+        std::fs::write(repo.join("progress.txt"), "task progress\n").unwrap();
+        git_ok(&repo, &["add", "."]);
+        git_ok(&repo, &["commit", "-m", "task progress"]);
+        git_ok(&repo, &["checkout", "main"]);
+        git_ok(
+            &repo,
+            &[
+                "merge",
+                "--no-ff",
+                "eng-1/task-42",
+                "-m",
+                "merge task progress to main",
+            ],
+        );
+        git_ok(&repo, &["checkout", "eng-1/task-42"]);
+
+        let mut task = test_task(42, "in-progress", Some("eng-1"), None);
+        task.last_progress_at = Some("2000-01-01T00:00:00Z".to_string());
+
+        assert_eq!(
+            task_claim_progress_type(&task, &repo, 0, "mainline"),
+            Some("commit")
+        );
+        assert_eq!(task_claim_progress_type(&task, &repo, 0, "main"), None);
     }
 
     #[test]

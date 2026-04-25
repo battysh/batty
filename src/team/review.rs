@@ -165,6 +165,15 @@ pub fn validate_review_candidate(
     project_root: &Path,
     meta: &WorkflowMeta,
 ) -> anyhow::Result<ReviewEligibility> {
+    let trunk_branch = configured_trunk_branch(project_root);
+    validate_review_candidate_from_trunk(project_root, meta, &trunk_branch)
+}
+
+pub fn validate_review_candidate_from_trunk(
+    project_root: &Path,
+    meta: &WorkflowMeta,
+    trunk_branch: &str,
+) -> anyhow::Result<ReviewEligibility> {
     let branch = meta
         .branch
         .as_deref()
@@ -191,7 +200,7 @@ pub fn validate_review_candidate(
     let commit = commit.expect("commit checked above");
 
     let commit_merged =
-        match crate::team::git_cmd::merge_base_is_ancestor(project_root, commit, "main") {
+        match crate::team::git_cmd::merge_base_is_ancestor(project_root, commit, trunk_branch) {
             Ok(merged) => merged,
             Err(_) => {
                 return Ok(ReviewEligibility::MissingMetadata {
@@ -201,12 +210,12 @@ pub fn validate_review_candidate(
         };
     if commit_merged {
         return Ok(ReviewEligibility::AlreadyMerged {
-            reason: format!("commit `{commit}` is already on main"),
+            reason: format!("commit `{commit}` is already on {trunk_branch}"),
         });
     }
 
     let branch_merged =
-        match crate::team::task_loop::branch_is_merged_into(project_root, branch, "main") {
+        match crate::team::task_loop::branch_is_merged_into(project_root, branch, trunk_branch) {
             Ok(merged) => merged,
             Err(_) => {
                 return Ok(ReviewEligibility::MissingMetadata {
@@ -216,7 +225,7 @@ pub fn validate_review_candidate(
         };
     if branch_merged {
         return Ok(ReviewEligibility::AlreadyMerged {
-            reason: format!("branch `{branch}` is already merged into main"),
+            reason: format!("branch `{branch}` is already merged into {trunk_branch}"),
         });
     }
 
@@ -227,6 +236,16 @@ pub(crate) fn classify_review_task(
     project_root: &Path,
     task: &Task,
     board_tasks: &[Task],
+) -> ReviewQueueState {
+    let trunk_branch = configured_trunk_branch(project_root);
+    classify_review_task_from_trunk(project_root, task, board_tasks, &trunk_branch)
+}
+
+pub(crate) fn classify_review_task_from_trunk(
+    project_root: &Path,
+    task: &Task,
+    board_tasks: &[Task],
+    trunk_branch: &str,
 ) -> ReviewQueueState {
     if task.status != "review" {
         return ReviewQueueState::Current;
@@ -243,7 +262,7 @@ pub(crate) fn classify_review_task(
     }
 
     if let Some(ReviewEligibility::AlreadyMerged { reason }) =
-        review_eligibility_for_task(project_root, task)
+        review_eligibility_for_task_from_trunk(project_root, task, trunk_branch)
     {
         return ReviewQueueState::Stale(StaleReviewState {
             reason,
@@ -296,6 +315,21 @@ pub(crate) fn assess_review_merge_remediation(
     project_root: &Path,
     task: &Task,
 ) -> ReviewMergeRemediation {
+    let trunk_branch = configured_trunk_branch(project_root);
+    assess_review_merge_remediation_from_trunk(project_root, task, &trunk_branch)
+}
+
+fn configured_trunk_branch(project_root: &Path) -> String {
+    crate::team::config::TeamConfig::load(&crate::team::team_config_path(project_root))
+        .map(|config| config.trunk_branch().to_string())
+        .unwrap_or_else(|_| crate::team::config::default_trunk_branch())
+}
+
+pub(crate) fn assess_review_merge_remediation_from_trunk(
+    project_root: &Path,
+    task: &Task,
+    trunk_branch: &str,
+) -> ReviewMergeRemediation {
     let expected_branch = task
         .branch
         .as_deref()
@@ -308,11 +342,12 @@ pub(crate) fn assess_review_merge_remediation(
         .and_then(|engineer| review_worktree_branch(project_root, engineer));
     let commits_ahead = expected_branch
         .as_deref()
-        .and_then(|branch| branch_commits_ahead_of_main(project_root, branch));
-    let merged_reason = match review_eligibility_for_task(project_root, task) {
-        Some(ReviewEligibility::AlreadyMerged { reason }) => Some(reason),
-        _ => None,
-    };
+        .and_then(|branch| branch_commits_ahead_of_trunk(project_root, branch, trunk_branch));
+    let merged_reason =
+        match review_eligibility_for_task_from_trunk(project_root, task, trunk_branch) {
+            Some(ReviewEligibility::AlreadyMerged { reason }) => Some(reason),
+            _ => None,
+        };
 
     if let Some(reason) = merged_reason {
         return ReviewMergeRemediation {
@@ -328,7 +363,7 @@ pub(crate) fn assess_review_merge_remediation(
         let branch = expected_branch.as_deref().unwrap_or("unknown");
         return ReviewMergeRemediation {
             kind: ReviewMergeRemediationKind::Normalize,
-            reason: format!("recorded branch `{branch}` has no commits ahead of main"),
+            reason: format!("recorded branch `{branch}` has no commits ahead of {trunk_branch}"),
             expected_branch,
             actual_branch,
             commits_ahead,
@@ -373,7 +408,7 @@ pub(crate) fn assess_review_merge_remediation(
         Some(ahead) if ahead > 0 => ReviewMergeRemediation {
             kind: ReviewMergeRemediationKind::Merge,
             reason: format!(
-                "recorded branch `{expected_branch_name}` still has {ahead} commit(s) ahead of main"
+                "recorded branch `{expected_branch_name}` still has {ahead} commit(s) ahead of {trunk_branch}"
             ),
             expected_branch,
             actual_branch,
@@ -382,7 +417,7 @@ pub(crate) fn assess_review_merge_remediation(
         Some(_) => ReviewMergeRemediation {
             kind: ReviewMergeRemediationKind::Normalize,
             reason: format!(
-                "recorded branch `{expected_branch_name}` has no commits ahead of main"
+                "recorded branch `{expected_branch_name}` has no commits ahead of {trunk_branch}"
             ),
             expected_branch,
             actual_branch,
@@ -391,7 +426,7 @@ pub(crate) fn assess_review_merge_remediation(
         None => ReviewMergeRemediation {
             kind: ReviewMergeRemediationKind::Suppress,
             reason: format!(
-                "could not inspect `main..{expected_branch_name}` to verify merge safety"
+                "could not inspect `{trunk_branch}..{expected_branch_name}` to verify merge safety"
             ),
             expected_branch,
             actual_branch,
@@ -400,7 +435,11 @@ pub(crate) fn assess_review_merge_remediation(
     }
 }
 
-fn review_eligibility_for_task(project_root: &Path, task: &Task) -> Option<ReviewEligibility> {
+fn review_eligibility_for_task_from_trunk(
+    project_root: &Path,
+    task: &Task,
+    trunk_branch: &str,
+) -> Option<ReviewEligibility> {
     let meta = WorkflowMeta {
         state: TaskState::Review,
         branch: task.branch.clone().or_else(|| {
@@ -415,7 +454,7 @@ fn review_eligibility_for_task(project_root: &Path, task: &Task) -> Option<Revie
         }),
         ..WorkflowMeta::default()
     };
-    validate_review_candidate(project_root, &meta).ok()
+    validate_review_candidate_from_trunk(project_root, &meta, trunk_branch).ok()
 }
 
 fn select_current_lane<'a>(
@@ -488,9 +527,13 @@ fn review_worktree_commit(project_root: &Path, engineer: &str) -> Option<String>
     (!value.is_empty()).then_some(value)
 }
 
-fn branch_commits_ahead_of_main(project_root: &Path, branch: &str) -> Option<u32> {
+fn branch_commits_ahead_of_trunk(
+    project_root: &Path,
+    branch: &str,
+    trunk_branch: &str,
+) -> Option<u32> {
     let output = Command::new("git")
-        .args(["rev-list", "--count", &format!("main..{branch}")])
+        .args(["rev-list", "--count", &format!("{trunk_branch}..{branch}")])
         .current_dir(project_root)
         .output()
         .ok()?;
@@ -589,6 +632,7 @@ mod tests {
     };
     use crate::team::test_support::{git_ok, init_git_repo};
     use std::fs;
+    use std::path::Path;
     use std::process::Command;
     use tempfile::tempdir;
 
@@ -605,6 +649,30 @@ mod tests {
             }),
             ..WorkflowMeta::default()
         }
+    }
+
+    fn write_team_config(project_root: &Path, trunk_branch: &str) {
+        let config_dir = crate::team::team_config_dir(project_root);
+        fs::create_dir_all(&config_dir).unwrap();
+        fs::write(
+            config_dir.join(crate::team::TEAM_CONFIG_FILE),
+            format!(
+                r#"
+name: review-test
+trunk_branch: {trunk_branch}
+roles:
+  - name: manager
+    role_type: manager
+    agent: claude
+    talks_to: [eng-1]
+  - name: eng-1
+    role_type: engineer
+    agent: codex
+    talks_to: [manager]
+"#
+            ),
+        )
+        .unwrap();
     }
 
     #[test]
@@ -768,6 +836,96 @@ mod tests {
             ReviewEligibility::AlreadyMerged {
                 reason: format!("commit `{commit}` is already on main")
             }
+        );
+    }
+
+    #[test]
+    fn validate_review_candidate_uses_configured_trunk_branch() {
+        let tmp = tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "review_mainline_meta");
+
+        git_ok(&repo, &["checkout", "-b", "mainline"]);
+        git_ok(&repo, &["checkout", "-b", "eng-1/task-43"]);
+        fs::write(
+            repo.join("src").join("review_mainline.rs"),
+            "pub fn review_mainline() {}\n",
+        )
+        .unwrap();
+        git_ok(&repo, &["add", "."]);
+        git_ok(&repo, &["commit", "-m", "review mainline candidate"]);
+        let commit = crate::team::test_support::git_stdout(&repo, &["rev-parse", "HEAD"]);
+        git_ok(&repo, &["checkout", "mainline"]);
+        git_ok(
+            &repo,
+            &[
+                "merge",
+                "--no-ff",
+                "eng-1/task-43",
+                "-m",
+                "merge to mainline",
+            ],
+        );
+        git_ok(&repo, &["checkout", "main"]);
+
+        let meta = WorkflowMeta {
+            state: TaskState::Review,
+            branch: Some("eng-1/task-43".to_string()),
+            commit: Some(commit.clone()),
+            ..WorkflowMeta::default()
+        };
+
+        write_team_config(&repo, "mainline");
+
+        let eligibility = validate_review_candidate(&repo, &meta).unwrap();
+        assert_eq!(
+            eligibility,
+            ReviewEligibility::AlreadyMerged {
+                reason: format!("commit `{commit}` is already on mainline")
+            }
+        );
+    }
+
+    #[test]
+    fn classify_review_task_uses_configured_trunk_branch() {
+        let tmp = tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "review_mainline_classify");
+
+        git_ok(&repo, &["checkout", "-b", "mainline"]);
+        git_ok(&repo, &["checkout", "-b", "eng-1/task-44"]);
+        fs::write(
+            repo.join("src").join("review_mainline_classify.rs"),
+            "pub fn review_mainline_classify() {}\n",
+        )
+        .unwrap();
+        git_ok(&repo, &["add", "."]);
+        git_ok(&repo, &["commit", "-m", "review mainline classify"]);
+        let commit = crate::team::test_support::git_stdout(&repo, &["rev-parse", "HEAD"]);
+        git_ok(&repo, &["checkout", "mainline"]);
+        git_ok(
+            &repo,
+            &[
+                "merge",
+                "--no-ff",
+                "eng-1/task-44",
+                "-m",
+                "merge classify to mainline",
+            ],
+        );
+        git_ok(&repo, &["checkout", "main"]);
+        write_team_config(&repo, "mainline");
+
+        let review = Task {
+            branch: Some("eng-1/task-44".to_string()),
+            commit: Some(commit.clone()),
+            ..review_task(44, "eng-1")
+        };
+
+        assert_eq!(
+            classify_review_task(&repo, &review, std::slice::from_ref(&review)),
+            ReviewQueueState::Stale(StaleReviewState {
+                reason: format!("commit `{commit}` is already on mainline"),
+                next_step: ReviewNormalizationStep::Merge,
+            })
         );
     }
 

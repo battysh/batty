@@ -216,7 +216,11 @@ impl TeamDaemon {
             bail!("merge queue execution is not yet implemented for multi-repo projects");
         }
 
-        if let Some((reason, detail)) = merge_request_skip_reason(self.project_root(), request)? {
+        if let Some((reason, detail)) = merge_request_skip_reason(
+            self.project_root(),
+            request,
+            self.config.team_config.trunk_branch(),
+        )? {
             warn!(
                 task_id = request.task_id,
                 engineer = request.engineer,
@@ -576,6 +580,7 @@ impl TeamDaemon {
 fn merge_request_skip_reason(
     project_root: &std::path::Path,
     request: &MergeRequest,
+    trunk_branch: &str,
 ) -> Result<Option<(AutoMergeSkipReason, String)>> {
     let task = load_tasks_from_dir(
         &project_root
@@ -606,7 +611,7 @@ fn merge_request_skip_reason(
         return Ok(Some((AutoMergeSkipReason::MissingPacket, detail)));
     }
 
-    if let Some(detail) = unavailable_branch_detail(request)? {
+    if let Some(detail) = unavailable_branch_detail(request, trunk_branch)? {
         return Ok(Some((AutoMergeSkipReason::NoBranch, detail)));
     }
 
@@ -906,7 +911,7 @@ fn resolve_project_path(project_root: &std::path::Path, path: &str) -> PathBuf {
     }
 }
 
-fn unavailable_branch_detail(request: &MergeRequest) -> Result<Option<String>> {
+fn unavailable_branch_detail(request: &MergeRequest, trunk_branch: &str) -> Result<Option<String>> {
     if !request.worktree_dir.exists() {
         return Ok(Some(format!(
             "worktree '{}' does not exist",
@@ -930,18 +935,18 @@ fn unavailable_branch_detail(request: &MergeRequest) -> Result<Option<String>> {
         )));
     }
 
-    let commits_ahead = match commits_ahead_of_main(&request.worktree_dir) {
+    let commits_ahead = match commits_ahead_of_trunk(&request.worktree_dir, trunk_branch) {
         Ok(commits) => commits,
         Err(error) => {
             return Ok(Some(format!(
-                "failed to count commits ahead of main for '{}': {error}",
+                "failed to count commits ahead of {trunk_branch} for '{}': {error}",
                 request.branch
             )));
         }
     };
     if commits_ahead == 0 {
         return Ok(Some(format!(
-            "branch '{}' has no commits ahead of main",
+            "branch '{}' has no commits ahead of {trunk_branch}",
             request.branch
         )));
     }
@@ -949,20 +954,21 @@ fn unavailable_branch_detail(request: &MergeRequest) -> Result<Option<String>> {
     Ok(None)
 }
 
-fn commits_ahead_of_main(worktree_dir: &std::path::Path) -> Result<u32> {
+fn commits_ahead_of_trunk(worktree_dir: &std::path::Path, trunk_branch: &str) -> Result<u32> {
+    let range = format!("{trunk_branch}..HEAD");
     let output = Command::new("git")
-        .args(["rev-list", "--count", "main..HEAD"])
+        .args(["rev-list", "--count", &range])
         .current_dir(worktree_dir)
         .output()
         .with_context(|| {
             format!(
-                "failed to count commits ahead of main in {}",
+                "failed to count commits ahead of {trunk_branch} in {}",
                 worktree_dir.display()
             )
         })?;
     if !output.status.success() {
         bail!(
-            "git rev-list --count main..HEAD failed in {}: {}",
+            "git rev-list --count {range} failed in {}: {}",
             worktree_dir.display(),
             String::from_utf8_lossy(&output.stderr).trim()
         );
@@ -972,7 +978,7 @@ fn commits_ahead_of_main(worktree_dir: &std::path::Path) -> Result<u32> {
         .parse::<u32>()
         .with_context(|| {
             format!(
-                "failed to parse git rev-list --count main..HEAD output in {}",
+                "failed to parse git rev-list --count {range} output in {}",
                 worktree_dir.display()
             )
         })
@@ -1638,6 +1644,7 @@ mod tests {
                     files_changed: 1,
                     lines_changed: 1,
                 },
+                "main",
             )
             .unwrap();
 
@@ -1679,6 +1686,7 @@ mod tests {
                 files_changed: 1,
                 lines_changed: 1,
             },
+            "main",
         )
         .unwrap();
 
@@ -1689,6 +1697,48 @@ mod tests {
                     && detail.contains("commit marker missing")
                     && detail.contains("worktree marker missing")
         ));
+    }
+
+    #[test]
+    fn unavailable_branch_detail_counts_against_configured_trunk() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "batty-merge-queue-mainline-test");
+        git_ok(&repo, &["checkout", "-b", "mainline"]);
+        let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
+        git_ok(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "eng-1/task-44",
+                worktree_dir.to_str().unwrap(),
+                "mainline",
+            ],
+        );
+        std::fs::write(worktree_dir.join("note.txt"), "queued merge\n").unwrap();
+        git_ok(&worktree_dir, &["add", "note.txt"]);
+        git_ok(&worktree_dir, &["commit", "-m", "queue merge"]);
+
+        let detail = unavailable_branch_detail(
+            &MergeRequest {
+                task_id: 44,
+                engineer: "eng-1".to_string(),
+                branch: "eng-1/task-44".to_string(),
+                worktree_dir,
+                queued_at: Instant::now(),
+                test_passed: true,
+                should_post_merge_verify: true,
+                test_duration_ms: 1,
+                confidence: 0.95,
+                files_changed: 1,
+                lines_changed: 1,
+            },
+            "mainline",
+        )
+        .unwrap();
+
+        assert_eq!(detail, None);
     }
 
     #[test]
