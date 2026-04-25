@@ -26,16 +26,16 @@ exhaustive clap-generated output, see [reference/cli.md](reference/cli.md).
 
 ## Workflow Commands
 
-| Command                                        | Purpose                                                                              |
-| ---------------------------------------------- | ------------------------------------------------------------------------------------ |
-| `batty board list --status todo`               | Inspect runnable backlog                                                             |
-| `batty board summary`                          | Quick status counts by workflow state                                                |
-| `batty board health`                           | Detect stale tasks, blocked work, and dependency issues                              |
-| `batty board archive --older-than 7d`          | Move old done tasks out of the active board                                          |
-| `batty queue`                                  | Inspect pending dispatch work                                                        |
-| `batty review <id> <disposition>`              | Record approve/request-changes/reject decisions                                      |
-| `batty task schedule <id> --at ... --cron ...` | Delay or recur a task                                                                |
-| `batty merge <engineer>`                       | Merge an engineer branch manually                                                    |
+| Command                                        | Purpose                                                                                             |
+| ---------------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| `batty board list --status todo`               | Inspect runnable backlog                                                                            |
+| `batty board summary`                          | Quick status counts by workflow state                                                               |
+| `batty board health`                           | Detect stale tasks, blocked work, and dependency issues                                             |
+| `batty board archive --older-than 7d`          | Move old done tasks out of the active board                                                         |
+| `batty queue`                                  | Inspect pending dispatch work                                                                       |
+| `batty review <id> <disposition>`              | Record approve/request-changes/reject decisions                                                     |
+| `batty task schedule <id> --at ... --cron ...` | Delay or recur a task                                                                               |
+| `batty merge <engineer>`                       | Merge an engineer branch manually                                                                   |
 | `batty release [--tag ...]`                    | Verify clean green `main`, write release notes, create the tag, and write a guarded publish handoff |
 
 ## Observability

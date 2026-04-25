@@ -241,8 +241,7 @@ batty start
 **Cause:** The Discord bot can read channel metadata but cannot read message
 text because **Message Content Intent** is disabled.
 
-Check `batty status` and `.batty/daemon.log` for a `Discord MESSAGE_CONTENT
-intent fault`. If present, open the Discord Developer Portal, select the bot
+Check `batty status` and `.batty/daemon.log` for a `Discord MESSAGE_CONTENT intent fault`. If present, open the Discord Developer Portal, select the bot
 application, go to Bot -> Privileged Gateway Intents, enable **Message Content
 Intent**, then restart Batty.
 
