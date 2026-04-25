@@ -20,6 +20,10 @@ docs publish workflows are green on the release head.
   `docs/reference/environment-variables.md`, `docs/troubleshooting.md`) —
   mdformat-clean docs keep the Docs Quality workflow green after generated
   references are refreshed in CI.
+- **Align CI skips for parallel-sensitive temp-worktree tests**
+  (`.github/workflows/ci.yml`) — the Ubuntu release gate skips two known
+  environment-sensitive tests that pass in isolation but can race under the
+  full parallel CI suite.
 
 ### Tests
 
@@ -30,6 +34,7 @@ docs publish workflows are green on the release head.
 - `git diff --check`
 - GitHub CI run `24936688420`
 - GitHub Docs Publish run `24936688411`
+- Targeted local `cargo test --lib` runs for the two CI-skipped tests
 
 ## 0.11.62 — 2026-04-25
 
