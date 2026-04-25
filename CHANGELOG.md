@@ -2,6 +2,35 @@
 
 All notable changes to Batty are documented here.
 
+## 0.11.63 — 2026-04-25
+
+Docs-quality follow-up for the launch-stability release. This release keeps
+the GitHub release train aligned after the `v0.11.62` cut by refreshing the
+generated CLI reference and normalizing markdown formatting so the main CI and
+docs publish workflows are green on the release head.
+
+### Fixes
+
+- **Refresh generated CLI release references**
+  (`docs/reference/cli.md`) — generated command output now includes the current
+  activity maintenance and stale-daemon restart surfaces, and matches the
+  shipped release command summary.
+- **Normalize markdown docs formatting**
+  (`docs/brazil-workspace-worktrees.md`, `docs/cli-reference.md`,
+  `docs/reference/environment-variables.md`, `docs/troubleshooting.md`) —
+  mdformat-clean docs keep the Docs Quality workflow green after generated
+  references are refreshed in CI.
+
+### Tests
+
+- `./scripts/generate-docs.sh`
+- `mdformat --check docs/*.md docs/reference/*.md`
+- `npx --yes markdownlint-cli2 docs/*.md docs/reference/*.md`
+- `mkdocs build --strict`
+- `git diff --check`
+- GitHub CI run `24936688420`
+- GitHub Docs Publish run `24936688411`
+
 ## 0.11.62 — 2026-04-25
 
 Launch-stability release for the self-improvement control plane. This release
