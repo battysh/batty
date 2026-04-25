@@ -236,6 +236,25 @@ batty stop
 batty start
 ```
 
+## Discord commands arrive but are ignored
+
+**Cause:** The Discord bot can read channel metadata but cannot read message
+text because **Message Content Intent** is disabled.
+
+Check `batty status` and `.batty/daemon.log` for a `Discord MESSAGE_CONTENT
+intent fault`. If present, open the Discord Developer Portal, select the bot
+application, go to Bot -> Privileged Gateway Intents, enable **Message Content
+Intent**, then restart Batty.
+
+```sh
+batty stop
+batty start
+```
+
+Batty advances the Discord cursor even for empty-content messages so the same
+bad batch is not reprocessed forever; after enabling the intent, new
+content-bearing commands should be delivered normally.
+
 ## Daemon dies unexpectedly
 
 **Cause:** Check the daemon log for errors.

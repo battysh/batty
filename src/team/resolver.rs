@@ -141,7 +141,9 @@ pub fn dispatch_blocking_reason(task: &Task, tasks: &[Task]) -> Option<String> {
     if let Some(owner) = task.claimed_by.as_deref()
         && !retry_required
     {
-        return Some(format!("claimed by {owner}"));
+        return Some(format!(
+            "claimed by {owner}; next: release stale claim or normalize matching active work to in-progress"
+        ));
     }
 
     if let Some(reason) = task.blocked.as_ref() {

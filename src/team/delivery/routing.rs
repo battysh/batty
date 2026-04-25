@@ -22,6 +22,7 @@ use crate::team::supervisory_notice::{
 };
 
 const MANAGER_DIGEST_BACKPRESSURE_COOLDOWN_SECS: u64 = 30;
+const SAME_TASK_PENDING_CAP: usize = 2;
 
 /// Extract a task ID from assignment body text like "Task #42: ..." or "Task #42 ...".
 fn extract_task_id_from_body(body: &str) -> Option<u32> {
@@ -74,6 +75,28 @@ fn shim_log_preview(body: &str) -> String {
         preview.push_str("...");
     }
     preview
+}
+
+fn pending_digest_key(from: &str, body: &str) -> Option<String> {
+    if from == "human" {
+        return None;
+    }
+    let msg = inbox::InboxMessage::new_send(from, "_pending", body);
+    let category = inbox::classify_message(&msg);
+    if !matches!(
+        category,
+        inbox::MessageCategory::Nudge
+            | inbox::MessageCategory::Reminder
+            | inbox::MessageCategory::Status
+            | inbox::MessageCategory::Acknowledgement
+    ) {
+        return None;
+    }
+    let task = inbox::extract_task_ids_from_body(body)
+        .first()
+        .copied()
+        .or_else(|| extract_task_id(body).and_then(|value| value.parse::<u32>().ok()));
+    task.map(|task_id| format!("{from}:{category:?}:task:{task_id}"))
 }
 
 fn format_batched_message(messages: &[inbox::InboxMessage]) -> String {
@@ -1122,6 +1145,43 @@ impl TeamDaemon {
         self.deliver_message(from, recipient, body).map(|_| ())
     }
 
+    fn queue_pending_message_capped(&mut self, recipient: &str, pending: PendingMessage) {
+        let key = pending_digest_key(&pending.from, &pending.body);
+        let queue = self
+            .pending_delivery_queue
+            .entry(recipient.to_string())
+            .or_default();
+
+        if let Some(key) = key {
+            let matching_count = queue
+                .iter()
+                .filter(|message| {
+                    pending_digest_key(&message.from, &message.body).as_deref()
+                        == Some(key.as_str())
+                })
+                .count();
+            if matching_count >= SAME_TASK_PENDING_CAP {
+                let collapsed_count = matching_count + 1;
+                queue.retain(|message| {
+                    pending_digest_key(&message.from, &message.body).as_deref()
+                        != Some(key.as_str())
+                });
+                queue.push(PendingMessage {
+                    from: pending.from,
+                    body: format!(
+                        "[task-current digest] collapsed {collapsed_count} stale same-task pending messages for {recipient}; latest follows:\n{}",
+                        pending.body
+                    ),
+                    message_id: pending.message_id,
+                    queued_at: pending.queued_at,
+                });
+                return;
+            }
+        }
+
+        queue.push(pending);
+    }
+
     fn deliver_message(
         &mut self,
         from: &str,
@@ -1193,15 +1253,15 @@ impl TeamDaemon {
                     state = %state,
                     "shim agent not ready; deferring to pending queue"
                 );
-                self.pending_delivery_queue
-                    .entry(recipient.to_string())
-                    .or_default()
-                    .push(PendingMessage {
+                self.queue_pending_message_capped(
+                    recipient,
+                    PendingMessage {
                         from: from.to_string(),
                         body: body.to_string(),
                         message_id: Some(message_id),
                         queued_at: Instant::now(),
-                    });
+                    },
+                );
                 let _ = append_shim_event_log(
                     &self.config.project_root,
                     recipient,
@@ -3599,6 +3659,66 @@ mod tests {
             queue[0].message_id.is_some(),
             "deferred shim delivery should preserve a message id"
         );
+    }
+
+    #[test]
+    fn pending_queue_collapses_same_task_low_signal_messages() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = failed_delivery_test_daemon(&tmp);
+        let (parent, _child) = crate::shim::protocol::socketpair().unwrap();
+        let channel = crate::shim::protocol::Channel::new(parent);
+        let handle = crate::team::daemon::agent_handle::AgentHandle::new(
+            "eng-1".into(),
+            channel,
+            999,
+            "codex".into(),
+            "codex".into(),
+            std::path::PathBuf::from("/tmp/test"),
+        );
+        daemon.shim_handles.insert("eng-1".to_string(), handle);
+
+        for i in 0..3 {
+            daemon
+                .deliver_message(
+                    "manager",
+                    "eng-1",
+                    &format!("stale reminder for Task #740 attempt {i}"),
+                )
+                .unwrap();
+        }
+
+        let queue = daemon.pending_delivery_queue.get("eng-1").unwrap();
+        assert_eq!(queue.len(), 1);
+        assert!(queue[0].body.contains("[task-current digest]"));
+        assert!(queue[0].body.contains("collapsed 3 stale same-task"));
+        assert!(queue[0].body.contains("attempt 2"));
+    }
+
+    #[test]
+    fn pending_queue_preserves_human_messages() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut daemon = failed_delivery_test_daemon(&tmp);
+        let (parent, _child) = crate::shim::protocol::socketpair().unwrap();
+        let channel = crate::shim::protocol::Channel::new(parent);
+        let handle = crate::team::daemon::agent_handle::AgentHandle::new(
+            "eng-1".into(),
+            channel,
+            999,
+            "codex".into(),
+            "codex".into(),
+            std::path::PathBuf::from("/tmp/test"),
+        );
+        daemon.shim_handles.insert("eng-1".to_string(), handle);
+
+        for i in 0..3 {
+            daemon
+                .deliver_message("human", "eng-1", &format!("Task #740 directive {i}"))
+                .unwrap();
+        }
+
+        let queue = daemon.pending_delivery_queue.get("eng-1").unwrap();
+        assert_eq!(queue.len(), 3);
+        assert!(queue.iter().all(|message| !message.body.contains("digest")));
     }
 
     #[test]

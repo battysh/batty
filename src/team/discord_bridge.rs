@@ -67,6 +67,16 @@ impl TeamDaemon {
             }
         };
 
+        if let Some(fault) = self
+            .discord_bot
+            .as_mut()
+            .and_then(|bot| bot.take_message_content_fault())
+        {
+            let message = fault.status_message();
+            warn!(message = %message, "discord message-content configuration fault");
+            self.record_loop_step_error("process_discord_queue", &message);
+        }
+
         if messages.is_empty() {
             return Ok(());
         }

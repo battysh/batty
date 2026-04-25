@@ -194,6 +194,7 @@ pub struct WorkflowMetrics {
     pub idle_with_runnable: Vec<String>,
     pub top_runnable_tasks: Vec<String>,
     pub blocked_dispatch_reasons: Vec<String>,
+    pub blocked_task_summaries: Vec<String>,
     pub oldest_review_age_secs: Option<u64>,
     pub oldest_assignment_age_secs: Option<u64>,
     // Review pipeline metrics (computed from event log)
@@ -2297,6 +2298,7 @@ fn compute_metrics_with_telemetry_and_aging(
         idle_with_runnable: board_metrics.idle_with_runnable,
         top_runnable_tasks: board_metrics.top_runnable_tasks,
         blocked_dispatch_reasons: board_metrics.blocked_dispatch_reasons,
+        blocked_task_summaries: board_metrics.blocked_task_summaries,
         oldest_review_age_secs: board_metrics.oldest_review_age_secs,
         oldest_assignment_age_secs: board_metrics.oldest_assignment_age_secs,
         auto_merge_count: review.auto_merge_count,
@@ -2337,6 +2339,7 @@ struct BoardMetrics {
     idle_with_runnable: Vec<String>,
     top_runnable_tasks: Vec<String>,
     blocked_dispatch_reasons: Vec<String>,
+    blocked_task_summaries: Vec<String>,
     oldest_review_age_secs: Option<u64>,
     oldest_assignment_age_secs: Option<u64>,
 }
@@ -2362,6 +2365,7 @@ fn compute_board_metrics(
             idle_with_runnable: Vec::new(),
             top_runnable_tasks: Vec::new(),
             blocked_dispatch_reasons: Vec::new(),
+            blocked_task_summaries: Vec::new(),
             oldest_review_age_secs: None,
             oldest_assignment_age_secs: None,
         });
@@ -2383,6 +2387,7 @@ fn compute_board_metrics(
             idle_with_runnable: Vec::new(),
             top_runnable_tasks: Vec::new(),
             blocked_dispatch_reasons: Vec::new(),
+            blocked_task_summaries: Vec::new(),
             oldest_review_age_secs: None,
             oldest_assignment_age_secs: None,
         });
@@ -2447,6 +2452,7 @@ fn compute_board_metrics(
     let top_runnable_tasks = top_runnable_task_summaries(&dispatchable_tasks, 3);
     let blocked_dispatch_reasons =
         blocked_dispatch_reason_summaries(&tasks, &dispatchable_task_ids, 3);
+    let blocked_task_summaries = blocked_task_recipe_summaries(&tasks, 5);
     let board_state = classify_workflow_board_state(
         &tasks,
         runnable_count,
@@ -2473,6 +2479,7 @@ fn compute_board_metrics(
         idle_with_runnable,
         top_runnable_tasks,
         blocked_dispatch_reasons,
+        blocked_task_summaries,
         oldest_review_age_secs,
         oldest_assignment_age_secs,
     })
@@ -2689,6 +2696,11 @@ pub fn format_metrics(metrics: &WorkflowMetrics) -> String {
     } else {
         metrics.blocked_dispatch_reasons.join("; ")
     };
+    let blocked_tasks = if metrics.blocked_task_summaries.is_empty() {
+        "-".to_string()
+    } else {
+        metrics.blocked_task_summaries.join("; ")
+    };
 
     let auto_merge_rate_str = metrics
         .auto_merge_rate
@@ -2721,6 +2733,7 @@ Aging Alerts: stale in-progress {} | aged todo {} | stale review {}\n\
 Idle With Runnable: {}\n\
 Top Runnable: {}\n\
 Blocked Dispatch: {}\n\
+Blocked Tasks: {}\n\
 Oldest Review Age: {}\n\
 Oldest Assignment Age: {}\n\n\
 Review Pipeline\n\
@@ -2741,6 +2754,7 @@ Merge Modes: direct ok {} / fail {} | isolated ok {} / fail {}",
         idle,
         top_runnable,
         blocked_dispatch,
+        blocked_tasks,
         format_age(metrics.oldest_review_age_secs),
         format_age(metrics.oldest_assignment_age_secs),
         metrics.in_review_count,
@@ -2863,6 +2877,47 @@ fn blocked_dispatch_reason_summaries(
         })
         .take(limit)
         .collect()
+}
+
+fn blocked_task_recipe_summaries(tasks: &[task::Task], limit: usize) -> Vec<String> {
+    tasks
+        .iter()
+        .filter(|task| task.status == "blocked" || task.blocked.is_some())
+        .take(limit)
+        .map(|task| {
+            let reason = task
+                .blocked_on
+                .as_deref()
+                .or(task.blocked.as_deref())
+                .unwrap_or("blocked without recorded reason");
+            let next = blocked_task_next_action(task, tasks, reason);
+            format!("#{} {}: {} Next: {}", task.id, task.title, reason, next)
+        })
+        .collect()
+}
+
+fn blocked_task_next_action(task: &task::Task, tasks: &[task::Task], reason: &str) -> String {
+    if let Some(dep_id) = task.depends_on.first() {
+        let dep_status = tasks
+            .iter()
+            .find(|candidate| candidate.id == *dep_id)
+            .map(|candidate| candidate.status.as_str())
+            .unwrap_or("missing");
+        return match dep_status {
+            "done" | "archived" => "clear stale dependency blocker and requeue".to_string(),
+            "blocked" => format!("unblock dependency #{dep_id} first"),
+            "missing" => format!("restore or remove missing dependency #{dep_id}"),
+            other => format!("finish dependency #{dep_id} ({other}) first"),
+        };
+    }
+    if reason.contains("preserve_failed_reset_skipped") {
+        return "inspect the named worktree, preserve dirty work, then clear the stale preservation blocker".to_string();
+    }
+    if reason.contains("release") || task.title.to_ascii_lowercase().contains("release") {
+        return "finish current fix queue and run `batty release --readiness` before tagging"
+            .to_string();
+    }
+    "record an explicit owner/command, then move to todo when executable".to_string()
 }
 
 fn project_root_from_board_dir(board_dir: &Path) -> Option<&Path> {
@@ -4216,8 +4271,14 @@ mod tests {
         assert_eq!(
             metrics.blocked_dispatch_reasons,
             vec![
-                "#5 Claimed todo: claimed by eng-3".to_string(),
+                "#5 Claimed todo: claimed by eng-3; next: release stale claim or normalize matching active work to in-progress".to_string(),
                 "#6 Waiting: unmet dependency #7 (in-progress)".to_string(),
+            ]
+        );
+        assert_eq!(
+            metrics.blocked_task_summaries,
+            vec![
+                "#2 Blocked: blocked without recorded reason Next: record an explicit owner/command, then move to todo when executable".to_string()
             ]
         );
         assert!(metrics.oldest_review_age_secs.is_some());
@@ -4331,6 +4392,41 @@ mod tests {
         assert_eq!(metrics.runnable_count, 0);
         assert_eq!(metrics.blocked_count, 1);
         assert!(format_metrics(&metrics).contains("Board State: blocked-only-board"));
+        assert!(format_metrics(&metrics).contains(
+            "#737 Blocked only: missing unblock task Next: record an explicit owner/command"
+        ));
+    }
+
+    #[test]
+    fn blocked_task_summaries_include_dependency_recovery_hints() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_board_task(
+            tmp.path(),
+            "001-parent.md",
+            "id: 1\ntitle: Parent\nstatus: done\npriority: high\n",
+        );
+        write_board_task(
+            tmp.path(),
+            "002-child.md",
+            "id: 2\ntitle: Child\nstatus: blocked\npriority: high\nblocked_on: waiting on parent\ndepends_on:\n  - 1\nclaimed_by: eng-1\n",
+        );
+        write_board_task(
+            tmp.path(),
+            "003-missing.md",
+            "id: 3\ntitle: Missing dep\nstatus: blocked\npriority: high\nblocked_on: waiting on missing\ndepends_on:\n  - 404\n",
+        );
+
+        let metrics = compute_metrics(&board_dir(tmp.path()), &[engineer("eng-1")]).unwrap();
+
+        assert_eq!(
+            metrics.blocked_task_summaries,
+            vec![
+                "#2 Child: waiting on parent Next: clear stale dependency blocker and requeue"
+                    .to_string(),
+                "#3 Missing dep: waiting on missing Next: restore or remove missing dependency #404"
+                    .to_string(),
+            ]
+        );
     }
 
     #[test]

@@ -407,6 +407,7 @@ impl TeamDaemon {
                     request.lines_changed,
                     success.mode,
                 );
+                self.check_binary_freshness_after_merge();
 
                 if let Some(ref manager_name) = manager_name {
                     let msg = format!(
@@ -1310,6 +1311,17 @@ mod tests {
         .to_string()
     }
 
+    fn git_commit_with_timestamp(repo_dir: &Path, message: &str, timestamp: &str) {
+        let status = Command::new("git")
+            .args(["commit", "-m", message])
+            .env("GIT_AUTHOR_DATE", timestamp)
+            .env("GIT_COMMITTER_DATE", timestamp)
+            .current_dir(repo_dir)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git commit should succeed");
+    }
+
     #[test]
     fn verification_retry_required_merge_queue_redispatches_review_task() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1449,6 +1461,75 @@ mod tests {
         assert!(
             crate::team::checkpoint::read_preserved_lane_record(&repo, "main").is_some(),
             "runtime-only dirty main state should be snapshotted before merge"
+        );
+    }
+
+    #[test]
+    fn daemon_process_merge_queue_records_binary_refresh_after_source_merge() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_git_repo(&tmp, "batty-merge-queue-refresh-test");
+        write_task_file(&repo, 733, "daemon-refresh-task", "review");
+
+        let team_config_dir = repo.join(".batty").join("team_config");
+        let worktree_dir = repo.join(".batty").join("worktrees").join("eng-1");
+        setup_engineer_worktree(&repo, &worktree_dir, "eng-1", &team_config_dir).unwrap();
+        std::fs::create_dir_all(worktree_dir.join("src")).unwrap();
+        std::fs::write(
+            worktree_dir.join("src").join("daemon_refresh.rs"),
+            "pub fn daemon_refresh_after_merge() -> bool { true }\n",
+        )
+        .unwrap();
+        git_ok(&worktree_dir, &["add", "src/daemon_refresh.rs"]);
+        git_commit_with_timestamp(
+            &worktree_dir,
+            "Task #733: trigger daemon refresh after merge",
+            "@2000000000",
+        );
+        let branch = current_worktree_branch(&worktree_dir).unwrap();
+        let commit = current_head(&worktree_dir);
+        write_completion_metadata(
+            &repo,
+            733,
+            "daemon-refresh-task",
+            &branch,
+            &worktree_dir,
+            &commit,
+        );
+
+        let members = vec![
+            manager_member("manager", None),
+            engineer_member("eng-1", Some("manager"), true),
+        ];
+        let mut daemon = make_test_daemon(&repo, members);
+        daemon.set_active_task_for_test("eng-1", 733);
+        daemon.set_member_state_for_test("eng-1", MemberState::Working);
+        daemon.enqueue_merge_request(MergeRequest {
+            task_id: 733,
+            engineer: "eng-1".to_string(),
+            branch,
+            worktree_dir,
+            queued_at: Instant::now(),
+            test_passed: true,
+            should_post_merge_verify: false,
+            test_duration_ms: 1,
+            confidence: 0.95,
+            files_changed: 1,
+            lines_changed: 1,
+        });
+
+        daemon.process_merge_queue().unwrap();
+
+        let state = crate::team::daemon::health::binary_freshness::load_binary_refresh_state(&repo)
+            .unwrap()
+            .expect("post-merge source change should record pending binary refresh");
+        assert_eq!(
+            state.phase,
+            crate::team::daemon::health::binary_freshness::DaemonBinaryRefreshPhase::Pending
+        );
+        assert!(state.commits_behind >= 1);
+        assert_eq!(
+            state.last_subject,
+            "Task #733: trigger daemon refresh after merge"
         );
     }
 
