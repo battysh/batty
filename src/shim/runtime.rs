@@ -1627,7 +1627,7 @@ fn strip_claude_bullets(line: &str) -> String {
         let after = &trimmed['\u{23FA}'.len_utf8()..];
         // Preserve original leading whitespace minus the bullet
         let leading = line.len() - line.trim_start().len();
-        format!("{}{}", &" ".repeat(leading), after.trim_start())
+        format!("{}{}", " ".repeat(leading), after.trim_start())
     } else {
         line.to_string()
     }

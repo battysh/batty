@@ -575,26 +575,25 @@ impl TeamDaemon {
     /// Create a new daemon from resolved config and layout.
     pub fn new(config: DaemonConfig) -> Result<Self> {
         let is_git_repo = super::git_cmd::is_git_repo(&config.project_root);
-        let (is_multi_repo, sub_repo_names) =
-            if is_git_repo {
+        let (is_multi_repo, sub_repo_names) = if is_git_repo {
+            (false, Vec::new())
+        } else {
+            let subs = super::git_cmd::discover_sub_repos(&config.project_root);
+            if subs.is_empty() {
                 (false, Vec::new())
             } else {
-                let subs = super::git_cmd::discover_sub_repos(&config.project_root);
-                if subs.is_empty() {
-                    (false, Vec::new())
-                } else {
-                    let names: Vec<String> = subs
-                        .iter()
-                        .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
-                        .collect();
-                    info!(
-                        sub_repos = ?names,
-                        "Detected multi-repo project with {} sub-repos",
-                        names.len()
-                    );
-                    (true, names)
-                }
-            };
+                let names: Vec<String> = subs
+                    .iter()
+                    .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+                    .collect();
+                info!(
+                    sub_repos = ?names,
+                    "Detected multi-repo project with {} sub-repos",
+                    names.len()
+                );
+                (true, names)
+            }
+        };
         if !is_git_repo && !is_multi_repo {
             info!("Project is not a git repository \u{2014} git operations disabled");
         }
