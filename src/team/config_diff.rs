@@ -95,7 +95,6 @@ mod tests {
     fn minimal_config(engineer_instances: u32, manager_instances: u32) -> TeamConfig {
         TeamConfig {
             name: "test".into(),
-            workspace_type: crate::team::config::WorkspaceType::Generic,
             trunk_branch: crate::team::config::default_trunk_branch(),
             agent: None,
             workflow_mode: Default::default(),

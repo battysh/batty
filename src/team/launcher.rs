@@ -60,7 +60,6 @@ impl TeamDaemon {
         let result = if self.is_multi_repo {
             setup_workspace_worktree(
                 &self.config.project_root,
-                self.config.team_config.workspace_type,
                 &wt_dir,
                 &branch_name,
                 &team_config_dir,

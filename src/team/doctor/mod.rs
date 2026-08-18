@@ -157,11 +157,7 @@ pub fn build_report(project_root: &Path, fix: bool) -> Result<String> {
     };
     let resume =
         build_resume_eligibility(project_root, team_config.as_ref(), &members, &launch_state);
-    let workspace_type = team_config
-        .as_ref()
-        .map(|config| config.workspace_type)
-        .unwrap_or_default();
-    let worktrees = build_worktree_statuses(project_root, workspace_type, &members);
+    let worktrees = build_worktree_statuses(project_root, &members);
     let board_git_checks = build_board_git_checks(project_root);
     let board_dependency_graph = build_board_dependency_graph(project_root);
     let performance_checks = build_performance_checks(project_root);

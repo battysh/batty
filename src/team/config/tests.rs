@@ -52,7 +52,6 @@ fn parse_minimal_config() {
     assert_eq!(config.roles[0].role_type, RoleType::Architect);
     assert_eq!(config.roles[2].instances, 3);
     assert_eq!(config.workflow_mode, WorkflowMode::Legacy);
-    assert_eq!(config.workspace_type, WorkspaceType::Generic);
     assert!(config.orchestrator_pane);
     assert_eq!(
         config.event_log_max_bytes,
@@ -111,19 +110,6 @@ fn validate_trunk_branch_exists_reports_missing_configured_branch() {
     assert!(error.contains("configured trunk_branch `mainline` does not exist"));
     assert!(error.contains("refs/heads/mainline"));
     assert!(error.contains("refs/remotes/origin/mainline"));
-}
-
-#[test]
-fn parse_config_with_workspace_workspace_type() {
-    let yaml = minimal_yaml().replacen(
-        "name: test-team",
-        "name: test-team\nworkspace_type: workspace",
-        1,
-    );
-
-    let config: TeamConfig = serde_yaml::from_str(&yaml).unwrap();
-
-    assert_eq!(config.workspace_type, WorkspaceType::workspace);
 }
 
 #[test]

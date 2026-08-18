@@ -16,10 +16,9 @@ docs publish workflows are green on the release head.
   activity maintenance and stale-daemon restart surfaces, and matches the
   shipped release command summary.
 - **Normalize markdown docs formatting**
-  (`docs/workspace-workspace-worktrees.md`, `docs/cli-reference.md`,
-  `docs/reference/environment-variables.md`, `docs/troubleshooting.md`) —
-  mdformat-clean docs keep the Docs Quality workflow green after generated
-  references are refreshed in CI.
+  (`docs/cli-reference.md`, `docs/reference/environment-variables.md`,
+  `docs/troubleshooting.md`) — mdformat-clean docs keep the Docs Quality
+  workflow green after generated references are refreshed in CI.
 - **Align CI skips for parallel-sensitive temp-worktree tests**
   (`.github/workflows/ci.yml`) — the Ubuntu release gate skips two known
   environment-sensitive tests that pass in isolation but can race under the

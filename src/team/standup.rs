@@ -934,7 +934,6 @@ mod tests {
         };
         let team_config = TeamConfig {
             name: "test".to_string(),
-            workspace_type: crate::team::config::WorkspaceType::Generic,
             trunk_branch: crate::team::config::default_trunk_branch(),
             agent: None,
             workflow_mode: WorkflowMode::Legacy,
@@ -1018,7 +1017,6 @@ mod tests {
         };
         let team_config = TeamConfig {
             name: "test".to_string(),
-            workspace_type: crate::team::config::WorkspaceType::Generic,
             trunk_branch: crate::team::config::default_trunk_branch(),
             agent: None,
             workflow_mode: WorkflowMode::Legacy,
@@ -1132,7 +1130,6 @@ mod tests {
         };
         let team_config = TeamConfig {
             name: "test".to_string(),
-            workspace_type: crate::team::config::WorkspaceType::Generic,
             trunk_branch: crate::team::config::default_trunk_branch(),
             agent: None,
             workflow_mode: WorkflowMode::Legacy,
@@ -1516,7 +1513,6 @@ last_verified: 2026-04-05
         };
         let team_config = TeamConfig {
             name: "test".to_string(),
-            workspace_type: crate::team::config::WorkspaceType::Generic,
             trunk_branch: crate::team::config::default_trunk_branch(),
             agent: None,
             workflow_mode: WorkflowMode::Legacy,
@@ -1584,7 +1580,6 @@ last_verified: 2026-04-05
         };
         let team_config = TeamConfig {
             name: "test".to_string(),
-            workspace_type: crate::team::config::WorkspaceType::Generic,
             trunk_branch: crate::team::config::default_trunk_branch(),
             agent: None,
             workflow_mode: WorkflowMode::Legacy,
@@ -1644,7 +1639,6 @@ last_verified: 2026-04-05
         };
         let team_config = TeamConfig {
             name: "test".to_string(),
-            workspace_type: crate::team::config::WorkspaceType::Generic,
             trunk_branch: crate::team::config::default_trunk_branch(),
             agent: None,
             workflow_mode: WorkflowMode::Legacy,
@@ -1704,7 +1698,6 @@ last_verified: 2026-04-05
         };
         let team_config = TeamConfig {
             name: "test".to_string(),
-            workspace_type: crate::team::config::WorkspaceType::Generic,
             trunk_branch: crate::team::config::default_trunk_branch(),
             agent: None,
             workflow_mode: WorkflowMode::Legacy,
@@ -1741,7 +1734,6 @@ last_verified: 2026-04-05
     fn standup_interval_for_unknown_member_returns_none() {
         let team_config = TeamConfig {
             name: "test".to_string(),
-            workspace_type: crate::team::config::WorkspaceType::Generic,
             trunk_branch: crate::team::config::default_trunk_branch(),
             agent: None,
             workflow_mode: WorkflowMode::Legacy,
@@ -1798,7 +1790,6 @@ last_verified: 2026-04-05
         };
         let team_config = TeamConfig {
             name: "test".to_string(),
-            workspace_type: crate::team::config::WorkspaceType::Generic,
             trunk_branch: crate::team::config::default_trunk_branch(),
             agent: None,
             workflow_mode: WorkflowMode::Legacy,
@@ -1896,7 +1887,6 @@ last_verified: 2026-04-05
         };
         let team_config = TeamConfig {
             name: "test".to_string(),
-            workspace_type: crate::team::config::WorkspaceType::Generic,
             trunk_branch: crate::team::config::default_trunk_branch(),
             agent: None,
             workflow_mode: WorkflowMode::Legacy,
@@ -1995,7 +1985,6 @@ last_verified: 2026-04-05
         };
         let team_config = TeamConfig {
             name: "test".to_string(),
-            workspace_type: crate::team::config::WorkspaceType::Generic,
             trunk_branch: crate::team::config::default_trunk_branch(),
             agent: None,
             workflow_mode: WorkflowMode::Legacy,

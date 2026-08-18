@@ -8,7 +8,6 @@ see [reference/config.md](reference/config.md).
 
 ```yaml
 name: my-project
-workspace_type: generic
 agent: claude
 workflow_mode: hybrid
 use_shim: true
@@ -172,14 +171,6 @@ roles:
 ## `board`
 
 `board` controls the daemon's view of runnable work.
-
-## `workspace_type`
-
-`workspace_type` defaults to `generic`. Set `workspace_type: workspace` only for
-workspace-style multi-repo workspaces where the project root is the workspace
-`src/` directory. In workspace mode, engineer repos are created under sibling
-workspace roots like `.batty-workspace/<engineer>/src/<repo>` and Batty runs the
-workspace registration hook when the local `workspace` CLI is available.
 
 - `auto_dispatch`: assign `todo` work to idle engineers automatically
 - `auto_replenish`: create planning pressure when backlog runs dry

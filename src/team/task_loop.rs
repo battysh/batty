@@ -16,8 +16,8 @@ const SHARED_CARGO_CONFIG_MARKER: &str = "# Managed by Batty: shared cargo targe
 const WORKTREE_EXCLUDE_MARKER: &str = "# Managed by Batty worktree ignores";
 
 /// Resolve the default branch for a repo (mainline/main/master/trunk). Falls
-/// back to "main" for legacy compatibility. Patched for internal GitFarm which
-/// uses "mainline".
+/// back to "main" for legacy compatibility. Patched for hosts that default to
+/// "mainline".
 fn default_branch(repo: &Path) -> String {
     git_cmd::default_branch_name(repo).unwrap_or_else(|| "main".to_string())
 }

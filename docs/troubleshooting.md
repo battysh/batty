@@ -76,9 +76,8 @@ for package_dir in "${HOME}"/.aim/packages/*; do
 done
 ```
 
-Run that in the DevSpace startup hook before AIM package discovery. If a public
-upstream AIM issue or PR becomes available, add its link to `planning/issues.md`
-and keep this workaround until the soft-delete behavior is fixed.
+Run that in the DevSpace startup hook before AIM package discovery. Keep this
+workaround until the soft-delete behavior is fixed.
 
 ## MCP servers collide between concurrent engineers
 

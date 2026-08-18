@@ -664,7 +664,6 @@ mod tests {
     fn test_team_config(models: HashMap<String, ModelPricing>) -> TeamConfig {
         TeamConfig {
             name: "batty".to_string(),
-            workspace_type: crate::team::config::WorkspaceType::Generic,
             trunk_branch: crate::team::config::default_trunk_branch(),
             agent: None,
             workflow_mode: WorkflowMode::Legacy,

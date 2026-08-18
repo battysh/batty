@@ -317,7 +317,7 @@ Detects OpenAI Codex CLI patterns:
 
 #### 3.4.3 Kiro Classifier
 
-Detects internal Kiro CLI patterns:
+Detects Kiro CLI patterns:
 
 **Idle detection:**
 - Line matches: `Kiro>`, `kiro>`, `Kiro >`, `kiro >`, or bare `>` at line end

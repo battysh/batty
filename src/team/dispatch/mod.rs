@@ -268,7 +268,6 @@ impl TeamDaemon {
                 }
                 prepare_workspace_assignment_worktree(WorkspaceAssignmentWorktree {
                     project_root: &project_root,
-                    workspace_type: self.config.team_config.workspace_type,
                     worktree_dir: &work_dir,
                     engineer_name: engineer,
                     task_branch,

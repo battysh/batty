@@ -25,7 +25,6 @@ use crate::team::task_loop::{
     branch_is_merged_into, current_worktree_branch, engineer_base_branch_name,
 };
 use crate::team::watcher::SessionWatcher;
-use crate::team::workspace::remove_empty_workspace_workspace_root;
 use crate::tmux;
 
 impl TeamDaemon {
@@ -317,9 +316,6 @@ impl TeamDaemon {
                 .unwrap_or(false)
             {
                 std::fs::remove_dir(&worktree_dir)?;
-            }
-            if self.config.team_config.workspace_type.is_workspace() {
-                remove_empty_workspace_workspace_root(&project_root, name)?;
             }
         } else {
             self.cleanup_removed_member_git_worktree(name, &project_root, &worktree_dir)?;

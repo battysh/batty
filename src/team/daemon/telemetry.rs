@@ -1125,7 +1125,6 @@ mod tests {
             project_root: project_root.to_path_buf(),
             team_config: TeamConfig {
                 name: "test".to_string(),
-                workspace_type: crate::team::config::WorkspaceType::Generic,
                 trunk_branch: crate::team::config::default_trunk_branch(),
                 agent: None,
                 workflow_mode,
@@ -1299,7 +1298,6 @@ mod tests {
                 project_root: tmp.path().to_path_buf(),
                 team_config: TeamConfig {
                     name: "test".to_string(),
-                    workspace_type: crate::team::config::WorkspaceType::Generic,
                     trunk_branch: crate::team::config::default_trunk_branch(),
                     agent: None,
                     workflow_mode: WorkflowMode::Legacy,
@@ -1703,7 +1701,6 @@ mod tests {
             project_root: tmp.path().to_path_buf(),
             team_config: TeamConfig {
                 name: "test".to_string(),
-                workspace_type: crate::team::config::WorkspaceType::Generic,
                 trunk_branch: crate::team::config::default_trunk_branch(),
                 agent: None,
                 workflow_mode: WorkflowMode::Hybrid,
@@ -1784,7 +1781,6 @@ mod tests {
                 project_root: tmp.path().to_path_buf(),
                 team_config: TeamConfig {
                     name: "test".to_string(),
-                    workspace_type: crate::team::config::WorkspaceType::Generic,
                     trunk_branch: crate::team::config::default_trunk_branch(),
                     agent: None,
                     workflow_mode: WorkflowMode::Legacy,

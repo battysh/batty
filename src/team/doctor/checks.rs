@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use super::super::artifact::read_test_timing_log;
-use super::super::config::{RoleType, WorkspaceType};
+use super::super::config::RoleType;
 use super::super::git_cmd;
 use super::super::hierarchy::MemberInstance;
 use super::util::{
@@ -93,7 +93,6 @@ pub(super) fn build_resume_eligibility(
 
 pub(super) fn build_worktree_statuses(
     project_root: &Path,
-    workspace_type: WorkspaceType,
     members: &[MemberInstance],
 ) -> Vec<WorktreeStatus> {
     members
@@ -101,7 +100,7 @@ pub(super) fn build_worktree_statuses(
         .filter(|member| member.role_type == RoleType::Engineer)
         .flat_map(|member| {
             let path = if member.use_worktrees {
-                engineer_workspace_dir(project_root, workspace_type, &member.name)
+                engineer_workspace_dir(project_root, &member.name)
             } else {
                 project_root.to_path_buf()
             };
@@ -1222,7 +1221,7 @@ roles:
         ];
         let tmp = tempfile::tempdir().unwrap();
 
-        let statuses = build_worktree_statuses(tmp.path(), WorkspaceType::Generic, &members);
+        let statuses = build_worktree_statuses(tmp.path(), &members);
 
         assert_eq!(statuses.len(), 1);
         assert_eq!(statuses[0].member, "eng-1");
@@ -1230,7 +1229,7 @@ roles:
 
     #[test]
     fn build_worktree_statuses_fans_out_per_sub_repo_for_multi_repo_worktree() {
-        // B-1(1.3): in a workspace multi-repo workspace, the engineer's worktree
+        // B-1(1.3): in a multi-repo workspace, the engineer's worktree
         // root is NOT a git repo — it holds per-package git worktrees. doctor
         // must emit one status per sub-repo with member-qualified name.
         use std::process::Command;
@@ -1287,7 +1286,7 @@ roles:
             use_worktrees: true,
         }];
 
-        let statuses = build_worktree_statuses(project_root, WorkspaceType::Generic, &members);
+        let statuses = build_worktree_statuses(project_root, &members);
 
         // One row per sub-repo (not one row for the container with missing status).
         assert_eq!(

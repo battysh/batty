@@ -29,7 +29,7 @@ impl TeamDaemon {
         if needs_git {
             if self.is_multi_repo {
                 // Multi-repo mode: project root is not a git repo (by design
-                // — it's a workspace-style workspace holding multiple sibling
+                // — it's a workspace holding multiple sibling
                 // git packages). Skip the root check; worktrees are created
                 // per sub-repo by dispatch/mod.rs which already handles
                 // discover_sub_repos.
@@ -551,7 +551,6 @@ mod tests {
             project_root: repo.clone(),
             team_config: TeamConfig {
                 name: "test".to_string(),
-                workspace_type: crate::team::config::WorkspaceType::Generic,
                 trunk_branch: crate::team::config::default_trunk_branch(),
                 agent: None,
                 workflow_mode: WorkflowMode::Hybrid,
@@ -770,7 +769,6 @@ mod tests {
             project_root: tmp.path().to_path_buf(),
             team_config: TeamConfig {
                 name: "test".to_string(),
-                workspace_type: crate::team::config::WorkspaceType::Generic,
                 trunk_branch: crate::team::config::default_trunk_branch(),
                 agent: None,
                 workflow_mode: WorkflowMode::Legacy,
@@ -875,7 +873,6 @@ mod tests {
             project_root: tmp.path().to_path_buf(),
             team_config: TeamConfig {
                 name: "test".to_string(),
-                workspace_type: crate::team::config::WorkspaceType::Generic,
                 trunk_branch: crate::team::config::default_trunk_branch(),
                 agent: None,
                 workflow_mode: WorkflowMode::Legacy,

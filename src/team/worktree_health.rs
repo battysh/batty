@@ -39,12 +39,11 @@ pub fn run(project_root: &Path) -> Result<String> {
 fn collect_worktree_health(project_root: &Path) -> Result<Vec<WorktreeHealth>> {
     let team_config = super::config::TeamConfig::load(&super::team_config_path(project_root))?;
     let members = hierarchy::resolve_hierarchy(&team_config)?;
-    let sub_repo_names =
-        if team_config.workspace_type.is_workspace() || !super::git_cmd::is_git_repo(project_root) {
-            discover_sub_repo_names(project_root)
-        } else {
-            Vec::new()
-        };
+    let sub_repo_names = if !super::git_cmd::is_git_repo(project_root) {
+        discover_sub_repo_names(project_root)
+    } else {
+        Vec::new()
+    };
     let is_multi_repo = !sub_repo_names.is_empty();
     let registered_worktrees = if is_multi_repo {
         registered_multi_repo_worktree_paths(project_root, &sub_repo_names)?
@@ -57,7 +56,7 @@ fn collect_worktree_health(project_root: &Path) -> Result<Vec<WorktreeHealth>> {
         .filter(|member| member.role_type == RoleType::Engineer)
         .map(|member| {
             let path = if member.use_worktrees {
-                engineer_workspace_dir(project_root, team_config.workspace_type, &member.name)
+                engineer_workspace_dir(project_root, &member.name)
             } else {
                 project_root.to_path_buf()
             };
@@ -367,14 +366,7 @@ fn behind_main_count(project_root: &Path, path: &Path) -> Option<u64> {
     let _ahead = parts.next()?;
     let behind = parts.next()?.parse::<u64>().ok()?;
 
-    let workspace_root = project_root
-        .parent()
-        .map(|parent| parent.join(".batty-workspace"));
-    if path.starts_with(project_root)
-        || workspace_root
-            .as_ref()
-            .is_some_and(|root| path.starts_with(root))
-    {
+    if path.starts_with(project_root) {
         Some(behind)
     } else {
         None
@@ -497,11 +489,11 @@ mod tests {
     }
 
     #[test]
-    fn workspace_sibling_worktree_reports_registration_and_staleness() {
+    fn multi_repo_worktree_reports_registration_and_staleness() {
         let tmp = tempfile::tempdir().unwrap();
         let project_root = tmp.path().join("src");
         let repo_root = project_root.join("pkg-a");
-        let worktree_root = tmp.path().join(".batty-workspace").join("eng-1").join("src");
+        let worktree_root = project_root.join(".batty").join("worktrees").join("eng-1");
         let worktree = worktree_root.join("pkg-a");
         std::fs::create_dir_all(&repo_root).unwrap();
         std::fs::create_dir_all(&worktree_root).unwrap();

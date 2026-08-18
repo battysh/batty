@@ -52,7 +52,6 @@ use super::task_loop::{
 };
 use super::verification::VerificationState;
 use super::watcher::{SessionWatcher, WatcherState};
-use super::workspace::engineer_workspace_dir;
 use super::{AssignmentDeliveryResult, AssignmentResultStatus, now_unix, store_assignment_result};
 use crate::agent::{self, BackendHealth};
 use crate::tmux;
@@ -577,7 +576,7 @@ impl TeamDaemon {
     pub fn new(config: DaemonConfig) -> Result<Self> {
         let is_git_repo = super::git_cmd::is_git_repo(&config.project_root);
         let (is_multi_repo, sub_repo_names) =
-            if is_git_repo && !config.team_config.workspace_type.is_workspace() {
+            if is_git_repo {
                 (false, Vec::new())
             } else {
                 let subs = super::git_cmd::discover_sub_repos(&config.project_root);
@@ -1122,14 +1121,6 @@ impl TeamDaemon {
     }
 
     pub(super) fn worktree_dir(&self, engineer: &str) -> PathBuf {
-        if self.config.team_config.workspace_type.is_workspace() {
-            return engineer_workspace_dir(
-                &self.config.project_root,
-                self.config.team_config.workspace_type,
-                engineer,
-            );
-        }
-
         let base = self.config.project_root.join(".batty").join("worktrees");
         match self.member_barrier_group(engineer) {
             Some(group) if self.config.team_config.workflow_policy.clean_room_mode => {
